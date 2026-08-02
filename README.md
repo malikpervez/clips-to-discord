@@ -1,0 +1,76 @@
+# Moments to Discord
+
+A small Windows tray app that uploads new SteelSeries GG Moments clips to a Discord channel through a webhook.
+
+## What it does
+
+- Asks for only the SteelSeries clips folder and a Discord webhook URL.
+- Encrypts the webhook for the current Windows account using Windows DPAPI.
+- Starts the clip watcher when Discord opens and stops it when Discord closes.
+- Uploads only new `.mp4` files from the top level of the selected folder.
+- Moves successfully uploaded originals into an `uploaded` subfolder.
+- Preserves duplicate filenames by adding a unique suffix.
+- Compresses clips rejected for size when `ffmpeg.exe` is bundled beside the app or available on `PATH`.
+- Can start automatically when the user signs into Windows.
+
+The app is not affiliated with SteelSeries or Discord.
+
+## Friend setup
+
+1. Download `MomentsToDiscord-win-x64.zip` from the repository's Releases page.
+2. Extract the entire folder somewhere permanent.
+3. Run `MomentsToDiscord.exe`.
+4. Select the folder where SteelSeries GG saves Moments clips.
+5. Paste the Discord webhook URL and optionally click **Test webhook**.
+6. Click **Save**.
+
+The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord is running.
+
+The executable is not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign it with a trusted code-signing certificate.
+
+## Webhook safety
+
+A Discord webhook URL grants permission to post to its channel. Never commit one to source control, screenshots, logs, or issues. If a URL is exposed, delete or rotate the webhook in Discord immediately.
+
+The saved URL is encrypted with DPAPI and can only be decrypted by the same Windows user account on the same Windows installation.
+
+## Build from source
+
+Requirements:
+
+- Windows 10 or 11
+- .NET 8 SDK or newer
+
+```powershell
+dotnet build .\MomentsToDiscord.csproj -c Release
+```
+
+Create a self-contained package without FFmpeg:
+
+```powershell
+.\scripts\package.ps1
+```
+
+Create a package with FFmpeg compression support:
+
+```powershell
+.\scripts\package.ps1 `
+  -FfmpegPath 'C:\path\to\ffmpeg.exe' `
+  -FfmpegLicensePath 'C:\path\to\FFmpeg\LICENSE'
+```
+
+FFmpeg binaries are intentionally not committed to this repository. If you distribute an FFmpeg binary, include its corresponding license and comply with that build's license terms.
+
+## Local data
+
+Settings, state, and logs are stored in:
+
+```text
+%LOCALAPPDATA%\MomentsToDiscord
+```
+
+The Windows startup entry is stored under the current user's standard `Run` registry key.
+
+## License
+
+The application source is licensed under the MIT License. Bundled FFmpeg builds are governed by their own license; see `THIRD_PARTY_NOTICES.md`.
