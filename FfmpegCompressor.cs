@@ -30,6 +30,12 @@ internal static partial class FfmpegCompressor
         int targetMegabytes,
         CancellationToken cancellationToken)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "FFmpeg two-pass compression uses the Windows NUL device and is only supported on Windows.");
+        }
+
         var probe = await RunAsync(
             ffmpegPath,
             ["-hide_banner", "-i", inputPath],

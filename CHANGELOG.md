@@ -2,6 +2,13 @@
 
 All notable user-facing changes are documented here.
 
+## 1.2.1 — 2026-08-02
+
+- Added an explicit 20-second minimum age to the existing two-observation file-stability check.
+- Changed readiness, hashing, and upload reads to allow other readers while denying concurrent writers.
+- Log a stuck readiness probe after three consecutive open failures, with five-minute log throttling.
+- Guarded FFmpeg's `NUL` first-pass output with an explicit Windows platform check.
+
 ## 1.2.0 — 2026-08-02
 
 - Replaced the single readiness check with length-and-timestamp stability observations plus exponential lock backoff.

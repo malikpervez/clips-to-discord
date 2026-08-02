@@ -14,7 +14,7 @@ Check these in order:
 2. The tray status says it is watching for clips.
 3. The selected directory is the folder containing the new `.mp4`, not the `uploaded` folder.
 4. The clip is a top-level `.mp4`. Nested directories and other formats are ignored.
-5. The recording tool has finished writing the file. The app requires matching length and timestamp observations across ten seconds and successful shared-read access before queueing it.
+5. The recording tool has finished writing the file. The app requires the last write to be at least twenty seconds old, matching length and timestamp observations across ten seconds, and a read handle that denies concurrent writers before queueing it.
 6. The webhook still exists and points to the intended channel.
 
 Clips already present during the first scan are recorded as a safe baseline and are not uploaded automatically.

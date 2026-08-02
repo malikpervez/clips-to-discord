@@ -2,6 +2,8 @@ namespace ClipsToDiscord;
 
 public sealed class FileReadinessTracker
 {
+    public const int StuckLogThreshold = 3;
+    private static readonly TimeSpan MinimumAge = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan StableWindow = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan InitialBackoff = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan MaximumBackoff = TimeSpan.FromMinutes(5);
@@ -17,7 +19,7 @@ public sealed class FileReadinessTracker
                 Length = file.Length,
                 LastWriteTimeUtc = file.LastWriteTimeUtc,
                 StableSinceUtc = utcNow,
-                NextCheckUtc = utcNow.Add(StableWindow)
+                NextCheckUtc = NextStabilityCheck(file.LastWriteTimeUtc, utcNow)
             };
             _observations[file.FullName] = observation;
             return FileReadinessResult.Waiting(observation.NextCheckUtc, "waiting for a second stable observation");
@@ -34,23 +36,27 @@ public sealed class FileReadinessTracker
             observation.LastWriteTimeUtc = file.LastWriteTimeUtc;
             observation.StableSinceUtc = utcNow;
             observation.FailedOpenAttempts = 0;
-            observation.NextCheckUtc = utcNow.Add(StableWindow);
+            observation.NextCheckUtc = NextStabilityCheck(file.LastWriteTimeUtc, utcNow);
             return FileReadinessResult.Waiting(observation.NextCheckUtc, "file length or timestamp is still changing");
         }
 
-        if (file.Length <= 0 || utcNow - observation.StableSinceUtc < StableWindow)
+        if (file.Length <= 0 ||
+            utcNow - observation.StableSinceUtc < StableWindow ||
+            utcNow - file.LastWriteTimeUtc < MinimumAge)
         {
-            observation.NextCheckUtc = utcNow.Add(StableWindow);
-            return FileReadinessResult.Waiting(observation.NextCheckUtc, "file has not been stable long enough");
+            observation.NextCheckUtc = NextStabilityCheck(file.LastWriteTimeUtc, utcNow);
+            return FileReadinessResult.Waiting(observation.NextCheckUtc, "file is not old and stable enough");
         }
 
         try
         {
+            // Other readers are harmless, but denying write sharing prevents a recorder
+            // from resuming writes after the stability observations.
             using var stream = new FileStream(
                 file.FullName,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
+                FileShare.Read);
             if (stream.Length != observation.Length)
             {
                 observation.Length = stream.Length;
@@ -90,8 +96,14 @@ public sealed class FileReadinessTracker
             InitialBackoff.TotalSeconds * Math.Pow(2, exponent),
             MaximumBackoff.TotalSeconds);
         observation.NextCheckUtc = utcNow.AddSeconds(delaySeconds);
-        return FileReadinessResult.Waiting(observation.NextCheckUtc, reason);
+        return FileReadinessResult.Waiting(
+            observation.NextCheckUtc,
+            reason,
+            observation.FailedOpenAttempts);
     }
+
+    private static DateTime NextStabilityCheck(DateTime lastWriteTimeUtc, DateTime utcNow) =>
+        new[] { utcNow.Add(StableWindow), lastWriteTimeUtc.Add(MinimumAge) }.Max();
 
     private sealed class Observation
     {
@@ -103,9 +115,16 @@ public sealed class FileReadinessTracker
     }
 }
 
-public sealed record FileReadinessResult(bool IsReady, DateTime NextCheckUtc, string Reason)
+public sealed record FileReadinessResult(
+    bool IsReady,
+    DateTime NextCheckUtc,
+    string Reason,
+    int ConsecutiveOpenFailures)
 {
-    public static FileReadinessResult Ready() => new(true, DateTime.MinValue, string.Empty);
-    public static FileReadinessResult Waiting(DateTime nextCheckUtc, string reason) =>
-        new(false, nextCheckUtc, reason);
+    public static FileReadinessResult Ready() => new(true, DateTime.MinValue, string.Empty, 0);
+    public static FileReadinessResult Waiting(
+        DateTime nextCheckUtc,
+        string reason,
+        int consecutiveOpenFailures = 0) =>
+        new(false, nextCheckUtc, reason, consecutiveOpenFailures);
 }

@@ -37,7 +37,8 @@ flowchart LR
 
 ## Reliability choices
 
-- Files need matching length and timestamp observations at least ten seconds apart.
+- Files must be at least twenty seconds past their last write and need matching length and timestamp observations at least ten seconds apart.
+- Read probes allow other readers but deny concurrent writers; three consecutive open failures produce a throttled stuck-file log.
 - Read access uses shared mode for recorder compatibility; failures back off exponentially up to five minutes.
 - SHA-256 identity survives file, folder, and timestamp renames at the cost of one full local read per new clip.
 - Two workers isolate the queue from one slow request; each HTTP upload has a five-minute deadline and connection establishment has a 15-second deadline.

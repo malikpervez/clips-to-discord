@@ -27,6 +27,7 @@ try
 
     var readinessPath = Path.Combine(temporaryRoot, "readiness.mp4");
     await File.WriteAllBytesAsync(readinessPath, new byte[] { 1, 2, 3, 4 });
+    File.SetLastWriteTimeUtc(readinessPath, DateTime.UtcNow.AddMinutes(-1));
     var readinessTracker = new FileReadinessTracker();
     var firstObservationAt = DateTime.UtcNow;
     var firstObservation = readinessTracker.Observe(new FileInfo(readinessPath), firstObservationAt);
@@ -36,25 +37,67 @@ try
     Assert(!firstObservation.IsReady, "A file must not be ready on its first observation.");
     Assert(stableObservation.IsReady, "An unchanged readable file must become ready after the stability window.");
 
+    var changingPath = Path.Combine(temporaryRoot, "changing.mp4");
+    await File.WriteAllBytesAsync(changingPath, new byte[] { 1, 2, 3 });
+    File.SetLastWriteTimeUtc(changingPath, DateTime.UtcNow.AddMinutes(-1));
+    var changingTracker = new FileReadinessTracker();
+    var changingObservedAt = DateTime.UtcNow;
+    changingTracker.Observe(new FileInfo(changingPath), changingObservedAt);
+    await File.AppendAllTextAsync(changingPath, "more data");
+    var changedObservation = changingTracker.Observe(
+        new FileInfo(changingPath),
+        changingObservedAt.AddSeconds(11));
+    Assert(!changedObservation.IsReady, "A file whose length changed between observations must not be ready.");
+
+    var youngPath = Path.Combine(temporaryRoot, "young.mp4");
+    await File.WriteAllBytesAsync(youngPath, new byte[] { 4, 3, 2, 1 });
+    var youngLastWrite = File.GetLastWriteTimeUtc(youngPath);
+    var youngTracker = new FileReadinessTracker();
+    youngTracker.Observe(new FileInfo(youngPath), youngLastWrite);
+    var youngObservation = youngTracker.Observe(new FileInfo(youngPath), youngLastWrite.AddSeconds(11));
+    var oldEnoughObservation = youngTracker.Observe(new FileInfo(youngPath), youngLastWrite.AddSeconds(21));
+    Assert(!youngObservation.IsReady, "A stable file younger than 20 seconds must not be ready.");
+    Assert(oldEnoughObservation.IsReady, "A stable file older than 20 seconds must become ready.");
+
+    var sharedReaderPath = Path.Combine(temporaryRoot, "shared-reader.mp4");
+    await File.WriteAllBytesAsync(sharedReaderPath, new byte[] { 8, 7, 6, 5 });
+    File.SetLastWriteTimeUtc(sharedReaderPath, DateTime.UtcNow.AddMinutes(-1));
+    var sharedReaderTracker = new FileReadinessTracker();
+    var sharedReaderObservedAt = DateTime.UtcNow;
+    sharedReaderTracker.Observe(new FileInfo(sharedReaderPath), sharedReaderObservedAt);
+    using (var reader = new FileStream(sharedReaderPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+    {
+        var sharedReaderResult = sharedReaderTracker.Observe(
+            new FileInfo(sharedReaderPath),
+            sharedReaderObservedAt.AddSeconds(11));
+        Assert(sharedReaderResult.IsReady, "Another reader must not permanently block a completed clip.");
+    }
+
     var lockedPath = Path.Combine(temporaryRoot, "locked.mp4");
     await File.WriteAllBytesAsync(lockedPath, new byte[] { 5, 6, 7, 8 });
+    File.SetLastWriteTimeUtc(lockedPath, DateTime.UtcNow.AddMinutes(-1));
     var lockedTracker = new FileReadinessTracker();
     var lockedObservedAt = DateTime.UtcNow;
     lockedTracker.Observe(new FileInfo(lockedPath), lockedObservedAt);
     FileReadinessResult lockedResult;
     FileReadinessResult secondLockedResult;
-    using (var lockedStream = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+    FileReadinessResult thirdLockedResult;
+    using (var lockedStream = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
     {
         lockedResult = lockedTracker.Observe(new FileInfo(lockedPath), lockedObservedAt.AddSeconds(11));
         secondLockedResult = lockedTracker.Observe(new FileInfo(lockedPath), lockedObservedAt.AddSeconds(22));
+        thirdLockedResult = lockedTracker.Observe(new FileInfo(lockedPath), lockedObservedAt.AddSeconds(43));
     }
-    Assert(!lockedResult.IsReady, "An exclusively locked file must not be ready.");
+    Assert(!lockedResult.IsReady, "A file with an active writer must not be ready.");
     Assert(
         lockedResult.NextCheckUtc > lockedObservedAt.AddSeconds(11),
         "A locked file must receive a future retry time.");
     Assert(
         secondLockedResult.NextCheckUtc - lockedObservedAt.AddSeconds(22) >= TimeSpan.FromSeconds(20),
         "Repeated lock failures must increase the readiness backoff.");
+    Assert(
+        thirdLockedResult.ConsecutiveOpenFailures == FileReadinessTracker.StuckLogThreshold,
+        "A repeatedly writer-locked file must reach the explicit stuck-log threshold.");
 
     var identityPath = Path.Combine(temporaryRoot, "identity.mp4");
     await File.WriteAllBytesAsync(identityPath, new byte[] { 10, 20, 30, 40, 50 });
