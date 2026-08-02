@@ -1,38 +1,39 @@
-# Moments to Discord
+# Clips to Discord
 
-A small Windows tray app that uploads new SteelSeries GG Moments clips to a Discord channel through a webhook.
+A Windows tray app that uploads new MP4 clips from any chosen folder to a Discord channel through a webhook.
 
-[Download the latest release](https://github.com/malikpervez/moments-to-discord/releases/latest) · [Setup guide](docs/SETUP.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Privacy and security](docs/PRIVACY.md)
+[Download the latest release](https://github.com/malikpervez/clips-to-discord/releases/latest) · [Setup guide](docs/SETUP.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Privacy and security](docs/PRIVACY.md)
 
 ## What it does
 
-- Asks for only the SteelSeries clips folder and a Discord webhook URL.
+- Works with any recorder, clipping tool, replay buffer, editor, or export workflow that saves `.mp4` files into a folder.
+- Asks for only the clips folder and a Discord webhook URL.
 - Encrypts the webhook for the current Windows account using Windows DPAPI.
-- Starts the clip watcher when Discord opens and stops it when Discord closes.
+- Starts the folder watcher when Discord opens and stops it when Discord closes.
 - Uploads only new `.mp4` files from the top level of the selected folder.
 - Moves successfully uploaded originals into an `uploaded` subfolder.
 - Preserves duplicate filenames by adding a unique suffix.
 - Compresses clips rejected for size when `ffmpeg.exe` is bundled beside the app or available on `PATH`.
 - Can start automatically when the user signs into Windows.
 
-The app is not affiliated with SteelSeries or Discord.
+The app is not affiliated with Discord or any recording-software vendor.
 
-## Friend setup
+## Quick setup
 
-1. Download `MomentsToDiscord-win-x64.zip` from the [latest release](https://github.com/malikpervez/moments-to-discord/releases/latest).
+1. Download `ClipsToDiscord-win-x64.zip` from the [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
 2. Extract the entire folder somewhere permanent.
-3. Run `MomentsToDiscord.exe`.
-4. Select the folder where SteelSeries GG saves Moments clips.
+3. Run `ClipsToDiscord.exe`.
+4. Select the folder where your clipping or recording tool saves finished MP4 clips.
 5. Paste the Discord webhook URL and optionally click **Test webhook**.
 6. Click **Save**.
 
-Each release also includes `SHA256SUMS.txt` so the downloaded ZIP can be verified with `Get-FileHash` before it is opened.
+Each release includes `SHA256SUMS.txt` so the downloaded ZIP can be verified with `Get-FileHash` before it is opened.
 
-The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord is running.
+The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord desktop is running.
 
 The executable is not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign it with a trusted code-signing certificate.
 
-For screenshots and more detail about locating the SteelSeries folder and creating the webhook, see the [complete setup guide](docs/SETUP.md).
+See the [complete setup guide](docs/SETUP.md) for folder-selection and webhook instructions.
 
 ## Documentation
 
@@ -58,7 +59,7 @@ Requirements:
 - .NET 8 SDK or newer
 
 ```powershell
-dotnet build .\MomentsToDiscord.csproj -c Release
+dotnet build .\ClipsToDiscord.csproj -c Release
 ```
 
 Create a self-contained package without FFmpeg:
@@ -82,8 +83,10 @@ FFmpeg binaries are intentionally not committed to this repository. If you distr
 Settings, state, and logs are stored in:
 
 ```text
-%LOCALAPPDATA%\MomentsToDiscord
+%LOCALAPPDATA%\ClipsToDiscord
 ```
+
+Version 1.1 automatically copies compatible settings and state from the legacy `%LOCALAPPDATA%\MomentsToDiscord` folder when needed.
 
 The Windows startup entry is stored under the current user's standard `Run` registry key.
 

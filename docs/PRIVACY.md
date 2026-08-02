@@ -2,13 +2,13 @@
 
 ## Data flow
 
-Moments to Discord runs locally. It scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS.
+Clips to Discord runs locally. It scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS.
 
 The app has no analytics, advertising, account system, telemetry service, or project-operated server.
 
 ## Local data
 
-The app stores the following under `%LOCALAPPDATA%\MomentsToDiscord`:
+The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`:
 
 - The chosen clips-folder path
 - The start-with-Windows preference
@@ -26,7 +26,7 @@ Normal operation connects only to the Discord webhook URL supplied by the user. 
 ## File handling
 
 - Existing clips are ignored during the initial baseline.
-- New top-level `.mp4` clips are read after SteelSeries finishes writing them.
+- New top-level `.mp4` clips are read after the source application finishes writing them.
 - Successfully uploaded originals move into the local `uploaded` subfolder.
 - Temporary compressed files are deleted after the upload attempt.
 - Duplicate destination names receive a unique suffix and are never overwritten.

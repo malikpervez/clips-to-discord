@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal sealed class WatchStateStore
 {

@@ -1,4 +1,4 @@
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal sealed class UploaderWorker(AppSettings settings, Action<string> reportStatus)
 {

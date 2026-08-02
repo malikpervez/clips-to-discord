@@ -3,7 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal sealed class DiscordWebhookClient : IDisposable
 {
@@ -13,7 +13,7 @@ internal sealed class DiscordWebhookClient : IDisposable
     {
         var payload = JsonSerializer.Serialize(new
         {
-            content = "**Moments to Discord connected.** Future clips will appear here automatically.",
+            content = "**Clips to Discord connected.** Future clips will appear here automatically.",
             allowed_mentions = new { parse = Array.Empty<string>() }
         });
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
@@ -110,7 +110,7 @@ internal sealed class DiscordWebhookClient : IDisposable
         var safe = new string(Path.GetFileName(fileName)
             .Select(character => character is >= ' ' and <= '~' ? character : '_')
             .ToArray());
-        return string.IsNullOrWhiteSpace(safe) ? "SteelSeries-clip.mp4" : safe;
+        return string.IsNullOrWhiteSpace(safe) ? "clip.mp4" : safe;
     }
 
     private static void TryDelete(string path)

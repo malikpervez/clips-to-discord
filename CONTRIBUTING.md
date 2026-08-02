@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Moments to Discord.
+Thanks for helping improve Clips to Discord.
 
 ## Development setup
 
@@ -9,7 +9,7 @@ Thanks for helping improve Moments to Discord.
 3. Build the Release configuration:
 
    ```powershell
-   dotnet build .\MomentsToDiscord.csproj -c Release
+   dotnet build .\ClipsToDiscord.csproj -c Release
    ```
 
 4. Run the app from the build output or create a package with `scripts\package.ps1`.

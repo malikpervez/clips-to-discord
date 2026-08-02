@@ -1,16 +1,16 @@
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal static class Program
 {
     [STAThread]
     private static void Main()
     {
-        using var mutex = new Mutex(true, @"Local\MomentsToDiscord_Application", out var createdNew);
+        using var mutex = new Mutex(true, @"Local\ClipsToDiscord_Application", out var createdNew);
         if (!createdNew)
         {
             MessageBox.Show(
-                "Moments to Discord is already running in the notification area.",
-                "Moments to Discord",
+                "Clips to Discord is already running in the notification area.",
+                "Clips to Discord",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
             return;

@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal sealed record AppSettings(string ClipsFolder, string WebhookUrl, bool StartWithWindows)
 {
@@ -18,6 +18,10 @@ internal static class SettingsStore
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     public static string DataDirectory { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ClipsToDiscord");
+
+    private static string LegacyDataDirectory => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "MomentsToDiscord");
 
     private static string SettingsPath => Path.Combine(DataDirectory, "settings.json");
@@ -26,6 +30,7 @@ internal static class SettingsStore
     {
         try
         {
+            MigrateLegacyData();
             if (!File.Exists(SettingsPath))
             {
                 return AppSettings.Empty;
@@ -48,6 +53,22 @@ internal static class SettingsStore
         {
             Log.Error("Could not load settings.", exception);
             return AppSettings.Empty;
+        }
+    }
+
+    private static void MigrateLegacyData()
+    {
+        if (!Directory.Exists(LegacyDataDirectory)) return;
+
+        Directory.CreateDirectory(DataDirectory);
+        foreach (var fileName in new[] { "settings.json", "state.json", "app.log" })
+        {
+            var sourcePath = Path.Combine(LegacyDataDirectory, fileName);
+            var destinationPath = Path.Combine(DataDirectory, fileName);
+            if (File.Exists(sourcePath) && !File.Exists(destinationPath))
+            {
+                File.Copy(sourcePath, destinationPath);
+            }
         }
     }
 
