@@ -27,6 +27,7 @@ internal static partial class FfmpegCompressor
     public static async Task<string> CompressAsync(
         string inputPath,
         string ffmpegPath,
+        int targetMegabytes,
         CancellationToken cancellationToken)
     {
         var probe = await RunAsync(
@@ -48,7 +49,12 @@ internal static partial class FfmpegCompressor
             throw new InvalidOperationException("The clip duration is invalid.");
         }
 
-        const long targetBytes = 9L * 1024 * 1024;
+        if (targetMegabytes is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetMegabytes));
+        }
+
+        var targetBytes = (long)targetMegabytes * 1024 * 1024;
         var totalKbps = Math.Floor((targetBytes * 8d / duration.TotalSeconds / 1000d) * 0.94d);
         var audioKbps = totalKbps >= 500 ? 96 : 64;
         var videoKbps = Math.Max(180, Math.Min(6000, totalKbps - audioKbps));

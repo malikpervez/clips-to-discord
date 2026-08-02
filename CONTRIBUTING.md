@@ -12,7 +12,13 @@ Thanks for helping improve Clips to Discord.
    dotnet build .\ClipsToDiscord.csproj -c Release
    ```
 
-4. Run the app from the build output or create a package with `scripts\package.ps1`.
+4. Run the smoke tests:
+
+   ```powershell
+   dotnet run --project .\tests\ClipsToDiscord.SmokeTests\ClipsToDiscord.SmokeTests.csproj -c Release
+   ```
+
+5. Run the app from the build output or create a package with `scripts\package.ps1`.
 
 ## Pull requests
 

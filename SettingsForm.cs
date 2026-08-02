@@ -4,6 +4,13 @@ internal sealed class SettingsForm : Form
 {
     private readonly TextBox _folderText = new() { Dock = DockStyle.Fill };
     private readonly TextBox _webhookText = new() { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
+    private readonly NumericUpDown _compressionTarget = new()
+    {
+        Minimum = 1,
+        Maximum = 100,
+        DecimalPlaces = 0,
+        Width = 85
+    };
     private readonly CheckBox _startWithWindows = new() { Text = "Start with Windows", AutoSize = true };
     private readonly Button _testButton = new() { Text = "Test webhook", AutoSize = true };
     private readonly Button _saveButton = new() { Text = "Save", AutoSize = true };
@@ -18,11 +25,15 @@ internal sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(650, 285);
+        ClientSize = new Size(650, 335);
         AutoScaleMode = AutoScaleMode.Dpi;
 
         _folderText.Text = settings.ClipsFolder;
         _webhookText.Text = settings.WebhookUrl;
+        _compressionTarget.Value = Math.Clamp(
+            settings.CompressionTargetMb,
+            (int)_compressionTarget.Minimum,
+            (int)_compressionTarget.Maximum);
         _startWithWindows.Checked = settings.StartWithWindows;
 
         var browseButton = new Button { Text = "Browse…", AutoSize = true };
@@ -43,6 +54,21 @@ internal sealed class SettingsForm : Form
         webhookRow.Controls.Add(_webhookText, 0, 0);
         webhookRow.Controls.Add(_testButton, 1, 0);
 
+        var compressionRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight
+        };
+        compressionRow.Controls.Add(_compressionTarget);
+        compressionRow.Controls.Add(new Label
+        {
+            Text = "MB (the app retries smaller targets if Discord still rejects the file)",
+            AutoSize = true,
+            Margin = new Padding(6, 5, 0, 0)
+        });
+
         var buttonRow = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -58,9 +84,11 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 1,
-            RowCount = 8,
+            RowCount = 10,
             AutoSize = true
         };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -93,6 +121,14 @@ internal sealed class SettingsForm : Form
             ForeColor = SystemColors.GrayText,
             Margin = new Padding(0, 5, 0, 10)
         });
+        layout.Controls.Add(new Label
+        {
+            Text = "Compression target",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(0, 5, 0, 5)
+        });
+        layout.Controls.Add(compressionRow);
         layout.Controls.Add(_startWithWindows);
         layout.Controls.Add(_statusLabel);
         layout.Controls.Add(buttonRow);
@@ -154,7 +190,8 @@ internal sealed class SettingsForm : Form
         settings = new AppSettings(
             _folderText.Text.Trim(),
             _webhookText.Text.Trim(),
-            _startWithWindows.Checked);
+            _startWithWindows.Checked,
+            Decimal.ToInt32(_compressionTarget.Value));
 
         if (!Directory.Exists(settings.ClipsFolder))
         {

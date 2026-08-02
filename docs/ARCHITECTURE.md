@@ -1,6 +1,6 @@
 # Architecture
 
-Clips to Discord is a self-contained .NET 8 Windows Forms tray application. It is intentionally independent of the software that creates the clip; the only input contract is a completed top-level `.mp4` file in the configured folder.
+Clips to Discord is a self-contained .NET 8 Windows Forms tray application. It is independent of the software that creates the clip; the input contract is a completed top-level `.mp4` file in the configured folder.
 
 ```mermaid
 flowchart LR
@@ -8,38 +8,47 @@ flowchart LR
     B -- "No" --> C["Idle for 5 seconds"]
     C --> B
     B -- "Yes" --> D["Scan configured folder"]
-    D --> E{"New ready MP4?"}
-    E -- "No" --> D
-    E -- "Yes" --> F["Upload original to Discord"]
-    F --> G{"Discord accepts size?"}
-    G -- "No" --> H["Compress locally with FFmpeg"]
-    H --> I["Upload compressed copy"]
-    G -- "Yes" --> J["Record completed signature"]
-    I --> J
-    J --> K["Move original into uploaded folder"]
-    K --> D
+    D --> E{"Length and timestamp stable?"}
+    E -- "No" --> F["Back off and observe again"]
+    F --> D
+    E -- "Yes" --> G["Compute SHA-256"]
+    G --> H["Bounded upload queue"]
+    H --> I1["Upload worker 1"]
+    H --> I2["Upload worker 2"]
+    I1 --> J{"Discord accepts size?"}
+    I2 --> J
+    J -- "No" --> K["Compress locally to progressive targets"]
+    K --> J
+    J -- "Yes" --> L["Flush content hash and pending move to disk"]
+    L --> M["Move original into uploaded folder"]
 ```
 
 ## Components
 
 - `TrayApplicationContext` owns the notification-area UI, settings dialog, startup registration, and controller lifecycle.
 - `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes.
-- `UploaderWorker` scans for stable top-level `.mp4` files, manages retries, persists state, and archives successful originals.
-- `DiscordWebhookClient` sends webhook messages and multipart video attachments without allowing mentions.
-- `FfmpegCompressor` performs local two-pass H.264/AAC compression only after a size rejection.
-- `SettingsStore` encrypts the webhook with DPAPI and writes settings atomically.
-- `WatchStateStore` prevents duplicate uploads and persists pending archive moves.
+- `FileReadinessTracker` requires stable metadata across multiple observations and exponentially backs off unreadable files.
+- `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two upload consumers.
+- `DiscordWebhookClient` sends multipart attachments with separate connection and total deadlines and progressively smaller compression retries.
+- `FfmpegCompressor` performs local two-pass H.264/AAC compression to a requested target.
+- `SettingsStore` encrypts the webhook with DPAPI and performs staged legacy migration.
+- `WatchStateStore` uses durable atomic replacement for content hashes, safe-baseline keys, and pending archive moves.
+- `SensitiveDataRedactor` strips registered or recognizable Discord webhook URLs before log output.
 
 ## Reliability choices
 
-- Files must be at least 20 seconds old and openable with exclusive access.
-- Discord success is persisted before the original is moved, preventing duplicate posts after a move failure.
+- Files need matching length and timestamp observations at least ten seconds apart.
+- Read access uses shared mode for recorder compatibility; failures back off exponentially up to five minutes.
+- SHA-256 identity survives file, folder, and timestamp renames at the cost of one full local read per new clip.
+- Two workers isolate the queue from one slow request; each HTTP upload has a five-minute deadline and connection establishment has a 15-second deadline.
+- Confirmed upload state is flushed to disk before any archive move.
 - Move destinations never overwrite existing files.
 - Archive-folder resolution reuses any case-insensitive `uploaded` match and creates lowercase `uploaded` only when none exists.
 - Upload failures retry after five minutes.
-- Settings and state files use temporary-file replacement.
 - A named mutex prevents multiple tray-app instances.
-- Version 1.1 copies compatible settings from the former Moments to Discord data directory without deleting the original files.
+- Version 1.1+ copies compatible settings from the former Moments to Discord data directory without deleting the original files.
+
+See [RELIABILITY.md](RELIABILITY.md) for the exact-once limitation and migration details.
 
 ## Packaging
 

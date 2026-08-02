@@ -2,6 +2,18 @@
 
 All notable user-facing changes are documented here.
 
+## 1.2.0 — 2026-08-02
+
+- Replaced the single readiness check with length-and-timestamp stability observations plus exponential lock backoff.
+- Replaced path/timestamp deduplication with SHA-256 content identity and safe one-time baseline upgrades.
+- Added a bounded queue with two concurrent upload workers so one slow upload does not stop discovery or the full queue.
+- Added a 15-second connection timeout and a five-minute total deadline for each upload attempt.
+- Added a configurable 1–100 MB compression target with progressively smaller retries after Discord size rejections.
+- Accepted both `/api/webhooks/...` and versioned `/api/v{number}/webhooks/...` Discord URLs.
+- Added staged legacy migration with a safe-baseline recovery marker.
+- Added centralized log redaction for registered and pattern-matched Discord webhook URLs.
+- Made state writes explicitly flush to disk before replacement.
+
 ## 1.1.1 — 2026-08-02
 
 - Reuse an existing `uploaded` archive folder regardless of capitalization, including `Uploaded` and `UPLOADED`.

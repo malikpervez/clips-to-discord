@@ -1,38 +1,67 @@
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace ClipsToDiscord;
 
 internal sealed class WatchStateStore
 {
+    private const int CurrentVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _statePath = Path.Combine(SettingsStore.DataDirectory, "state.json");
 
-    public WatchState LoadOrInitialize(string clipsFolder)
+    public async Task<WatchState> LoadOrInitializeAsync(
+        string clipsFolder,
+        Action<string> reportStatus,
+        CancellationToken cancellationToken)
     {
-        try
+        var forceSafeBaseline = File.Exists(SettingsStore.SafeBaselineMarkerPath);
+        WatchState? saved = null;
+        if (!forceSafeBaseline)
         {
-            if (File.Exists(_statePath))
+            try
             {
-                var saved = JsonSerializer.Deserialize<WatchState>(File.ReadAllText(_statePath), JsonOptions);
-                if (saved is not null &&
-                    saved.ClipsFolder.Equals(clipsFolder, StringComparison.OrdinalIgnoreCase))
+                if (File.Exists(_statePath))
                 {
-                    return saved;
+                    saved = JsonSerializer.Deserialize<WatchState>(File.ReadAllText(_statePath), JsonOptions);
                 }
             }
-        }
-        catch (Exception exception)
-        {
-            Log.Error("Could not read uploader state; creating a safe baseline.", exception);
+            catch (Exception exception)
+            {
+                Log.Error("Could not read uploader state; creating a safe baseline.", exception);
+            }
         }
 
-        var state = new WatchState { ClipsFolder = clipsFolder };
-        foreach (var path in EnumerateClips(clipsFolder))
+        if (saved is not null && saved.Version >= CurrentVersion)
         {
-            try { state.KnownSignatures.Add(Signature(new FileInfo(path))); } catch { }
+            Normalize(saved);
+            if (saved.ClipsFolder.Equals(clipsFolder, StringComparison.OrdinalIgnoreCase))
+            {
+                return saved;
+            }
+
+            reportStatus("Clips folder changed — building a safe baseline");
+            saved.ClipsFolder = clipsFolder;
+            await AddSafeBaselineAsync(saved, clipsFolder, cancellationToken);
+            Save(saved);
+            return saved;
         }
+
+        reportStatus(forceSafeBaseline
+            ? "Recovering migration — building a safe baseline"
+            : "Building content-hash baseline");
+
+        var state = new WatchState
+        {
+            Version = CurrentVersion,
+            ClipsFolder = clipsFolder,
+            PendingMoves = saved?.PendingMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        };
+        Normalize(state);
+        await AddSafeBaselineAsync(state, clipsFolder, cancellationToken);
         Save(state);
-        Log.Info($"Initialized with {state.KnownSignatures.Count} existing clip(s); they will not be uploaded.");
+        TryDeleteSafeBaselineMarker();
+        Log.Info($"Initialized content-hash state with {state.KnownContentHashes.Count} existing clip(s); they will not be uploaded.");
         return state;
     }
 
@@ -40,21 +69,103 @@ internal sealed class WatchStateStore
     {
         Directory.CreateDirectory(SettingsStore.DataDirectory);
         var temporaryPath = _statePath + ".tmp";
-        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(state, JsonOptions));
+        var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(state, JsonOptions));
+        using (var stream = new FileStream(
+                   temporaryPath,
+                   FileMode.Create,
+                   FileAccess.Write,
+                   FileShare.None,
+                   4096,
+                   FileOptions.WriteThrough))
+        {
+            stream.Write(payload);
+            stream.Flush(flushToDisk: true);
+        }
         File.Move(temporaryPath, _statePath, true);
     }
 
-    public static string Signature(FileInfo file) =>
+    public static string FileKey(FileInfo file) =>
         $"{file.FullName.ToLowerInvariant()}|{file.Length}|{file.LastWriteTimeUtc.Ticks}";
 
     public static IEnumerable<string> EnumerateClips(string clipsFolder) =>
         Directory.EnumerateFiles(clipsFolder, "*.mp4", SearchOption.TopDirectoryOnly)
             .OrderBy(File.GetLastWriteTimeUtc);
+
+    private async Task AddSafeBaselineAsync(
+        WatchState state,
+        string clipsFolder,
+        CancellationToken cancellationToken)
+    {
+        var topLevelPaths = EnumerateClips(clipsFolder).ToList();
+        var uploadedFolder = UploadedFolder.GetOrCreate(clipsFolder);
+        var uploadedPaths = Directory.EnumerateFiles(uploadedFolder, "*.mp4", SearchOption.TopDirectoryOnly).ToList();
+
+        foreach (var path in topLevelPaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var file = new FileInfo(path);
+                state.IgnoredFileKeys.Add(FileKey(file));
+                state.KnownContentHashes.Add(
+                    await ContentIdentity.ComputeSha256Async(path, cancellationToken));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Log.Error($"Could not hash baseline clip {Path.GetFileName(path)}; it remains protected by its file key.", exception);
+            }
+        }
+
+        foreach (var path in uploadedPaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var contentHash = await ContentIdentity.ComputeSha256Async(path, cancellationToken);
+                state.KnownContentHashes.Add(contentHash);
+                state.UploadedContentHashes.Add(contentHash);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Log.Error($"Could not hash archived baseline clip {Path.GetFileName(path)}.", exception);
+            }
+        }
+    }
+
+    private static void Normalize(WatchState state)
+    {
+        state.Version = CurrentVersion;
+        state.ClipsFolder ??= string.Empty;
+        state.KnownContentHashes = new HashSet<string>(
+            state.KnownContentHashes ?? [],
+            StringComparer.OrdinalIgnoreCase);
+        state.IgnoredFileKeys = new HashSet<string>(
+            state.IgnoredFileKeys ?? [],
+            StringComparer.OrdinalIgnoreCase);
+        state.UploadedContentHashes = new HashSet<string>(
+            state.UploadedContentHashes ?? [],
+            StringComparer.OrdinalIgnoreCase);
+        state.PendingMoves = new HashSet<string>(
+            state.PendingMoves ?? [],
+            StringComparer.OrdinalIgnoreCase);
+        state.KnownSignatures = null;
+    }
+
+    private static void TryDeleteSafeBaselineMarker()
+    {
+        try { File.Delete(SettingsStore.SafeBaselineMarkerPath); } catch { }
+    }
 }
 
 internal sealed class WatchState
 {
+    public int Version { get; set; }
     public string ClipsFolder { get; set; } = string.Empty;
-    public HashSet<string> KnownSignatures { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> KnownContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> UploadedContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> IgnoredFileKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> PendingMoves { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public HashSet<string>? KnownSignatures { get; set; }
 }

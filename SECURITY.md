@@ -10,6 +10,8 @@ For ordinary bugs, open a public issue with all webhook IDs, tokens, personal pa
 
 If a Discord webhook URL is exposed, delete or regenerate it in Discord immediately. Removing it from a Git commit or issue later does not make the old credential safe.
 
+Application logs pass through a centralized Discord-webhook redactor. Treat that as defense in depth: never intentionally place a webhook in a log message, test fixture, issue, or pull request.
+
 ## Supported versions
 
 Security fixes are applied to the latest published release.
