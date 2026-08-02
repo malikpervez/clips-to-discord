@@ -94,8 +94,7 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
     {
         var clipsFolder = Path.GetDirectoryName(sourcePath)
             ?? throw new InvalidOperationException("The clip folder could not be determined.");
-        var uploadedFolder = Path.Combine(clipsFolder, "uploaded");
-        Directory.CreateDirectory(uploadedFolder);
+        var uploadedFolder = UploadedFolder.GetOrCreate(clipsFolder);
         var destinationPath = UniqueDestination(uploadedFolder, Path.GetFileName(sourcePath));
         Exception? lastError = null;
 

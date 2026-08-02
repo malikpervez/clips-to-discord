@@ -11,7 +11,7 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 - Encrypts the webhook for the current Windows account using Windows DPAPI.
 - Starts the folder watcher when Discord opens and stops it when Discord closes.
 - Uploads only new `.mp4` files from the top level of the selected folder.
-- Moves successfully uploaded originals into an `uploaded` subfolder.
+- Moves successfully uploaded originals into an `uploaded` subfolder, creating it when needed and recognizing any capitalization.
 - Preserves duplicate filenames by adding a unique suffix.
 - Compresses clips rejected for size when `ffmpeg.exe` is bundled beside the app or available on `PATH`.
 - Can start automatically when the user signs into Windows.

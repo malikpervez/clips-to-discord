@@ -92,7 +92,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _controller?.Dispose();
         StartupManager.Apply(settings.StartWithWindows);
-        Directory.CreateDirectory(Path.Combine(settings.ClipsFolder, "uploaded"));
+        UploadedFolder.GetOrCreate(settings.ClipsFolder);
         _controller = new DiscordAwareController(settings, SetStatus);
     }
 

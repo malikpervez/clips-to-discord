@@ -49,7 +49,7 @@ The first scan records existing clips as a baseline and does not upload them. Af
 
 - Discord opens → the clip watcher starts.
 - A new `.mp4` finishes writing → the app uploads it.
-- Discord confirms the upload → the original moves into `uploaded`.
+- Discord confirms the upload → the original moves into an existing case-insensitive `uploaded` folder, or the app creates `uploaded` automatically.
 - Discord closes → the clip watcher stops.
 - Discord reopens → watching resumes automatically.
 
