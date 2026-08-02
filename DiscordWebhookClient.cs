@@ -120,7 +120,7 @@ internal sealed class DiscordWebhookClient : IDisposable
             filePath,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
+            FileShare.Read,
             1024 * 1024,
             useAsync: true);
         using var streamContent = new StreamContent(stream);

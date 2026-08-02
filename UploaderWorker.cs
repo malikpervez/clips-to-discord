@@ -100,6 +100,7 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
                 MaybeLogReadinessBackoff(clip.Name, clip.FullName, readiness);
                 return;
             }
+            _lastReadinessLog.TryRemove(clip.FullName, out _);
 
             reportStatus($"Hashing {clip.Name}");
             var contentHash = _hashCache.TryGetValue(fileKey, out var cachedHash)
@@ -369,12 +370,12 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
         string filePath,
         FileReadinessResult readiness)
     {
-        if (readiness.NextCheckUtc - DateTime.UtcNow < TimeSpan.FromMinutes(1)) return;
+        if (readiness.ConsecutiveOpenFailures < FileReadinessTracker.StuckLogThreshold) return;
         if (_lastReadinessLog.TryGetValue(filePath, out var lastLog) &&
             DateTime.UtcNow - lastLog < TimeSpan.FromMinutes(5)) return;
 
         _lastReadinessLog[filePath] = DateTime.UtcNow;
-        Log.Info($"Clip is not ready yet; next check at {readiness.NextCheckUtc:u}: {fileName} ({readiness.Reason}).");
+        Log.Info($"Clip has failed {readiness.ConsecutiveOpenFailures} readiness checks; next check at {readiness.NextCheckUtc:u}: {fileName} ({readiness.Reason}).");
     }
 
     private sealed record QueuedClip(

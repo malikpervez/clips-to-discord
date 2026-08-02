@@ -2,9 +2,9 @@
 
 ## File readiness
 
-The scanner does not rely on age or exclusive-open access alone. It records length and last-write time, observes the same values at least ten seconds later, then confirms the file can be opened for shared reading. Shared access supports recorders that keep a completed file handle open.
+The scanner requires the last write to be at least twenty seconds old and records length plus last-write time across observations at least ten seconds apart. It then opens the file with read sharing: other readers are allowed, but any active writer causes a sharing violation. This is stronger than a fully shared read and avoids the false permanent lock caused by an unrelated reader that makes `FileShare.None` too strict.
 
-Unreadable or locked files use exponential retry delays from ten seconds up to five minutes. A file that continues changing returns to the stability window instead of entering the upload queue.
+Unreadable or writer-locked files use exponential retry delays from ten seconds up to five minutes. After three consecutive open failures the app logs the stuck clip, then throttles repeated notices to once every five minutes. A file that continues changing returns to the stability window instead of entering the upload queue.
 
 ## Content identity
 
@@ -27,6 +27,8 @@ There is still an irreducible interval between Discord accepting the HTTP reques
 ## Compression fallback
 
 The configured target is 1–100 MB and defaults to 9 MB. After a size rejection, FFmpeg compresses from the original clip. If Discord rejects that result, the app retries progressively smaller targets, up to five compression attempts.
+
+Two-pass compression uses the Windows `NUL` device for its first pass. The app targets Windows, and the compressor also has an explicit platform guard so this path cannot silently run with different semantics elsewhere.
 
 Discord documents a 10 MiB default per-file limit and notes that limits can be higher based on user or server status. See the official [API file-upload reference](https://docs.discord.com/developers/reference#uploading-files) and [status codes](https://docs.discord.com/developers/topics/opcodes-and-status-codes).
 
