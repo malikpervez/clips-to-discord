@@ -1,0 +1,57 @@
+name: Bug report
+description: Report reproducible behavior that is not working as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Moments to Discord.
+
+        **Never paste a real Discord webhook URL.** Redact webhook IDs, tokens, Windows usernames, personal paths, and private clip names.
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Explain what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open Discord
+        2. Create a new clip
+        3. Wait for the upload
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted log output
+      description: Paste only relevant lines from %LOCALAPPDATA%\MomentsToDiscord\app.log after removing private information.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed webhook IDs, tokens, usernames, personal paths, and private clip names.
+          required: true
+        - label: I checked the troubleshooting guide.
+          required: true

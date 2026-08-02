@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/malikpervez/moments-to-discord/security/advisories/new
+    about: Report vulnerabilities privately. Do not expose webhook credentials.
