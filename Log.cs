@@ -1,4 +1,4 @@
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal static class Log
 {

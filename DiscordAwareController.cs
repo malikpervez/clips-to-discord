@@ -1,4 +1,4 @@
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal sealed class DiscordAwareController : IDisposable
 {

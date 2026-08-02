@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal static class DiscordDetector
 {

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for helping improve Moments to Discord.
+        Thanks for helping improve Clips to Discord.
 
         **Never paste a real Discord webhook URL.** Redact webhook IDs, tokens, Windows usernames, personal paths, and private clip names.
   - type: input
@@ -44,7 +44,7 @@ body:
     id: logs
     attributes:
       label: Redacted log output
-      description: Paste only relevant lines from %LOCALAPPDATA%\MomentsToDiscord\app.log after removing private information.
+      description: Paste only relevant lines from %LOCALAPPDATA%\ClipsToDiscord\app.log after removing private information.
       render: text
   - type: checkboxes
     id: checks

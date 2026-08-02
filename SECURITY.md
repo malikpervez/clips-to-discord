@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Use GitHub's private security-advisory reporting flow when available. Do not publish exploitable details or credentials in a public issue.
+Use GitHub's private security-advisory reporting flow. Do not publish exploitable details or credentials in a public issue.
 
 For ordinary bugs, open a public issue with all webhook IDs, tokens, personal paths, usernames, and clip names redacted.
 

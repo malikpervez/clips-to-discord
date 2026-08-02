@@ -6,11 +6,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$projectPath = Join-Path $repositoryRoot 'MomentsToDiscord.csproj'
+$projectPath = Join-Path $repositoryRoot 'ClipsToDiscord.csproj'
 $artifactsDirectory = Join-Path $repositoryRoot 'artifacts'
 $publishDirectory = Join-Path $artifactsDirectory "publish-$Runtime"
-$packageDirectory = Join-Path $artifactsDirectory "MomentsToDiscord-$Runtime"
-$zipPath = Join-Path $artifactsDirectory "MomentsToDiscord-$Runtime.zip"
+$packageDirectory = Join-Path $artifactsDirectory "ClipsToDiscord-$Runtime"
+$zipPath = Join-Path $artifactsDirectory "ClipsToDiscord-$Runtime.zip"
 
 foreach ($target in @($publishDirectory, $packageDirectory)) {
     $resolvedArtifacts = [IO.Path]::GetFullPath($artifactsDirectory)
@@ -39,7 +39,7 @@ dotnet publish $projectPath `
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 
 [IO.Directory]::CreateDirectory($packageDirectory) | Out-Null
-Copy-Item -LiteralPath (Join-Path $publishDirectory 'MomentsToDiscord.exe') -Destination $packageDirectory
+Copy-Item -LiteralPath (Join-Path $publishDirectory 'ClipsToDiscord.exe') -Destination $packageDirectory
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'README.txt') -Destination $packageDirectory
 
 if ($FfmpegPath) {

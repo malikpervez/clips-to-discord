@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal sealed class TrayApplicationContext : ApplicationContext
 {
@@ -31,7 +31,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _trayIcon = new NotifyIcon
         {
             Icon = SystemIcons.Application,
-            Text = "Moments to Discord",
+            Text = "Clips to Discord",
             ContextMenuStrip = menu,
             Visible = true
         };
@@ -68,7 +68,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 ApplySettings(_settings);
                 _trayIcon.ShowBalloonTip(
                     2500,
-                    "Moments to Discord",
+                    "Clips to Discord",
                     "Settings saved. The clip watcher follows Discord automatically.",
                     ToolTipIcon.Info);
             }

@@ -14,14 +14,14 @@ Check these in order:
 2. The tray status says it is watching for clips.
 3. The selected directory is the folder containing the new `.mp4`, not the `uploaded` folder.
 4. The clip is a top-level `.mp4`. Nested directories and other formats are ignored.
-5. SteelSeries has finished writing the file. The app waits at least 20 seconds and requires exclusive read access before uploading.
+5. The recording tool has finished writing the file. The app waits at least 20 seconds and requires exclusive read access before uploading.
 6. The webhook still exists and points to the intended channel.
 
 Clips already present during the first scan are recorded as a safe baseline and are not uploaded automatically.
 
 ## The clip is too large
 
-The release ZIP includes `ffmpeg.exe`. Keep it beside `MomentsToDiscord.exe`; the app uses it only after Discord rejects an original clip for size. Compression can take a while on long clips.
+The release ZIP includes `ffmpeg.exe`. Keep it beside `ClipsToDiscord.exe`; the app uses it only after Discord rejects an original clip for size. Compression can take a while on long clips.
 
 If building from source without FFmpeg, normal-size clips still work, but oversized clips report an error in the log.
 
@@ -34,7 +34,7 @@ After Discord accepts the upload, the app records it before moving the original.
 Open this directory in File Explorer:
 
 ```text
-%LOCALAPPDATA%\MomentsToDiscord
+%LOCALAPPDATA%\ClipsToDiscord
 ```
 
 - `app.log` contains operational messages and upload errors.

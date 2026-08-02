@@ -1,4 +1,4 @@
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal sealed class SettingsForm : Form
 {
@@ -13,7 +13,7 @@ internal sealed class SettingsForm : Form
 
     public SettingsForm(AppSettings settings)
     {
-        Text = "Moments to Discord — Settings";
+        Text = "Clips to Discord — Settings";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -72,7 +72,7 @@ internal sealed class SettingsForm : Form
 
         layout.Controls.Add(new Label
         {
-            Text = "SteelSeries Moments folder",
+            Text = "Clips folder",
             AutoSize = true,
             Font = new Font(Font, FontStyle.Bold),
             Margin = new Padding(0, 0, 0, 5)
@@ -106,7 +106,7 @@ internal sealed class SettingsForm : Form
     {
         using var dialog = new FolderBrowserDialog
         {
-            Description = "Choose the folder where SteelSeries GG saves Moments clips",
+            Description = "Choose the folder where your clipping tool saves MP4 clips",
             UseDescriptionForTitle = true,
             SelectedPath = Directory.Exists(_folderText.Text) ? _folderText.Text : string.Empty,
             ShowNewFolderButton = false

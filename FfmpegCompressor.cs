@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
 
-namespace MomentsToDiscord;
+namespace ClipsToDiscord;
 
 internal static partial class FfmpegCompressor
 {
@@ -53,7 +53,7 @@ internal static partial class FfmpegCompressor
         var audioKbps = totalKbps >= 500 ? 96 : 64;
         var videoKbps = Math.Max(180, Math.Min(6000, totalKbps - audioKbps));
 
-        var temporaryFolder = Path.Combine(Path.GetTempPath(), "MomentsToDiscord");
+        var temporaryFolder = Path.Combine(Path.GetTempPath(), "ClipsToDiscord");
         Directory.CreateDirectory(temporaryFolder);
         var token = Guid.NewGuid().ToString("N");
         var outputPath = Path.Combine(temporaryFolder, token + ".mp4");

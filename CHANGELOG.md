@@ -2,6 +2,13 @@
 
 All notable user-facing changes are documented here.
 
+## 1.1.0 — 2026-08-02
+
+- Renamed the app from Moments to Discord to Clips to Discord.
+- Generalized folder selection and documentation for any tool that saves MP4 clips.
+- Added migration of compatible v1.0 settings, state, logs, and Windows startup registration.
+- Renamed application, package, and local-data identifiers while retaining existing behavior.
+
 ## 1.0.0 — 2026-08-02
 
 - Added first-run setup for the clips folder and Discord webhook.

@@ -1,6 +1,6 @@
 # Architecture
 
-Moments to Discord is a self-contained .NET 8 Windows Forms tray application.
+Clips to Discord is a self-contained .NET 8 Windows Forms tray application. It is intentionally independent of the software that creates the clip; the only input contract is a completed top-level `.mp4` file in the configured folder.
 
 ```mermaid
 flowchart LR
@@ -38,6 +38,7 @@ flowchart LR
 - Upload failures retry after five minutes.
 - Settings and state files use temporary-file replacement.
 - A named mutex prevents multiple tray-app instances.
+- Version 1.1 copies compatible settings from the former Moments to Discord data directory without deleting the original files.
 
 ## Packaging
 
