@@ -35,6 +35,7 @@ flowchart LR
 - Files must be at least 20 seconds old and openable with exclusive access.
 - Discord success is persisted before the original is moved, preventing duplicate posts after a move failure.
 - Move destinations never overwrite existing files.
+- Archive-folder resolution reuses any case-insensitive `uploaded` match and creates lowercase `uploaded` only when none exists.
 - Upload failures retry after five minutes.
 - Settings and state files use temporary-file replacement.
 - A named mutex prevents multiple tray-app instances.

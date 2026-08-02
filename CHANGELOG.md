@@ -2,6 +2,12 @@
 
 All notable user-facing changes are documented here.
 
+## 1.1.1 — 2026-08-02
+
+- Reuse an existing `uploaded` archive folder regardless of capitalization, including `Uploaded` and `UPLOADED`.
+- Create the canonical lowercase `uploaded` folder automatically when no case-insensitive match exists.
+- Added a regression smoke test for archive-folder resolution and creation.
+
 ## 1.1.0 — 2026-08-02
 
 - Renamed the app from Moments to Discord to Clips to Discord.

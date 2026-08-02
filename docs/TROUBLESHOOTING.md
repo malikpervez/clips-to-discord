@@ -29,6 +29,8 @@ If building from source without FFmpeg, normal-size clips still work, but oversi
 
 After Discord accepts the upload, the app records it before moving the original. This prevents a move failure from posting the same clip twice. The app retries pending moves into the `uploaded` subfolder. Check that the Windows account can create and move files in the selected clips directory.
 
+Folder matching is case-insensitive: `uploaded`, `Uploaded`, and `UPLOADED` are treated as the same archive folder. When no matching directory exists, the app creates lowercase `uploaded` automatically.
+
 ## Logs and local state
 
 Open this directory in File Explorer:
