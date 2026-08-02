@@ -2,6 +2,8 @@
 
 A small Windows tray app that uploads new SteelSeries GG Moments clips to a Discord channel through a webhook.
 
+[Download the latest release](https://github.com/malikpervez/moments-to-discord/releases/latest) · [Setup guide](docs/SETUP.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Privacy and security](docs/PRIVACY.md)
+
 ## What it does
 
 - Asks for only the SteelSeries clips folder and a Discord webhook URL.
@@ -17,16 +19,30 @@ The app is not affiliated with SteelSeries or Discord.
 
 ## Friend setup
 
-1. Download `MomentsToDiscord-win-x64.zip` from the repository's Releases page.
+1. Download `MomentsToDiscord-win-x64.zip` from the [latest release](https://github.com/malikpervez/moments-to-discord/releases/latest).
 2. Extract the entire folder somewhere permanent.
 3. Run `MomentsToDiscord.exe`.
 4. Select the folder where SteelSeries GG saves Moments clips.
 5. Paste the Discord webhook URL and optionally click **Test webhook**.
 6. Click **Save**.
 
+Each release also includes `SHA256SUMS.txt` so the downloaded ZIP can be verified with `Get-FileHash` before it is opened.
+
 The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord is running.
 
 The executable is not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign it with a trusted code-signing certificate.
+
+For screenshots and more detail about locating the SteelSeries folder and creating the webhook, see the [complete setup guide](docs/SETUP.md).
+
+## Documentation
+
+- [Installation and first-run setup](docs/SETUP.md)
+- [Creating and protecting a Discord webhook](docs/DISCORD-WEBHOOK.md)
+- [Troubleshooting and log locations](docs/TROUBLESHOOTING.md)
+- [Privacy and security model](docs/PRIVACY.md)
+- [Architecture and upload lifecycle](docs/ARCHITECTURE.md)
+- [Building and contributing](CONTRIBUTING.md)
+- [Version history](CHANGELOG.md)
 
 ## Webhook safety
 
