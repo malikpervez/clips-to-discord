@@ -20,6 +20,8 @@ Official references:
 
 Do not append `/github` to the URL. That suffix is only for Discord's special GitHub webhook format and is not used by this app.
 
+Both Discord URL forms are supported: `/api/webhooks/...` and versioned `/api/v10/webhooks/...`. HTTPS and the Discord host allow-list are still required.
+
 ## Test and rotate
 
 Use **Test webhook** in the app. A successful test posts a short connection message to the selected channel.

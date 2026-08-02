@@ -11,9 +11,13 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 - Encrypts the webhook for the current Windows account using Windows DPAPI.
 - Starts the folder watcher when Discord opens and stops it when Discord closes.
 - Uploads only new `.mp4` files from the top level of the selected folder.
+- Confirms file length and timestamp stability across multiple observations before queueing a clip.
+- Uses SHA-256 content identity so folder renames and timestamp rewrites do not cause duplicate uploads.
+- Keeps scanning with two upload workers, a short connection timeout, and a bounded per-upload deadline.
 - Moves successfully uploaded originals into an `uploaded` subfolder, creating it when needed and recognizing any capitalization.
 - Preserves duplicate filenames by adding a unique suffix.
-- Compresses clips rejected for size when `ffmpeg.exe` is bundled beside the app or available on `PATH`.
+- Uses a configurable compression target and retries smaller targets when Discord rejects a file for size.
+- Redacts Discord webhook URLs from all application log messages.
 - Can start automatically when the user signs into Windows.
 
 The app is not affiliated with Discord or any recording-software vendor.
@@ -42,6 +46,7 @@ See the [complete setup guide](docs/SETUP.md) for folder-selection and webhook i
 - [Troubleshooting and log locations](docs/TROUBLESHOOTING.md)
 - [Privacy and security model](docs/PRIVACY.md)
 - [Architecture and upload lifecycle](docs/ARCHITECTURE.md)
+- [Reliability design and tradeoffs](docs/RELIABILITY.md)
 - [Building and contributing](CONTRIBUTING.md)
 - [Version history](CHANGELOG.md)
 
@@ -50,6 +55,8 @@ See the [complete setup guide](docs/SETUP.md) for folder-selection and webhook i
 A Discord webhook URL grants permission to post to its channel. Never commit one to source control, screenshots, logs, or issues. If a URL is exposed, delete or rotate the webhook in Discord immediately.
 
 The saved URL is encrypted with DPAPI and can only be decrypted by the same Windows user account on the same Windows installation.
+
+Application logging also runs through a centralized webhook redactor. This is defense in depth and does not replace rotating a webhook that has been exposed elsewhere.
 
 ## Build from source
 

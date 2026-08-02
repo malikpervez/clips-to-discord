@@ -7,7 +7,23 @@ namespace ClipsToDiscord;
 
 internal sealed class DiscordWebhookClient : IDisposable
 {
-    private readonly HttpClient _client = new() { Timeout = TimeSpan.FromMinutes(20) };
+    private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan UploadTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(30);
+    private readonly HttpClient _client;
+
+    public DiscordWebhookClient()
+    {
+        var handler = new SocketsHttpHandler
+        {
+            ConnectTimeout = ConnectionTimeout,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+        };
+        _client = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+    }
 
     public async Task TestConnectionAsync(string webhookUrl, CancellationToken cancellationToken)
     {
@@ -17,7 +33,11 @@ internal sealed class DiscordWebhookClient : IDisposable
             allowed_mentions = new { parse = Array.Empty<string>() }
         });
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-        using var response = await _client.PostAsync(WithWait(webhookUrl), content, cancellationToken);
+        using var response = await PostWithDeadlineAsync(
+            WithWait(webhookUrl),
+            content,
+            TestTimeout,
+            cancellationToken);
         var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
@@ -29,6 +49,7 @@ internal sealed class DiscordWebhookClient : IDisposable
     public async Task UploadWithCompressionAsync(
         string webhookUrl,
         string filePath,
+        int compressionTargetMb,
         CancellationToken cancellationToken)
     {
         try
@@ -45,20 +66,38 @@ internal sealed class DiscordWebhookClient : IDisposable
                     exception);
             }
 
-            Log.Info($"Compressing oversized clip: {Path.GetFileName(filePath)}");
-            var compressedPath = await FfmpegCompressor.CompressAsync(filePath, ffmpegPath, cancellationToken);
-            try
+            DiscordUploadException lastSizeException = exception;
+            foreach (var targetMb in CompressionTargetPlanner.Build(compressionTargetMb))
             {
-                await UploadOnceAsync(
-                    webhookUrl,
-                    compressedPath,
-                    Path.GetFileName(filePath),
+                Log.Info($"Compressing oversized clip {Path.GetFileName(filePath)} to a {targetMb} MB target.");
+                var compressedPath = await FfmpegCompressor.CompressAsync(
+                    filePath,
+                    ffmpegPath,
+                    targetMb,
                     cancellationToken);
+                try
+                {
+                    await UploadOnceAsync(
+                        webhookUrl,
+                        compressedPath,
+                        Path.GetFileName(filePath),
+                        cancellationToken);
+                    return;
+                }
+                catch (DiscordUploadException compressedException) when (compressedException.IsTooLarge)
+                {
+                    lastSizeException = compressedException;
+                    Log.Info($"Discord rejected the {targetMb} MB target; trying a smaller target.");
+                }
+                finally
+                {
+                    TryDelete(compressedPath);
+                }
             }
-            finally
-            {
-                TryDelete(compressedPath);
-            }
+
+            throw new InvalidOperationException(
+                "Discord rejected every configured compression target. Lower the compression target in Settings and retry.",
+                lastSizeException);
         }
     }
 
@@ -81,24 +120,47 @@ internal sealed class DiscordWebhookClient : IDisposable
             filePath,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.Read,
+            FileShare.ReadWrite | FileShare.Delete,
             1024 * 1024,
             useAsync: true);
         using var streamContent = new StreamContent(stream);
         streamContent.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
         multipart.Add(streamContent, "files[0]", SanitizeFileName(originalName));
 
-        using var response = await _client.PostAsync(WithWait(webhookUrl), multipart, cancellationToken);
+        using var response = await PostWithDeadlineAsync(
+            WithWait(webhookUrl),
+            multipart,
+            UploadTimeout,
+            cancellationToken);
         var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             var tooLarge = response.StatusCode == HttpStatusCode.RequestEntityTooLarge ||
                            responseText.Contains("40005", StringComparison.OrdinalIgnoreCase) ||
+                           responseText.Contains("50045", StringComparison.OrdinalIgnoreCase) ||
                            responseText.Contains("too large", StringComparison.OrdinalIgnoreCase) ||
                            responseText.Contains("maximum", StringComparison.OrdinalIgnoreCase);
             throw new DiscordUploadException(
                 $"Discord returned HTTP {(int)response.StatusCode}: {responseText}",
                 tooLarge);
+        }
+    }
+
+    private async Task<HttpResponseMessage> PostWithDeadlineAsync(
+        string requestUrl,
+        HttpContent content,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout);
+        try
+        {
+            return await _client.PostAsync(requestUrl, content, deadline.Token);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Discord did not complete the request within {timeout.TotalMinutes:F1} minute(s).", exception);
         }
     }
 

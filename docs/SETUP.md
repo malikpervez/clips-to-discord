@@ -42,18 +42,22 @@ Treat the webhook URL like a password. Anyone who has it can post through that w
 ## 4. Save and use the app
 
 1. Leave **Start with Windows** selected if the app should be available after each sign-in.
-2. Select **Save**.
-3. The app moves to the Windows notification area.
+2. Set the compression target. The default 9 MB works with Discord's standard 10 MiB per-file limit while leaving headroom. Higher server limits can use a larger target.
+3. Select **Save**.
+4. The app moves to the Windows notification area.
 
 The first scan records existing clips as a baseline and does not upload them. After setup:
 
 - Discord opens → the clip watcher starts.
-- A new `.mp4` finishes writing → the app uploads it.
+- A new `.mp4` remains unchanged across the stability window → the app hashes and queues it.
+- Two upload workers process the queue independently.
 - Discord confirms the upload → the original moves into an existing case-insensitive `uploaded` folder, or the app creates `uploaded` automatically.
 - Discord closes → the clip watcher stops.
 - Discord reopens → watching resumes automatically.
 
 Right-click the notification-area icon to view status, reopen settings, open the clips folder, or exit.
+
+Discord documents a default 10 MiB per-file limit, with potentially higher limits depending on the user or server. See Discord's official [Uploading Files reference](https://docs.discord.com/developers/reference#uploading-files). If Discord still rejects a compressed result, the app automatically tries progressively smaller targets.
 
 ## Updating from version 1.0
 

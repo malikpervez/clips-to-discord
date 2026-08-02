@@ -1,16 +1,27 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace ClipsToDiscord;
 
-internal sealed record AppSettings(string ClipsFolder, string WebhookUrl, bool StartWithWindows)
+internal sealed record AppSettings(
+    string ClipsFolder,
+    string WebhookUrl,
+    bool StartWithWindows,
+    int CompressionTargetMb)
 {
-    public static AppSettings Empty { get; } = new(string.Empty, string.Empty, true);
+    public const int DefaultCompressionTargetMb = 9;
+    public static AppSettings Empty { get; } = new(
+        string.Empty,
+        string.Empty,
+        true,
+        DefaultCompressionTargetMb);
 
     public bool IsValid =>
         Directory.Exists(ClipsFolder) &&
-        WebhookValidation.IsDiscordWebhook(WebhookUrl);
+        WebhookValidation.IsDiscordWebhook(WebhookUrl) &&
+        CompressionTargetMb is >= 1 and <= 100;
 }
 
 internal static class SettingsStore
@@ -25,6 +36,7 @@ internal static class SettingsStore
         "MomentsToDiscord");
 
     private static string SettingsPath => Path.Combine(DataDirectory, "settings.json");
+    internal static string SafeBaselineMarkerPath => Path.Combine(DataDirectory, ".safe-baseline-required");
 
     public static AppSettings Load()
     {
@@ -44,10 +56,14 @@ internal static class SettingsStore
 
             var encrypted = Convert.FromBase64String(stored.ProtectedWebhook);
             var decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
+            var webhookUrl = Encoding.UTF8.GetString(decrypted);
+            SensitiveDataRedactor.RegisterSecret(webhookUrl);
+            Log.SanitizeExistingFile();
             return new AppSettings(
                 stored.ClipsFolder ?? string.Empty,
-                Encoding.UTF8.GetString(decrypted),
-                stored.StartWithWindows);
+                webhookUrl,
+                stored.StartWithWindows,
+                NormalizeCompressionTarget(stored.CompressionTargetMb));
         }
         catch (Exception exception)
         {
@@ -61,19 +77,60 @@ internal static class SettingsStore
         if (!Directory.Exists(LegacyDataDirectory)) return;
 
         Directory.CreateDirectory(DataDirectory);
-        foreach (var fileName in new[] { "settings.json", "state.json", "app.log" })
+        var stagedDirectory = Path.Combine(DataDirectory, ".legacy-migration-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stagedDirectory);
+        var migrationCompleted = false;
+        try
         {
-            var sourcePath = Path.Combine(LegacyDataDirectory, fileName);
-            var destinationPath = Path.Combine(DataDirectory, fileName);
-            if (File.Exists(sourcePath) && !File.Exists(destinationPath))
+            foreach (var fileName in new[] { "settings.json", "state.json", "app.log" })
             {
-                File.Copy(sourcePath, destinationPath);
+                var sourcePath = Path.Combine(LegacyDataDirectory, fileName);
+                var destinationPath = Path.Combine(DataDirectory, fileName);
+                if (File.Exists(sourcePath) && !File.Exists(destinationPath))
+                {
+                    File.Copy(sourcePath, Path.Combine(stagedDirectory, fileName));
+                }
             }
+
+            var stagedSettings = Path.Combine(stagedDirectory, "settings.json");
+            var stagedState = Path.Combine(stagedDirectory, "state.json");
+            if (File.Exists(stagedSettings) || File.Exists(stagedState))
+            {
+                File.WriteAllText(SafeBaselineMarkerPath, DateTime.UtcNow.ToString("O"));
+
+                // State moves first. A crash before settings moves cannot start an uploader,
+                // while a crash after settings moves leaves the safe-baseline marker behind.
+                MoveIfPresent(stagedState, Path.Combine(DataDirectory, "state.json"));
+                MoveIfPresent(stagedSettings, SettingsPath);
+                migrationCompleted = true;
+            }
+
+            MoveIfPresent(
+                Path.Combine(stagedDirectory, "app.log"),
+                Path.Combine(DataDirectory, "app.log"));
+
+            if (migrationCompleted && File.Exists(SafeBaselineMarkerPath))
+            {
+                File.Delete(SafeBaselineMarkerPath);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(stagedDirectory, recursive: true); } catch { }
+        }
+    }
+
+    private static void MoveIfPresent(string sourcePath, string destinationPath)
+    {
+        if (File.Exists(sourcePath) && !File.Exists(destinationPath))
+        {
+            File.Move(sourcePath, destinationPath);
         }
     }
 
     public static void Save(AppSettings settings)
     {
+        SensitiveDataRedactor.RegisterSecret(settings.WebhookUrl);
         Directory.CreateDirectory(DataDirectory);
         var encrypted = ProtectedData.Protect(
             Encoding.UTF8.GetBytes(settings.WebhookUrl),
@@ -83,7 +140,8 @@ internal static class SettingsStore
         {
             ClipsFolder = settings.ClipsFolder,
             ProtectedWebhook = Convert.ToBase64String(encrypted),
-            StartWithWindows = settings.StartWithWindows
+            StartWithWindows = settings.StartWithWindows,
+            CompressionTargetMb = settings.CompressionTargetMb
         };
 
         var temporaryPath = SettingsPath + ".tmp";
@@ -96,10 +154,14 @@ internal static class SettingsStore
         public string? ClipsFolder { get; set; }
         public string? ProtectedWebhook { get; set; }
         public bool StartWithWindows { get; set; } = true;
+        public int CompressionTargetMb { get; set; } = AppSettings.DefaultCompressionTargetMb;
     }
+
+    private static int NormalizeCompressionTarget(int value) =>
+        value is >= 1 and <= 100 ? value : AppSettings.DefaultCompressionTargetMb;
 }
 
-internal static class WebhookValidation
+public static partial class WebhookValidation
 {
     private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -114,6 +176,9 @@ internal static class WebhookValidation
         return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
                uri.Scheme == Uri.UriSchemeHttps &&
                AllowedHosts.Contains(uri.Host) &&
-               uri.AbsolutePath.StartsWith("/api/webhooks/", StringComparison.OrdinalIgnoreCase);
+               WebhookPathPattern().IsMatch(uri.AbsolutePath);
     }
+
+    [GeneratedRegex(@"^/api/(?:v\d+/)?webhooks/\d+/[^/]+/?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex WebhookPathPattern();
 }

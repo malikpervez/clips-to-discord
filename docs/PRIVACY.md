@@ -13,7 +13,8 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`:
 - The chosen clips-folder path
 - The start-with-Windows preference
 - The Discord webhook URL encrypted with Windows DPAPI for the current user
-- File signatures used to prevent duplicate uploads
+- Path/length/timestamp keys used only to preserve the initial do-not-upload baseline
+- SHA-256 hashes of clip contents used for stable duplicate detection
 - Pending archive moves
 - Operational logs
 
@@ -22,6 +23,8 @@ The webhook cannot normally be decrypted by another Windows account or after mov
 ## Network access
 
 Normal operation connects only to the Discord webhook URL supplied by the user. When a clip is too large, compression is performed locally by the bundled FFmpeg executable before the smaller copy is uploaded.
+
+SHA-256 hashing and FFmpeg compression are performed locally. Clip content and hashes are not sent to a project-operated server. Operational log messages pass through a webhook-URL redactor before being written.
 
 ## File handling
 

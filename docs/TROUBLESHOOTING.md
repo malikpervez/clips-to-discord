@@ -14,7 +14,7 @@ Check these in order:
 2. The tray status says it is watching for clips.
 3. The selected directory is the folder containing the new `.mp4`, not the `uploaded` folder.
 4. The clip is a top-level `.mp4`. Nested directories and other formats are ignored.
-5. The recording tool has finished writing the file. The app waits at least 20 seconds and requires exclusive read access before uploading.
+5. The recording tool has finished writing the file. The app requires matching length and timestamp observations across ten seconds and successful shared-read access before queueing it.
 6. The webhook still exists and points to the intended channel.
 
 Clips already present during the first scan are recorded as a safe baseline and are not uploaded automatically.
@@ -22,6 +22,8 @@ Clips already present during the first scan are recorded as a safe baseline and 
 ## The clip is too large
 
 The release ZIP includes `ffmpeg.exe`. Keep it beside `ClipsToDiscord.exe`; the app uses it only after Discord rejects an original clip for size. Compression can take a while on long clips.
+
+The compression target is configurable from 1–100 MB. If the selected target is still rejected, the app retries progressively smaller targets. Discord currently documents 10 MiB as the default per-file limit, with higher limits possible for some users or servers.
 
 If building from source without FFmpeg, normal-size clips still work, but oversized clips report an error in the log.
 
@@ -42,6 +44,8 @@ Open this directory in File Explorer:
 - `app.log` contains operational messages and upload errors.
 - `settings.json` contains the folder preference and an encrypted webhook value.
 - `state.json` tracks the initial baseline, completed clips, and pending moves.
+
+State uses SHA-256 content hashes. The first v1.2 launch may spend extra time reading existing top-level and archived clips once to create a safe baseline.
 
 Do not post `settings.json` publicly. Although the webhook is encrypted for the Windows account, configuration files should still be treated as private.
 
