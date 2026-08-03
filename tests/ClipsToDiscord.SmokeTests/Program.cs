@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ClipsToDiscord;
 
 var temporaryRoot = Path.Combine(Path.GetTempPath(), "ClipsToDiscordTests", Guid.NewGuid().ToString("N"));
@@ -24,6 +25,35 @@ try
     Assert(
         Path.GetFileName(createdFolder).Equals("uploaded", StringComparison.Ordinal),
         "A newly created archive folder must use the canonical lowercase name.");
+
+    var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
+    var recoveryClips = Path.Combine(recoveryRoot, "clips");
+    var recoveryStateDirectory = Path.Combine(recoveryRoot, "state");
+    Directory.CreateDirectory(recoveryClips);
+    Directory.CreateDirectory(recoveryStateDirectory);
+    var pendingMovePath = Path.Combine(recoveryClips, "uploaded-but-not-moved.mp4");
+    await File.WriteAllBytesAsync(pendingMovePath, new byte[] { 9, 8, 7, 6 });
+    var recoveryStatePath = Path.Combine(recoveryStateDirectory, "state.json");
+    var recoveryMarkerPath = Path.Combine(recoveryStateDirectory, ".safe-baseline-required");
+    var recoveryStore = new WatchStateStore(recoveryStatePath, recoveryMarkerPath);
+    recoveryStore.Save(new WatchState
+    {
+        Version = 2,
+        ClipsFolder = recoveryClips,
+        PendingMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pendingMovePath }
+    });
+    await File.WriteAllTextAsync(recoveryMarkerPath, DateTime.UtcNow.ToString("O"));
+    var recoveredState = await recoveryStore.LoadOrInitializeAsync(
+        recoveryClips,
+        _ => { },
+        CancellationToken.None);
+    Assert(
+        recoveredState.PendingMoves.Contains(pendingMovePath),
+        "A forced safe-baseline rebuild must preserve readable pending moves.");
+    Assert(
+        recoveredState.KnownContentHashes.Count == 1,
+        "A forced safe-baseline rebuild must hash existing clips.");
+    Assert(!File.Exists(recoveryMarkerPath), "The recovery marker must clear after the baseline is durably saved.");
 
     var readinessPath = Path.Combine(temporaryRoot, "readiness.mp4");
     await File.WriteAllBytesAsync(readinessPath, new byte[] { 1, 2, 3, 4 });
@@ -136,6 +166,66 @@ try
         compressionTargets.Zip(compressionTargets.Skip(1)).All(pair => pair.First > pair.Second),
         "Compression fallback targets must decrease strictly.");
 
+    var detectorResponses = new ConcurrentQueue<bool>(
+        [true, false, false, true, false, false, false, true]);
+    var watcherStarts = 0;
+    var watcherCancellations = 0;
+    var cancellationsAtDebounceReset = -1;
+    var detectorCalls = 0;
+    bool SimulatedDiscordDetector()
+    {
+        var call = Interlocked.Increment(ref detectorCalls);
+        var response = detectorResponses.TryDequeue(out var queuedResponse) ? queuedResponse : true;
+        if (call == 4)
+        {
+            cancellationsAtDebounceReset = Volatile.Read(ref watcherCancellations);
+        }
+        return response;
+    }
+
+    async Task SimulatedWatcher(
+        AppSettings ignoredSettings,
+        Action<string> ignoredStatus,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref watcherStarts);
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            Interlocked.Increment(ref watcherCancellations);
+            throw;
+        }
+    }
+
+    var controllerOptions = new DiscordControllerOptions(
+        TimeSpan.FromMilliseconds(5),
+        TimeSpan.FromMilliseconds(5),
+        TimeSpan.FromMilliseconds(5),
+        3,
+        TimeSpan.FromSeconds(1));
+    var controller = new DiscordAwareController(
+        AppSettings.Empty,
+        _ => { },
+        SimulatedDiscordDetector,
+        SimulatedWatcher,
+        controllerOptions);
+    await WaitUntilAsync(
+        () => Volatile.Read(ref watcherCancellations) >= 1,
+        TimeSpan.FromSeconds(2),
+        "The watcher was not cancelled after three consecutive absent polls.");
+    Assert(cancellationsAtDebounceReset == 0, "Two absent polls must not stop the watcher.");
+    await WaitUntilAsync(
+        () => Volatile.Read(ref watcherStarts) >= 2,
+        TimeSpan.FromSeconds(2),
+        "The watcher did not restart after Discord returned.");
+    controller.Dispose();
+    Assert(
+        Volatile.Read(ref watcherCancellations) == 2,
+        "Controller disposal must cancel and await the active watcher.");
+
     Console.WriteLine("All smoke tests passed.");
 }
 finally
@@ -146,4 +236,14 @@ finally
 static void Assert(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
+}
+
+static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string failureMessage)
+{
+    var deadline = DateTime.UtcNow.Add(timeout);
+    while (!condition())
+    {
+        if (DateTime.UtcNow >= deadline) throw new InvalidOperationException(failureMessage);
+        await Task.Delay(TimeSpan.FromMilliseconds(10));
+    }
 }
