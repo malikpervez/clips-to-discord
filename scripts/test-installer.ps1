@@ -167,7 +167,9 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     if ($blockedExitCode -eq 0) {
         throw 'Silent installation unexpectedly succeeded while the application mutex was held.'
     }
-    Assert-InstalledVersion -SetupVersion $ExpectedVersion
+    Assert-InstalledVersion `
+        -SetupVersion $ExpectedVersion `
+        -ExecutableVersion $ExpectedVersion
 
     if ($null -ne $mutexHolder -and -not $mutexHolder.HasExited) {
         Stop-Process -Id $mutexHolder.Id -Force
