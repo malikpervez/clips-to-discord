@@ -16,7 +16,7 @@ foreach ($path in @($installer, $previousInstaller)) {
 
 $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\ClipsToDiscord'
 $dataDirectory = Join-Path $env:LOCALAPPDATA 'ClipsToDiscord'
-$dataSentinel = Join-Path $dataDirectory 'installer-preservation-test.txt'
+$dataSentinel = Join-Path $dataDirectory "installer-preservation-$([Guid]::NewGuid().ToString('N')).txt"
 $startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Clips to Discord.lnk'
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Clips to Discord.lnk'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -39,6 +39,27 @@ function Invoke-Installer {
         -PassThru `
         -WindowStyle Hidden
     $process.ExitCode
+}
+
+function Get-DataSnapshot {
+    if (-not (Test-Path -LiteralPath $dataDirectory -PathType Container)) {
+        return @()
+    }
+
+    $root = [IO.Path]::GetFullPath($dataDirectory).TrimEnd('\')
+    @(Get-ChildItem -LiteralPath $root -Force -Recurse |
+        Where-Object FullName -ne $dataSentinel |
+        Sort-Object { $_.FullName.Substring($root.Length + 1) } |
+        ForEach-Object {
+            $relativePath = $_.FullName.Substring($root.Length + 1).Replace('\', '/')
+            if ($_.PSIsContainer) {
+                "D|$relativePath"
+            }
+            else {
+                $fileHash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                "F|$relativePath|$($_.Length)|$fileHash"
+            }
+        })
 }
 
 function Assert-InstalledVersion {
@@ -68,10 +89,13 @@ function Assert-InstalledVersion {
 if (Get-Process -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue) {
     throw 'A ClipsToDiscord process is already running.'
 }
-foreach ($path in @($installDirectory, $dataDirectory, $startMenuShortcut, $desktopShortcut)) {
+foreach ($path in @($installDirectory, $startMenuShortcut, $desktopShortcut)) {
     if (Test-Path -LiteralPath $path) {
         throw "Installer smoke test requires a clean runner; found: $path"
     }
+}
+if (Test-Path -LiteralPath $dataDirectory -PathType Leaf) {
+    throw "Application data path is not a directory: $dataDirectory"
 }
 if ((Get-UninstallEntries).Count -ne 0) {
     throw 'Installer smoke test requires no existing Clips to Discord installation.'
@@ -80,6 +104,8 @@ $existingRunValue = (Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinu
 if ($null -ne $existingRunValue) {
     throw 'Installer smoke test requires no existing ClipsToDiscord startup value.'
 }
+$dataDirectoryExisted = Test-Path -LiteralPath $dataDirectory -PathType Container
+$baselineData = @(Get-DataSnapshot)
 
 try {
     [IO.Directory]::CreateDirectory($dataDirectory) | Out-Null
@@ -179,6 +205,11 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     if (-not (Test-Path -LiteralPath $dataSentinel -PathType Leaf)) {
         throw 'Uninstall removed the application-data sentinel.'
     }
+    $dataAfterUninstall = @(Get-DataSnapshot)
+    $dataDifference = @(Compare-Object -ReferenceObject $baselineData -DifferenceObject $dataAfterUninstall)
+    if ($dataDifference.Count -ne 0) {
+        throw 'Uninstall changed pre-existing application data.'
+    }
 }
 finally {
     if ($null -ne $mutexHolder -and -not $mutexHolder.HasExited) {
@@ -191,7 +222,8 @@ finally {
     if (Test-Path -LiteralPath $dataSentinel) {
         Remove-Item -LiteralPath $dataSentinel -Force
     }
-    if (Test-Path -LiteralPath $dataDirectory -PathType Container) {
+    if (-not $dataDirectoryExisted -and
+        (Test-Path -LiteralPath $dataDirectory -PathType Container)) {
         $remainingData = @(Get-ChildItem -LiteralPath $dataDirectory -Force)
         if ($remainingData.Count -eq 0) {
             Remove-Item -LiteralPath $dataDirectory -Force
