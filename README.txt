@@ -19,5 +19,9 @@ Keep your webhook URL private. If it is exposed, rotate or delete it in Discord.
 
 This app is not affiliated with Discord or any recording-software vendor.
 
+The bundled FFmpeg 8.1.2 essentials build is provided by Gyan.dev under GPLv3.
+Its license is in FFMPEG-LICENSE.txt. The corresponding FFmpeg source revision is:
+https://github.com/FFmpeg/FFmpeg/commit/38b88335f9
+
 For an automatic per-user installation, download ClipsToDiscord-Setup.exe from
 the GitHub Releases page instead of this portable ZIP.

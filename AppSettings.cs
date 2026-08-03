@@ -37,9 +37,11 @@ internal sealed record AppSettings(
             normalized = Regex.Replace(Environment.UserName, @"\s+", " ").Trim();
         }
         if (string.IsNullOrWhiteSpace(normalized)) normalized = "Someone";
-        return normalized.Length <= MaximumUploaderNameLength
-            ? normalized
-            : normalized[..MaximumUploaderNameLength];
+        if (normalized.Length <= MaximumUploaderNameLength) return normalized;
+
+        var safeLength = MaximumUploaderNameLength;
+        if (char.IsHighSurrogate(normalized[safeLength - 1])) safeLength--;
+        return normalized[..safeLength];
     }
 }
 

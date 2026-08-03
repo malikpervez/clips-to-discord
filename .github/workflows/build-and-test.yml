@@ -30,17 +30,34 @@ jobs:
 
       - name: Build portable package layout
         shell: powershell
-        run: .\scripts\package.ps1
+        run: |
+          $ffmpegDirectory = .\scripts\get-ffmpeg.ps1
+          .\scripts\package.ps1 `
+            -FfmpegPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') `
+            -FfmpegLicensePath (Join-Path $ffmpegDirectory 'FFMPEG-LICENSE.txt')
+
+      - name: Download verified previous installer
+        shell: powershell
+        run: |
+          $previousDirectory = '.\artifacts\previous-installer'
+          [IO.Directory]::CreateDirectory($previousDirectory) | Out-Null
+          $previousInstaller = Join-Path $previousDirectory 'ClipsToDiscord-Setup.exe'
+          Invoke-WebRequest `
+            -Uri 'https://github.com/malikpervez/clips-to-discord/releases/download/v1.3.4/ClipsToDiscord-Setup.exe' `
+            -OutFile $previousInstaller `
+            -MaximumRedirection 5 `
+            -UseBasicParsing
+          $expectedSha256 = 'DC6861C24200758E3DC5E68A9932F5A51D2C1BE4932049244DF60ECC19B37D87'
+          $actualSha256 = (Get-FileHash -LiteralPath $previousInstaller -Algorithm SHA256).Hash
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "Previous installer checksum mismatch. Expected $expectedSha256, got $actualSha256."
+          }
 
       - name: Build installer
         shell: powershell
         run: |
           $isccPath = .\scripts\get-inno-setup.ps1
-          .\scripts\build-installer.ps1 `
-            -IsccPath $isccPath `
-            -OutputDirectory .\artifacts\previous-installer `
-            -Version 1.3.3
-          .\scripts\build-installer.ps1 -IsccPath $isccPath
+          .\scripts\build-installer.ps1 -IsccPath $isccPath -RequireFfmpeg
 
       - name: Verify application and installer icons
         shell: powershell
@@ -75,6 +92,31 @@ jobs:
             throw 'The tampered compiler cache was accepted.'
           }
 
+      - name: Reject tampered FFmpeg cache
+        shell: powershell
+        run: |
+          $tamperedDirectory = Join-Path $env:RUNNER_TEMP 'TamperedFfmpeg'
+          Copy-Item `
+            -LiteralPath .\artifacts\tools\FFmpeg-8.1.2 `
+            -Destination $tamperedDirectory `
+            -Recurse
+          Add-Content `
+            -LiteralPath (Join-Path $tamperedDirectory 'ffmpeg.exe') `
+            -Value 'tampered'
+          $rejected = $false
+          try {
+            .\scripts\get-ffmpeg.ps1 -DestinationDirectory $tamperedDirectory
+          }
+          catch {
+            if ($_.Exception.Message -notlike '*integrity check failed*') {
+              throw
+            }
+            $rejected = $true
+          }
+          if (-not $rejected) {
+            throw 'The tampered FFmpeg cache was accepted.'
+          }
+
       - name: Reject unexpected package files
         shell: powershell
         run: |
@@ -104,5 +146,30 @@ jobs:
           .\scripts\test-installer.ps1 `
             -InstallerPath .\artifacts\ClipsToDiscord-Setup.exe `
             -PreviousInstallerPath .\artifacts\previous-installer\ClipsToDiscord-Setup.exe `
-            -ExpectedVersion 1.3.4 `
-            -PreviousVersion 1.3.3
+            -ExpectedVersion 1.3.5 `
+            -PreviousVersion 1.3.4
+
+      - name: Prepare release checksums
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: powershell
+        run: |
+          $lines = @(
+            'ClipsToDiscord-Setup.exe',
+            'ClipsToDiscord-win-x64.zip'
+          ) | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath (Join-Path '.\artifacts' $_) -Algorithm SHA256).Hash
+            "$hash  $_"
+          }
+          Set-Content -LiteralPath '.\artifacts\SHA256SUMS.txt' -Value $lines -Encoding Ascii
+
+      - name: Upload verified release candidates
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ClipsToDiscord-release-${{ github.sha }}
+          path: |
+            artifacts/ClipsToDiscord-Setup.exe
+            artifacts/ClipsToDiscord-win-x64.zip
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

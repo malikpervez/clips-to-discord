@@ -2,6 +2,14 @@
 
 All notable user-facing changes are documented here.
 
+## 1.3.5 — 2026-08-03
+
+- Stopped over-escaping ordinary game-name punctuation so names such as `Battlefield™-6` and `Half-Life` display without visible backslashes in Discord.
+- Made uploader-name truncation safe at UTF-16 surrogate boundaries so an emoji at the 80-character limit cannot create an invalid payload.
+- Declared the application long-path-aware to reduce archive-move failures for deeply nested clip folders and long recording filenames on supported Windows systems.
+- Pinned and hash-verified the FFmpeg release package used by CI, tested upgrades against the actual v1.3.4 installer, and retained the exact post-test installer, portable ZIP, and checksum manifest as a downloadable CI artifact.
+- Added regression coverage for hyphenated attribution and Unicode boundary truncation.
+
 ## 1.3.4 — 2026-08-03
 
 - Reworked the settings window into a resizable, DPI-aware layout so long paths, action buttons, helper text, and bottom controls remain visible.
