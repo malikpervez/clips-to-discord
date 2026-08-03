@@ -11,7 +11,7 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 ## What it does
 
 - Works with any recorder, clipping tool, replay buffer, editor, or export workflow that saves `.mp4` files into a folder.
-- Asks for only the clips folder and a Discord webhook URL.
+- Asks for the clips folder, a Discord webhook URL, and the uploader name Discord should show with each clip.
 - Encrypts the webhook for the current Windows account using Windows DPAPI.
 - Starts the folder watcher when Discord opens and stops it when Discord closes.
 - Uploads only new `.mp4` files from the top level of the selected folder.
@@ -21,6 +21,7 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 - Moves successfully uploaded originals into case-insensitive `uploaded\<game name>` subfolders inferred from common recording timestamps; unrecognized names share `uploaded\Uncategorized`.
 - Preserves duplicate filenames by adding a unique suffix.
 - Uses a configurable compression target and retries smaller targets when Discord rejects a file for size.
+- Identifies who uploaded each clip and, when recognized, which game it came from—even when friends share one webhook.
 - Redacts Discord webhook URLs from all application log messages.
 - Can start automatically when the user signs into Windows.
 - Uses one recognizable icon across the system tray, executable, shortcuts, and installer.
@@ -33,7 +34,7 @@ The app is not affiliated with Discord or any recording-software vendor.
 2. Run the installer normally from Downloads, Desktop, or anywhere else. Do not use **Run as administrator**.
 3. The installer places the app under `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates Start Menu and uninstall entries, and launches the installed copy.
 4. Select the folder where your clipping or recording tool saves finished MP4 clips.
-5. Paste the Discord webhook URL and optionally click **Test webhook**.
+5. Paste the Discord webhook URL, enter your Discord display name, and optionally click **Test webhook**.
 6. Click **Save**.
 
 Each release includes `SHA256SUMS.txt` so the installer or portable ZIP can be verified with `Get-FileHash` before it is opened.

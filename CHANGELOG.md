@@ -2,6 +2,14 @@
 
 All notable user-facing changes are documented here.
 
+## 1.3.4 — 2026-08-03
+
+- Reworked the settings window into a resizable, DPI-aware layout so long paths, action buttons, helper text, and bottom controls remain visible.
+- Added a per-installation uploader name for friends who share one webhook; existing settings safely default to the current Windows account name until changed.
+- Label each Discord upload with `Uploader uploaded a clip from Game` as both visible message content and the attachment description, while continuing to suppress mentions.
+- Applied the branded application icon to the open settings window.
+- Added UI-boundary, uploader-normalization, Markdown-escaping, attachment-description, and mention-suppression regression tests.
+
 ## 1.3.3 — 2026-08-03
 
 - Added a custom coral film-frame and violet lightning icon designed to remain recognizable at Windows system-tray sizes.

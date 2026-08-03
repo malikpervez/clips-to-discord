@@ -29,7 +29,7 @@ flowchart LR
 - `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes, debounces brief absences, and observes each worker before restart or shutdown.
 - `FileReadinessTracker` requires stable metadata across multiple observations and exponentially backs off unreadable files.
 - `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two upload consumers.
-- `DiscordWebhookClient` sends multipart attachments with separate connection and total deadlines and progressively smaller compression retries.
+- `DiscordWebhookClient` sends multipart attachments with uploader/game attribution, disabled mentions, separate connection and total deadlines, and progressively smaller compression retries.
 - `FfmpegCompressor` performs local two-pass H.264/AAC compression to a requested target.
 - `SettingsStore` encrypts the webhook with DPAPI and performs staged legacy migration.
 - `WatchStateStore` uses durable atomic replacement for content hashes, safe-baseline keys, and pending archive moves.

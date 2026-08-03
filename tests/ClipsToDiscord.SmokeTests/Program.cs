@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Windows.Forms;
 using ClipsToDiscord;
 
 var temporaryRoot = Path.Combine(Path.GetTempPath(), "ClipsToDiscordTests", Guid.NewGuid().ToString("N"));
@@ -83,6 +85,44 @@ try
     Assert(
         gameBaselineState.UploadedContentHashes.Count == 2,
         "Safe baseline state must mark root-level and game-subfolder archives as uploaded.");
+
+    Assert(
+        AppSettings.NormalizeUploaderName("  Malik   Pervez  ") == "Malik Pervez",
+        "Uploader names must trim and collapse whitespace.");
+    Assert(
+        !string.IsNullOrWhiteSpace(AppSettings.NormalizeUploaderName(null)),
+        "Existing settings without an uploader name must receive a safe default.");
+    Assert(
+        DiscordClipMessage.BuildDescription("Malik", "Battlefield™-6__2026-08-03__13-43-46.mp4") ==
+        "Malik uploaded a clip from Battlefield™-6.",
+        "Timestamped clips must identify the uploader and parsed game.");
+    Assert(
+        DiscordClipMessage.BuildContent("player_*one*", "manual-highlight.mp4") ==
+        "player\\_\\*one\\* uploaded a clip.",
+        "Uploader names must be escaped and unrecognized games must not claim a game name.");
+    using (var payload = JsonDocument.Parse(DiscordWebhookClient.BuildUploadPayload(
+               "clip.mp4",
+               "Malik uploaded a clip from Battlefield™-6.",
+               "Malik uploaded a clip from Battlefield™-6.")))
+    {
+        var root = payload.RootElement;
+        Assert(root.GetProperty("content").GetString() == "Malik uploaded a clip from Battlefield™-6.",
+            "The visible Discord message must contain uploader attribution.");
+        var attachment = root.GetProperty("attachments")[0];
+        Assert(attachment.GetProperty("id").GetInt32() == 0 &&
+               attachment.GetProperty("filename").GetString() == "clip.mp4" &&
+               attachment.GetProperty("description").GetString() == "Malik uploaded a clip from Battlefield™-6.",
+            "The attachment description must contain matching uploader attribution.");
+        Assert(root.GetProperty("allowed_mentions").GetProperty("parse").GetArrayLength() == 0,
+            "Uploader-controlled text must not enable Discord mentions.");
+    }
+
+    AssertSettingsFormLayout(new AppSettings(
+        gameArchiveRoot,
+        "https://discord.com/api/" + "webhooks/123456/test-token",
+        true,
+        AppSettings.DefaultCompressionTargetMb,
+        "Malik"));
 
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
     var recoveryClips = Path.Combine(recoveryRoot, "clips");
@@ -309,5 +349,70 @@ static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string 
     {
         if (DateTime.UtcNow >= deadline) throw new InvalidOperationException(failureMessage);
         await Task.Delay(TimeSpan.FromMilliseconds(10));
+    }
+}
+
+static void AssertSettingsFormLayout(AppSettings settings)
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            using var form = new SettingsForm(settings);
+            form.CreateControl();
+            AssertControlsFit(form);
+            form.Size = form.MinimumSize;
+            form.PerformLayout();
+            AssertControlsFit(form);
+
+            var buttonTexts = EnumerateControls(form)
+                .OfType<Button>()
+                .Select(button => button.Text)
+                .ToHashSet(StringComparer.Ordinal);
+            Assert(buttonTexts.SetEquals(["Browse…", "Test webhook", "Save", "Cancel"]),
+                "The settings form must keep all action buttons available.");
+            var startupCheckbox = EnumerateControls(form)
+                .OfType<CheckBox>()
+                .Single(checkBox => checkBox.Text == "Start with Windows");
+            Assert(startupCheckbox.Width > 0 && startupCheckbox.Height > 0,
+                "The Start with Windows checkbox must occupy visible layout space.");
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) throw new InvalidOperationException("Settings form layout validation failed.", failure);
+}
+
+static void AssertControlsFit(Form form)
+{
+    form.PerformLayout();
+    foreach (var control in EnumerateControls(form).Where(control => control.Visible))
+    {
+        control.PerformLayout();
+        var bounds = control.Bounds;
+        for (var parent = control.Parent; parent is not null && parent != form; parent = parent.Parent)
+        {
+            bounds.Offset(parent.Left, parent.Top);
+        }
+
+        Assert(bounds.Left >= 0 && bounds.Top >= 0 &&
+               bounds.Right <= form.ClientSize.Width + 1 &&
+               bounds.Bottom <= form.ClientSize.Height + 1,
+            $"Control '{control.Text}' is clipped at {bounds} inside {form.ClientSize}.");
+    }
+}
+
+static IEnumerable<Control> EnumerateControls(Control parent)
+{
+    foreach (Control control in parent.Controls)
+    {
+        yield return control;
+        foreach (var descendant in EnumerateControls(control)) yield return descendant;
     }
 }

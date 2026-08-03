@@ -2,8 +2,14 @@ namespace ClipsToDiscord;
 
 internal sealed class SettingsForm : Form
 {
+    private readonly Icon? _ownedApplicationIcon;
     private readonly TextBox _folderText = new() { Dock = DockStyle.Fill };
     private readonly TextBox _webhookText = new() { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
+    private readonly TextBox _uploaderNameText = new()
+    {
+        Dock = DockStyle.Fill,
+        MaxLength = AppSettings.MaximumUploaderNameLength
+    };
     private readonly NumericUpDown _compressionTarget = new()
     {
         Minimum = 1,
@@ -18,18 +24,23 @@ internal sealed class SettingsForm : Form
 
     public AppSettings? SavedSettings { get; private set; }
 
-    public SettingsForm(AppSettings settings)
+    public SettingsForm(AppSettings settings, Icon? applicationIcon = null)
     {
         Text = "Clips to Discord — Settings";
+        _ownedApplicationIcon = applicationIcon;
+        if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
         StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(650, 335);
+        ClientSize = new Size(760, 455);
+        MinimumSize = new Size(680, 455);
+        SizeGripStyle = SizeGripStyle.Show;
         AutoScaleMode = AutoScaleMode.Dpi;
 
         _folderText.Text = settings.ClipsFolder;
         _webhookText.Text = settings.WebhookUrl;
+        _uploaderNameText.Text = AppSettings.NormalizeUploaderName(settings.UploaderName);
         _compressionTarget.Value = Math.Clamp(
             settings.CompressionTargetMb,
             (int)_compressionTarget.Minimum,
@@ -42,39 +53,57 @@ internal sealed class SettingsForm : Form
         _saveButton.Click += SaveClicked;
         var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
 
-        var folderRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true };
+        var folderRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            AutoSize = true,
+            Margin = Padding.Empty
+        };
         folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         folderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         folderRow.Controls.Add(_folderText, 0, 0);
         folderRow.Controls.Add(browseButton, 1, 0);
 
-        var webhookRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true };
+        var webhookRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            AutoSize = true,
+            Margin = Padding.Empty
+        };
         webhookRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         webhookRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         webhookRow.Controls.Add(_webhookText, 0, 0);
         webhookRow.Controls.Add(_testButton, 1, 0);
 
-        var compressionRow = new FlowLayoutPanel
+        var compressionRow = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
+            ColumnCount = 2,
             AutoSize = true,
-            WrapContents = false,
-            FlowDirection = FlowDirection.LeftToRight
+            Margin = Padding.Empty
         };
-        compressionRow.Controls.Add(_compressionTarget);
+        compressionRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        compressionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        compressionRow.Controls.Add(_compressionTarget, 0, 0);
         compressionRow.Controls.Add(new Label
         {
-            Text = "MB (new default: 95; the app retries smaller targets if Discord rejects the file)",
-            AutoSize = true,
-            Margin = new Padding(6, 5, 0, 0)
-        });
+            Text = "MB target; smaller retries are automatic",
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true,
+            Margin = new Padding(8, 0, 0, 0)
+        }, 1, 0);
 
         var buttonRow = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
-            WrapContents = false
+            WrapContents = false,
+            Margin = Padding.Empty
         };
         buttonRow.Controls.Add(_saveButton);
         buttonRow.Controls.Add(cancelButton);
@@ -84,17 +113,12 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 1,
-            RowCount = 10,
-            AutoSize = true
+            RowCount = 13,
+            AutoSize = false,
+            AutoScroll = true
         };
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var row = 0; row < 11; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -104,34 +128,49 @@ internal sealed class SettingsForm : Form
             AutoSize = true,
             Font = new Font(Font, FontStyle.Bold),
             Margin = new Padding(0, 0, 0, 5)
-        });
-        layout.Controls.Add(folderRow);
+        }, 0, 0);
+        layout.Controls.Add(folderRow, 0, 1);
         layout.Controls.Add(new Label
         {
             Text = "Discord webhook URL",
             AutoSize = true,
             Font = new Font(Font, FontStyle.Bold),
             Margin = new Padding(0, 14, 0, 5)
-        });
-        layout.Controls.Add(webhookRow);
+        }, 0, 2);
+        layout.Controls.Add(webhookRow, 0, 3);
         layout.Controls.Add(new Label
         {
             Text = "Keep this URL private. It is encrypted for your Windows account when saved.",
             AutoSize = true,
             ForeColor = SystemColors.GrayText,
             Margin = new Padding(0, 5, 0, 10)
-        });
+        }, 0, 4);
+        layout.Controls.Add(new Label
+        {
+            Text = "Uploader name",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(0, 5, 0, 5)
+        }, 0, 5);
+        layout.Controls.Add(_uploaderNameText, 0, 6);
+        layout.Controls.Add(new Label
+        {
+            Text = "Shown with each clip. Use your Discord display name when sharing a webhook.",
+            AutoSize = true,
+            ForeColor = SystemColors.GrayText,
+            Margin = new Padding(0, 5, 0, 10)
+        }, 0, 7);
         layout.Controls.Add(new Label
         {
             Text = "Compression target",
             AutoSize = true,
             Font = new Font(Font, FontStyle.Bold),
             Margin = new Padding(0, 5, 0, 5)
-        });
-        layout.Controls.Add(compressionRow);
-        layout.Controls.Add(_startWithWindows);
-        layout.Controls.Add(_statusLabel);
-        layout.Controls.Add(buttonRow);
+        }, 0, 8);
+        layout.Controls.Add(compressionRow, 0, 9);
+        layout.Controls.Add(_startWithWindows, 0, 10);
+        layout.Controls.Add(_statusLabel, 0, 11);
+        layout.Controls.Add(buttonRow, 0, 12);
         Controls.Add(layout);
 
         AcceptButton = _saveButton;
@@ -161,7 +200,10 @@ internal sealed class SettingsForm : Form
         try
         {
             using var client = new DiscordWebhookClient();
-            await client.TestConnectionAsync(_webhookText.Text.Trim(), CancellationToken.None);
+            await client.TestConnectionAsync(
+                _webhookText.Text.Trim(),
+                AppSettings.NormalizeUploaderName(_uploaderNameText.Text),
+                CancellationToken.None);
             _statusLabel.ForeColor = Color.DarkGreen;
             _statusLabel.Text = "Connection successful — check the Discord channel.";
         }
@@ -191,7 +233,14 @@ internal sealed class SettingsForm : Form
             _folderText.Text.Trim(),
             _webhookText.Text.Trim(),
             _startWithWindows.Checked,
-            Decimal.ToInt32(_compressionTarget.Value));
+            Decimal.ToInt32(_compressionTarget.Value),
+            AppSettings.NormalizeUploaderName(_uploaderNameText.Text));
+
+        if (string.IsNullOrWhiteSpace(_uploaderNameText.Text))
+        {
+            MessageBox.Show(this, "Enter the name Discord should show with uploaded clips.", "Invalid uploader name", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
 
         if (!Directory.Exists(settings.ClipsFolder))
         {
@@ -217,5 +266,11 @@ internal sealed class SettingsForm : Form
             _statusLabel.ForeColor = SystemColors.GrayText;
             _statusLabel.Text = status;
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing) _ownedApplicationIcon?.Dispose();
     }
 }

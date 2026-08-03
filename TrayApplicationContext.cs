@@ -62,7 +62,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settingsOpen = true;
         try
         {
-            using var form = new SettingsForm(_settings);
+            using var form = new SettingsForm(_settings, (Icon)_applicationIcon.Clone());
             if (form.ShowDialog() == DialogResult.OK && form.SavedSettings is not null)
             {
                 SettingsStore.Save(form.SavedSettings);

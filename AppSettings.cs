@@ -9,19 +9,38 @@ internal sealed record AppSettings(
     string ClipsFolder,
     string WebhookUrl,
     bool StartWithWindows,
-    int CompressionTargetMb)
+    int CompressionTargetMb,
+    string UploaderName)
 {
     public const int DefaultCompressionTargetMb = 95;
+    public const int MaximumUploaderNameLength = 80;
+    public static string DefaultUploaderName => NormalizeUploaderName(null);
     public static AppSettings Empty { get; } = new(
         string.Empty,
         string.Empty,
         true,
-        DefaultCompressionTargetMb);
+        DefaultCompressionTargetMb,
+        DefaultUploaderName);
 
     public bool IsValid =>
         Directory.Exists(ClipsFolder) &&
         WebhookValidation.IsDiscordWebhook(WebhookUrl) &&
-        CompressionTargetMb is >= 1 and <= 100;
+        CompressionTargetMb is >= 1 and <= 100 &&
+        !string.IsNullOrWhiteSpace(UploaderName) &&
+        UploaderName.Length <= MaximumUploaderNameLength;
+
+    public static string NormalizeUploaderName(string? value)
+    {
+        var normalized = Regex.Replace(value ?? string.Empty, @"\s+", " ").Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            normalized = Regex.Replace(Environment.UserName, @"\s+", " ").Trim();
+        }
+        if (string.IsNullOrWhiteSpace(normalized)) normalized = "Someone";
+        return normalized.Length <= MaximumUploaderNameLength
+            ? normalized
+            : normalized[..MaximumUploaderNameLength];
+    }
 }
 
 internal static class SettingsStore
@@ -63,7 +82,8 @@ internal static class SettingsStore
                 stored.ClipsFolder ?? string.Empty,
                 webhookUrl,
                 stored.StartWithWindows,
-                NormalizeCompressionTarget(stored.CompressionTargetMb));
+                NormalizeCompressionTarget(stored.CompressionTargetMb),
+                AppSettings.NormalizeUploaderName(stored.UploaderName));
         }
         catch (Exception exception)
         {
@@ -141,7 +161,8 @@ internal static class SettingsStore
             ClipsFolder = settings.ClipsFolder,
             ProtectedWebhook = Convert.ToBase64String(encrypted),
             StartWithWindows = settings.StartWithWindows,
-            CompressionTargetMb = settings.CompressionTargetMb
+            CompressionTargetMb = settings.CompressionTargetMb,
+            UploaderName = AppSettings.NormalizeUploaderName(settings.UploaderName)
         };
 
         var temporaryPath = SettingsPath + ".tmp";
@@ -155,6 +176,7 @@ internal static class SettingsStore
         public string? ProtectedWebhook { get; set; }
         public bool StartWithWindows { get; set; } = true;
         public int CompressionTargetMb { get; set; } = AppSettings.DefaultCompressionTargetMb;
+        public string? UploaderName { get; set; } = AppSettings.DefaultUploaderName;
     }
 
     private static int NormalizeCompressionTarget(int value) =>

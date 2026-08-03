@@ -4,12 +4,14 @@ CLIPS TO DISCORD — PORTABLE PACKAGE
 2. Run ClipsToDiscord.exe.
 3. Choose the folder where your clipping tool saves finished MP4 clips.
 4. Paste your Discord webhook URL.
-5. Choose a compression target (9 MB is the safe default).
-6. Test the webhook, then save.
+5. Enter the name Discord should show with your uploaded clips.
+6. Choose a compression target (new settings default to 95 MB).
+7. Test the webhook, then save.
 
 The app stays in the Windows notification area. It watches for clips only while
-Discord desktop is open. After a successful upload, the original clip moves into
-the "uploaded" folder inside your chosen clips directory.
+Discord desktop is open. Each Discord message identifies the uploader and parsed
+game name. After upload, the original moves into "uploaded\<game name>"; filenames
+without a recognized game/timestamp structure use "uploaded\Uncategorized".
 
 The app works with any tool that saves MP4 clips into the selected folder.
 
