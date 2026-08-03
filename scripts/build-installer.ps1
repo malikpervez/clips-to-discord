@@ -2,7 +2,8 @@ param(
     [string]$IsccPath,
     [string]$PackageDirectory,
     [string]$OutputDirectory,
-    [string]$Version
+    [string]$Version,
+    [switch]$RequireFfmpeg
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,15 +26,33 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
 }
 
 if (-not $IsccPath) {
-    $candidates = @(
-        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 7\ISCC.exe'),
-        (Join-Path ${env:ProgramFiles} 'Inno Setup 7\ISCC.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe')
-    )
-    $IsccPath = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
+    $IsccPath = & (Join-Path $PSScriptRoot 'get-inno-setup.ps1')
 }
 if (-not $IsccPath -or -not (Test-Path -LiteralPath $IsccPath -PathType Leaf)) {
-    throw 'ISCC.exe was not found. Run scripts\get-inno-setup.ps1 or pass -IsccPath.'
+    throw 'The verified Inno Setup compiler was not found.'
+}
+
+$PackageDirectory = [IO.Path]::GetFullPath($PackageDirectory)
+if (-not (Test-Path -LiteralPath $PackageDirectory -PathType Container)) {
+    throw "The portable package directory was not found: $PackageDirectory"
+}
+$packageDirectoryItem = Get-Item -LiteralPath $PackageDirectory -Force
+if (($packageDirectoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "The portable package directory cannot be a reparse point: $PackageDirectory"
+}
+
+$allowedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+@('ClipsToDiscord.exe', 'README.txt', 'ffmpeg.exe', 'FFMPEG-LICENSE.txt') |
+    ForEach-Object { [void]$allowedNames.Add($_) }
+$packageItems = @(Get-ChildItem -LiteralPath $PackageDirectory -Force)
+$unexpectedItems = @($packageItems | Where-Object {
+    $_.PSIsContainer -or
+    -not $allowedNames.Contains($_.Name) -or
+    (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+})
+if ($unexpectedItems.Count -gt 0) {
+    $unexpectedNames = ($unexpectedItems | ForEach-Object Name | Sort-Object) -join ', '
+    throw "The portable package contains unexpected or unsafe items: $unexpectedNames"
 }
 
 $requiredFiles = @('ClipsToDiscord.exe', 'README.txt')
@@ -44,8 +63,19 @@ foreach ($fileName in $requiredFiles) {
     }
 }
 
+$ffmpegPath = Join-Path $PackageDirectory 'ffmpeg.exe'
+$ffmpegLicensePath = Join-Path $PackageDirectory 'FFMPEG-LICENSE.txt'
+$hasFfmpeg = Test-Path -LiteralPath $ffmpegPath -PathType Leaf
+$hasFfmpegLicense = Test-Path -LiteralPath $ffmpegLicensePath -PathType Leaf
+if ($hasFfmpeg -ne $hasFfmpegLicense) {
+    throw 'ffmpeg.exe and FFMPEG-LICENSE.txt must either both be present or both be absent.'
+}
+if ($RequireFfmpeg -and -not $hasFfmpeg) {
+    throw 'The release installer requires ffmpeg.exe and FFMPEG-LICENSE.txt.'
+}
+
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
-$resolvedPackage = [IO.Path]::GetFullPath($PackageDirectory)
+$resolvedPackage = $PackageDirectory
 $resolvedOutput = [IO.Path]::GetFullPath($OutputDirectory)
 $setupPath = Join-Path $resolvedOutput 'ClipsToDiscord-Setup.exe'
 if (Test-Path -LiteralPath $setupPath) {

@@ -24,9 +24,10 @@ Thanks for helping improve Clips to Discord.
 
    ```powershell
    .\scripts\package.ps1
-   $isccPath = .\scripts\get-inno-setup.ps1
-   .\scripts\build-installer.ps1 -IsccPath $isccPath
+   .\scripts\build-installer.ps1
    ```
+
+   The default build path downloads and validates the pinned compiler automatically. Release packages must bundle both FFmpeg and its license and pass `-RequireFfmpeg` to `build-installer.ps1`.
 
 ## Pull requests
 
