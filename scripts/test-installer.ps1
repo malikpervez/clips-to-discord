@@ -63,15 +63,18 @@ function Get-DataSnapshot {
 }
 
 function Assert-InstalledVersion {
-    param([Parameter(Mandatory = $true)][string]$SetupVersion)
+    param(
+        [Parameter(Mandatory = $true)][string]$SetupVersion,
+        [Parameter(Mandatory = $true)][string]$ExecutableVersion
+    )
 
     $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
     if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
         throw "Installed executable was not found: $installedExe"
     }
     $fileVersion = (Get-Item -LiteralPath $installedExe).VersionInfo.FileVersion
-    if ($fileVersion -ne "$ExpectedVersion.0") {
-        throw "Installed executable version was $fileVersion instead of $ExpectedVersion.0."
+    if ($fileVersion -ne "$ExecutableVersion.0") {
+        throw "Installed executable version was $fileVersion instead of $ExecutableVersion.0."
     }
     $entries = @(Get-UninstallEntries)
     if ($entries.Count -ne 1) {
@@ -115,7 +118,9 @@ try {
     if ($previousExitCode -ne 0) {
         throw "Previous-version installer exited with code $previousExitCode."
     }
-    Assert-InstalledVersion -SetupVersion $PreviousVersion
+    Assert-InstalledVersion `
+        -SetupVersion $PreviousVersion `
+        -ExecutableVersion $PreviousVersion
     if (-not (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)) {
         throw "Start Menu shortcut was not created: $startMenuShortcut"
     }
@@ -130,7 +135,9 @@ try {
     if ($upgradeExitCode -ne 0) {
         throw "Upgrade installer exited with code $upgradeExitCode."
     }
-    Assert-InstalledVersion -SetupVersion $ExpectedVersion
+    Assert-InstalledVersion `
+        -SetupVersion $ExpectedVersion `
+        -ExecutableVersion $ExpectedVersion
     if (-not (Test-Path -LiteralPath $dataSentinel -PathType Leaf)) {
         throw 'Upgrade removed the application-data sentinel.'
     }
