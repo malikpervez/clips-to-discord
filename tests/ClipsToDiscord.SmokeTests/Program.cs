@@ -92,10 +92,19 @@ try
     Assert(
         !string.IsNullOrWhiteSpace(AppSettings.NormalizeUploaderName(null)),
         "Existing settings without an uploader name must receive a safe default.");
+    var surrogateBoundaryName = new string('a', AppSettings.MaximumUploaderNameLength - 1) + "😀";
+    Assert(
+        AppSettings.NormalizeUploaderName(surrogateBoundaryName) ==
+        new string('a', AppSettings.MaximumUploaderNameLength - 1),
+        "Uploader-name truncation must not retain a lone UTF-16 surrogate.");
     Assert(
         DiscordClipMessage.BuildDescription("Malik", "Battlefield™-6__2026-08-03__13-43-46.mp4") ==
         "Malik uploaded a clip from Battlefield™-6.",
         "Timestamped clips must identify the uploader and parsed game.");
+    Assert(
+        DiscordClipMessage.BuildContent("Malik", "Battlefield™-6__2026-08-03__13-43-46.mp4") ==
+        "Malik uploaded a clip from Battlefield™-6.",
+        "Ordinary game-name punctuation must not gain visible Markdown escape characters.");
     Assert(
         DiscordClipMessage.BuildContent("player_*one*", "manual-highlight.mp4") ==
         "player\\_\\*one\\* uploaded a clip.",

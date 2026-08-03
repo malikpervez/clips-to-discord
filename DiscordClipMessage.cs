@@ -6,6 +6,7 @@ internal static class DiscordClipMessage
     {
         var normalizedUploaderName = AppSettings.NormalizeUploaderName(uploaderName);
         var gameName = UploadedFolder.GetGameFolderName(clipFileName);
+        // Discord treats attachment descriptions as plain accessibility text, not message Markdown.
         return gameName.Equals("Uncategorized", StringComparison.OrdinalIgnoreCase)
             ? $"{normalizedUploaderName} uploaded a clip."
             : $"{normalizedUploaderName} uploaded a clip from {gameName}.";
@@ -26,13 +27,5 @@ internal static class DiscordClipMessage
             .Replace("_", "\\_", StringComparison.Ordinal)
             .Replace("~", "\\~", StringComparison.Ordinal)
             .Replace("`", "\\`", StringComparison.Ordinal)
-            .Replace("|", "\\|", StringComparison.Ordinal)
-            .Replace(">", "\\>", StringComparison.Ordinal)
-            .Replace("#", "\\#", StringComparison.Ordinal)
-            .Replace("-", "\\-", StringComparison.Ordinal)
-            .Replace("+", "\\+", StringComparison.Ordinal)
-            .Replace("[", "\\[", StringComparison.Ordinal)
-            .Replace("]", "\\]", StringComparison.Ordinal)
-            .Replace("(", "\\(", StringComparison.Ordinal)
-            .Replace(")", "\\)", StringComparison.Ordinal);
+            .Replace("|", "\\|", StringComparison.Ordinal);
 }

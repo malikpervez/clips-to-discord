@@ -33,6 +33,7 @@ flowchart LR
 - `FfmpegCompressor` performs local two-pass H.264/AAC compression to a requested target.
 - `SettingsStore` encrypts the webhook with DPAPI and performs staged legacy migration.
 - `WatchStateStore` uses durable atomic replacement for content hashes, safe-baseline keys, and pending archive moves.
+- The application manifest declares `longPathAware` for supported Windows systems, reducing legacy `MAX_PATH` failures when clips are archived under game subfolders.
 - `SensitiveDataRedactor` strips registered or recognizable Discord webhook URLs before log output.
 
 ## Reliability choices
@@ -57,6 +58,6 @@ See [RELIABILITY.md](RELIABILITY.md) for the exact-once limitation and migration
 
 ## Packaging
 
-`scripts/package.ps1` publishes a single-file, self-contained `win-x64` executable and optionally bundles FFmpeg only together with its license. `scripts/build-installer.ps1` accepts exactly `ClipsToDiscord.exe`, `README.txt`, and the optional FFmpeg/license pair; directories, reparse points, settings, state, logs, and every other item fail the build. The Inno script names those four sources explicitly rather than using a recursive wildcard.
+`scripts/get-ffmpeg.ps1` downloads one pinned, versioned FFmpeg archive and validates the archive, executable, and license SHA-256 values. `scripts/package.ps1` publishes a single-file, self-contained `win-x64` executable and bundles FFmpeg only together with its license. `scripts/build-installer.ps1` accepts exactly `ClipsToDiscord.exe`, `README.txt`, and the FFmpeg/license pair for releases; directories, reparse points, settings, state, logs, and every other item fail the build. The Inno script names those four sources explicitly rather than using a recursive wildcard. After all installer tests pass on `main`, CI uploads the exact installer, portable ZIP, and checksum manifest as a release-candidate artifact.
 
 The installer targets `%LOCALAPPDATA%\Programs\ClipsToDiscord`; the ZIP remains the portable option. `scripts/get-inno-setup.ps1` pins the official installer SHA-256, uses a temporary download, and validates a deterministic SHA-256 identity over all 132 compiler-tree files before every cached use and after extraction. Build outputs and third-party binaries are excluded from Git.

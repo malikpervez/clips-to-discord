@@ -94,14 +94,15 @@ Create the per-user installer after preparing the portable layout:
 Create a package with FFmpeg compression support:
 
 ```powershell
+$ffmpegDirectory = .\scripts\get-ffmpeg.ps1
 .\scripts\package.ps1 `
-  -FfmpegPath 'C:\path\to\ffmpeg.exe' `
-  -FfmpegLicensePath 'C:\path\to\FFmpeg\LICENSE'
+  -FfmpegPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') `
+  -FfmpegLicensePath (Join-Path $ffmpegDirectory 'FFMPEG-LICENSE.txt')
 
 .\scripts\build-installer.ps1 -RequireFfmpeg
 ```
 
-FFmpeg binaries are intentionally not committed to this repository. FFmpeg and its license must be supplied together, and release installer builds should use `-RequireFfmpeg`. If you distribute an FFmpeg binary, comply with that build's license terms.
+FFmpeg binaries are intentionally not committed to this repository. The helper downloads the pinned Gyan.dev FFmpeg 8.1.2 essentials archive, rejects any archive or extracted file that does not match the recorded SHA-256 values, and keeps the matching GPLv3 license beside the executable. FFmpeg and its license must be supplied together, and release installer builds use `-RequireFfmpeg`.
 
 ## Local data
 
