@@ -10,6 +10,10 @@
   #error OutputDir must be supplied by scripts/build-installer.ps1
 #endif
 
+#ifndef RepositoryRoot
+  #error RepositoryRoot must be supplied by scripts/build-installer.ps1
+#endif
+
 #define MyAppName "Clips to Discord"
 #define MyAppExeName "ClipsToDiscord.exe"
 #define MyAppPublisher "Malik Pervez"
@@ -30,6 +34,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir={#OutputDir}
 OutputBaseFilename=ClipsToDiscord-Setup
+SetupIconFile={#RepositoryRoot}\assets\ClipsToDiscord.ico
 SetupArchitecture=x64
 Compression=lzma2/max
 SolidCompression=yes

@@ -1,5 +1,7 @@
 # Clips to Discord
 
+<p align="center"><img src="assets/app-icon.png" alt="Clips to Discord lightning and film icon" width="112"></p>
+
 [![Build and test](https://github.com/malikpervez/clips-to-discord/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/malikpervez/clips-to-discord/actions/workflows/build-and-test.yml)
 
 A Windows tray app that uploads new MP4 clips from any chosen folder to a Discord channel through a webhook.
@@ -21,6 +23,7 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 - Uses a configurable compression target and retries smaller targets when Discord rejects a file for size.
 - Redacts Discord webhook URLs from all application log messages.
 - Can start automatically when the user signs into Windows.
+- Uses one recognizable icon across the system tray, executable, shortcuts, and installer.
 
 The app is not affiliated with Discord or any recording-software vendor.
 

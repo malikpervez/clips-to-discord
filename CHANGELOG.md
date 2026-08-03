@@ -2,6 +2,12 @@
 
 All notable user-facing changes are documented here.
 
+## 1.3.3 — 2026-08-03
+
+- Added a custom coral film-frame and violet lightning icon designed to remain recognizable at Windows system-tray sizes.
+- Applied the same branded icon to the live tray app, executable, Start Menu and desktop shortcuts, Add/Remove Programs entry, and installer.
+- Added automated package checks that reject an app or installer missing the expected coral and violet icon colors.
+
 ## 1.3.2 — 2026-08-03
 
 - Changed the compression target default for new settings from 9 MB to 95 MB, while preserving every existing saved choice and retaining progressively smaller retries down to 9 MB and below.
