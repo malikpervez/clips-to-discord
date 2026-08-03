@@ -64,7 +64,7 @@ internal sealed class SettingsForm : Form
         compressionRow.Controls.Add(_compressionTarget);
         compressionRow.Controls.Add(new Label
         {
-            Text = "MB (the app retries smaller targets if Discord still rejects the file)",
+            Text = "MB (new default: 95; the app retries smaller targets if Discord rejects the file)",
             AutoSize = true,
             Margin = new Padding(6, 5, 0, 0)
         });

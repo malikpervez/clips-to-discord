@@ -2,6 +2,14 @@
 
 All notable user-facing changes are documented here.
 
+## 1.3.2 — 2026-08-03
+
+- Changed the compression target default for new settings from 9 MB to 95 MB, while preserving every existing saved choice and retaining progressively smaller retries down to 9 MB and below.
+- Archive newly uploaded clips into `uploaded\<game name>` when the filename contains a recognized SteelSeries, dotted, or compact recording timestamp.
+- Route filenames without a recognizable game/timestamp structure into one `uploaded\Uncategorized` folder.
+- Reuse both the main archive and game subfolders case-insensitively, normalize folder names, reject unsafe Windows names, and never overwrite a same-named clip.
+- Include legacy root-level and new game-subfolder clips in safe-baseline content hashing.
+
 ## 1.3.1 — 2026-08-03
 
 - Replaced the recursive installer payload wildcard with four explicit permitted files and rejected every unexpected directory, file, or reparse point before compilation.

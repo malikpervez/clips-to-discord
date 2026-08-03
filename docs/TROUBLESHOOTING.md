@@ -23,15 +23,15 @@ Clips already present during the first scan are recorded as a safe baseline and 
 
 Both release packages include `ffmpeg.exe`. The installer keeps it with the application automatically. Portable users must keep it beside `ClipsToDiscord.exe`. The app uses FFmpeg only after Discord rejects an original clip for size, and compression can take a while on long clips.
 
-The compression target is configurable from 1–100 MB. If the selected target is still rejected, the app retries progressively smaller targets. Discord currently documents 10 MiB as the default per-file limit, with higher limits possible for some users or servers.
+The compression target is configurable from 1–100 MB and defaults to 95 MB for new settings. If the selected target is rejected, the app retries progressively smaller targets. For a destination limited to Discord's standard 10 MiB per-file limit, selecting 9 MB avoids the initial larger attempts.
 
 If building from source without FFmpeg, normal-size clips still work, but oversized clips report an error in the log.
 
 ## Uploaded clip did not move
 
-After Discord accepts the upload, the app records it before moving the original. This prevents a move failure from posting the same clip twice. The app retries pending moves into the `uploaded` subfolder. Check that the Windows account can create and move files in the selected clips directory.
+After Discord accepts the upload, the app records it before moving the original. This prevents a move failure from posting the same clip twice. The app retries pending moves into `uploaded\<game name>`. Check that the Windows account can create and move files in the selected clips directory.
 
-Folder matching is case-insensitive: `uploaded`, `Uploaded`, and `UPLOADED` are treated as the same archive folder. When no matching directory exists, the app creates lowercase `uploaded` automatically.
+Folder matching is case-insensitive: `uploaded`, `Uploaded`, and `UPLOADED` are treated as the same archive folder, and differently-cased versions of one game reuse the existing game folder. When no archive exists, the app creates lowercase `uploaded` automatically. SteelSeries `Game__YYYY-MM-DD__HH-MM-SS`, common dotted timestamps, and compact timestamps are recognized; other filenames go into `Uncategorized`.
 
 ## Logs and local state
 

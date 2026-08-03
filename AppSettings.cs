@@ -11,7 +11,7 @@ internal sealed record AppSettings(
     bool StartWithWindows,
     int CompressionTargetMb)
 {
-    public const int DefaultCompressionTargetMb = 9;
+    public const int DefaultCompressionTargetMb = 95;
     public static AppSettings Empty { get; } = new(
         string.Empty,
         string.Empty,

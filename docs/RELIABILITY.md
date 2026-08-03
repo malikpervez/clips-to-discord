@@ -30,7 +30,7 @@ There is still an irreducible interval between Discord accepting the HTTP reques
 
 ## Compression fallback
 
-The configured target is 1–100 MB and defaults to 9 MB. After a size rejection, FFmpeg compresses from the original clip. If Discord rejects that result, the app retries progressively smaller targets, up to five compression attempts.
+The configured target is 1–100 MB and defaults to 95 MB for new settings. Existing saved values are preserved. After a size rejection, FFmpeg compresses from the original clip. If Discord rejects that result, the app retries progressively smaller targets, up to five compression attempts; the default sequence reaches 9 MB on its fifth attempt.
 
 Two-pass compression uses the Windows `NUL` device for its first pass. The app targets Windows, and the compressor also has an explicit platform guard so this path cannot silently run with different semantics elsewhere.
 

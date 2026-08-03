@@ -323,8 +323,8 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
     {
         var clipsFolder = Path.GetDirectoryName(sourcePath)
             ?? throw new InvalidOperationException("The clip folder could not be determined.");
-        var uploadedFolder = UploadedFolder.GetOrCreate(clipsFolder);
-        var destinationPath = UniqueDestination(uploadedFolder, Path.GetFileName(sourcePath));
+        var archiveFolder = UploadedFolder.GetOrCreateForClip(clipsFolder, Path.GetFileName(sourcePath));
+        var destinationPath = UniqueDestination(archiveFolder, Path.GetFileName(sourcePath));
         Exception? lastError = null;
 
         for (var attempt = 1; attempt <= 5; attempt++)
@@ -345,7 +345,7 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
             }
         }
 
-        throw new IOException($"Could not move the uploaded clip to {uploadedFolder}.", lastError);
+        throw new IOException($"Could not move the uploaded clip to {archiveFolder}.", lastError);
     }
 
     private static string UniqueDestination(string folder, string fileName)

@@ -16,7 +16,7 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 - Confirms file length and timestamp stability across multiple observations before queueing a clip.
 - Uses SHA-256 content identity so folder renames and timestamp rewrites do not cause duplicate uploads.
 - Keeps scanning with two upload workers, a short connection timeout, and a bounded per-upload deadline.
-- Moves successfully uploaded originals into an `uploaded` subfolder, creating it when needed and recognizing any capitalization.
+- Moves successfully uploaded originals into case-insensitive `uploaded\<game name>` subfolders inferred from common recording timestamps; unrecognized names share `uploaded\Uncategorized`.
 - Preserves duplicate filenames by adding a unique suffix.
 - Uses a configurable compression target and retries smaller targets when Discord rejects a file for size.
 - Redacts Discord webhook URLs from all application log messages.
@@ -35,7 +35,7 @@ The app is not affiliated with Discord or any recording-software vendor.
 
 Each release includes `SHA256SUMS.txt` so the installer or portable ZIP can be verified with `Get-FileHash` before it is opened.
 
-The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord desktop is running.
+The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord desktop is running, then organized beneath `uploaded` by game name.
 
 The installer and executable are not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign both with a trusted code-signing certificate.
 

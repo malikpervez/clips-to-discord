@@ -26,6 +26,64 @@ try
         Path.GetFileName(createdFolder).Equals("uploaded", StringComparison.Ordinal),
         "A newly created archive folder must use the canonical lowercase name.");
 
+    Assert(
+        UploadedFolder.GetGameFolderName("Battlefield™-6__2026-08-03__13-43-46.mp4") == "Battlefield™-6",
+        "SteelSeries timestamps must be removed from the game folder name.");
+    Assert(
+        UploadedFolder.GetGameFolderName("Counter-Strike 2 2026.08.03 - 13.43.46.01.mp4") == "Counter-Strike 2",
+        "Dotted recording timestamps must be removed from the game folder name.");
+    Assert(
+        UploadedFolder.GetGameFolderName("Game_20260803_134346.mp4") == "Game",
+        "Compact recording timestamps must be removed from the game folder name.");
+    Assert(
+        UploadedFolder.GetGameFolderName("manual-highlight.mp4") == "Uncategorized",
+        "A filename without a recognizable game prefix must use Uncategorized.");
+    Assert(
+        UploadedFolder.GetGameFolderName("Game__not-a-timestamp.mp4") == "Uncategorized",
+        "A double underscore without a recognized timestamp must use Uncategorized.");
+    Assert(
+        UploadedFolder.GetGameFolderName("Apex Legends 2026.08.03 - 13.43.46.01.DVR.mp4") == "Apex Legends",
+        "DVR filename suffixes must not become part of the game folder name.");
+    Assert(
+        UploadedFolder.GetGameFolderName("CON__2026-08-03__13-43-46.mp4") == "_CON",
+        "Reserved Windows device names must be made safe for folders.");
+
+    var gameArchiveRoot = Path.Combine(temporaryRoot, "game-archive");
+    Directory.CreateDirectory(gameArchiveRoot);
+    var gameUploadedFolder = Directory.CreateDirectory(Path.Combine(gameArchiveRoot, "Uploaded")).FullName;
+    var existingGameFolder = Directory.CreateDirectory(Path.Combine(gameUploadedFolder, "Battlefield™-6")).FullName;
+    var resolvedGameFolder = UploadedFolder.GetOrCreateForClip(
+        gameArchiveRoot,
+        "battlefield™-6__2026-08-03__13-43-46.mp4");
+    Assert(
+        resolvedGameFolder.Equals(existingGameFolder, StringComparison.Ordinal),
+        "Game folders must be reused case-insensitively.");
+    Assert(
+        Directory.EnumerateDirectories(gameUploadedFolder).Count() == 1,
+        "Resolving a differently-cased game name must not create a duplicate folder.");
+
+    var rootArchiveClip = Path.Combine(gameUploadedFolder, "legacy-root.mp4");
+    var nestedArchiveClip = Path.Combine(existingGameFolder, "nested.mp4");
+    await File.WriteAllBytesAsync(rootArchiveClip, [1, 1, 2, 3]);
+    await File.WriteAllBytesAsync(nestedArchiveClip, [5, 8, 13, 21]);
+    var archivedClips = UploadedFolder.EnumerateArchivedClips(gameUploadedFolder).ToHashSet(
+        StringComparer.OrdinalIgnoreCase);
+    Assert(archivedClips.Contains(rootArchiveClip), "Archived baseline enumeration must retain legacy root clips.");
+    Assert(archivedClips.Contains(nestedArchiveClip), "Archived baseline enumeration must include game subfolders.");
+
+    var gameBaselineStateDirectory = Path.Combine(temporaryRoot, "game-baseline-state");
+    Directory.CreateDirectory(gameBaselineStateDirectory);
+    var gameBaselineStore = new WatchStateStore(
+        Path.Combine(gameBaselineStateDirectory, "state.json"),
+        Path.Combine(gameBaselineStateDirectory, ".safe-baseline-required"));
+    var gameBaselineState = await gameBaselineStore.LoadOrInitializeAsync(
+        gameArchiveRoot,
+        _ => { },
+        CancellationToken.None);
+    Assert(
+        gameBaselineState.UploadedContentHashes.Count == 2,
+        "Safe baseline state must mark root-level and game-subfolder archives as uploaded.");
+
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
     var recoveryClips = Path.Combine(recoveryRoot, "clips");
     var recoveryStateDirectory = Path.Combine(recoveryRoot, "state");
@@ -161,10 +219,16 @@ try
 
     var compressionTargets = CompressionTargetPlanner.Build(25);
     Assert(compressionTargets[0] == 25, "Compression fallback must begin at the configured target.");
-    Assert(compressionTargets.Contains(9), "Compression fallback must include the safe default target.");
+    Assert(compressionTargets.Contains(9), "Compression fallback must include the lower-limit target.");
     Assert(
         compressionTargets.Zip(compressionTargets.Skip(1)).All(pair => pair.First > pair.Second),
         "Compression fallback targets must decrease strictly.");
+    Assert(
+        AppSettings.Empty.CompressionTargetMb == 95,
+        "New settings must default to a 95 MB compression target.");
+    var defaultCompressionTargets = CompressionTargetPlanner.Build(AppSettings.DefaultCompressionTargetMb);
+    Assert(defaultCompressionTargets[0] == 95, "Default compression fallback must begin at 95 MB.");
+    Assert(defaultCompressionTargets.Contains(9), "Default compression fallback must still reach 9 MB.");
 
     var detectorResponses = new ConcurrentQueue<bool>(
         [true, false, false, true, false, false, false, true]);
