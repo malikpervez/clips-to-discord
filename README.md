@@ -51,6 +51,7 @@ See the [complete setup guide](docs/SETUP.md) for folder-selection and webhook i
 
 ## Documentation
 
+- [Product roadmap and agent-ready work](ROADMAP.md)
 - [Installation and first-run setup](docs/SETUP.md)
 - [Creating and protecting a Discord webhook](docs/DISCORD-WEBHOOK.md)
 - [Troubleshooting and log locations](docs/TROUBLESHOOTING.md)

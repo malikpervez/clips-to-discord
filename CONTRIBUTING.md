@@ -31,6 +31,9 @@ Thanks for helping improve Clips to Discord.
 
 ## Pull requests
 
+- Start planned feature work from an open [`agent-ready`](https://github.com/malikpervez/clips-to-discord/issues?q=is%3Aissue%20state%3Aopen%20label%3Aagent-ready) issue in the [product roadmap](ROADMAP.md), and respect its dependencies.
+- Use one focused branch and pull request per issue. Include `Closes #<issue-number>` in the pull request body.
+- Keep incomplete or awaiting-review work in a draft pull request; do not create a release as part of an implementation issue.
 - Keep changes focused and explain user-facing behavior.
 - Never commit Discord webhook URLs, clips, local settings, FFmpeg binaries, or build artifacts.
 - Add or update documentation when behavior changes.
