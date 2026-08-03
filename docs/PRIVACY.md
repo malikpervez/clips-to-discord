@@ -30,7 +30,7 @@ SHA-256 hashing and FFmpeg compression are performed locally. Clip content and h
 
 - Existing clips are ignored during the initial baseline.
 - New top-level `.mp4` clips are read after the source application finishes writing them.
-- Successfully uploaded originals move into the local `uploaded` subfolder.
+- Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
 - Temporary compressed files are deleted after the upload attempt.
 - Duplicate destination names receive a unique suffix and are never overwritten.
 

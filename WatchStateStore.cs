@@ -111,7 +111,7 @@ internal sealed class WatchStateStore
     {
         var topLevelPaths = EnumerateClips(clipsFolder).ToList();
         var uploadedFolder = UploadedFolder.GetOrCreate(clipsFolder);
-        var uploadedPaths = Directory.EnumerateFiles(uploadedFolder, "*.mp4", SearchOption.TopDirectoryOnly).ToList();
+        var uploadedPaths = UploadedFolder.EnumerateArchivedClips(uploadedFolder).ToList();
 
         foreach (var path in topLevelPaths.Distinct(StringComparer.OrdinalIgnoreCase))
         {

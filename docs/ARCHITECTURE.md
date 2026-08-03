@@ -20,7 +20,7 @@ flowchart LR
     J -- "No" --> K["Compress locally to progressive targets"]
     K --> J
     J -- "Yes" --> L["Flush content hash and pending move to disk"]
-    L --> M["Move original into uploaded folder"]
+    L --> M["Move original into uploaded/game folder"]
 ```
 
 ## Components
@@ -44,7 +44,8 @@ flowchart LR
 - Two workers isolate the queue from one slow request; each HTTP upload has a five-minute deadline and connection establishment has a 15-second deadline.
 - Confirmed upload state is flushed to disk before any archive move.
 - Move destinations never overwrite existing files.
-- Archive-folder resolution reuses any case-insensitive `uploaded` match and creates lowercase `uploaded` only when none exists.
+- Archive-folder resolution reuses case-insensitive `uploaded` and game-name matches, creates lowercase `uploaded` only when none exists, and uses `Uncategorized` when no supported filename timestamp exposes a game name.
+- Safe baselines hash legacy root-level archives and one-level game subfolders, including normal iCloud placeholder folders, while refusing to traverse symbolic links and junctions.
 - Upload failures retry after five minutes.
 - A named mutex prevents multiple tray-app instances.
 - Three consecutive two-second Discord-absence polls are required before watcher cancellation; a brief updater relaunch therefore does not churn the worker.
