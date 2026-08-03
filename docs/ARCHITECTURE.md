@@ -56,4 +56,4 @@ See [RELIABILITY.md](RELIABILITY.md) for the exact-once limitation and migration
 
 ## Packaging
 
-`scripts/package.ps1` publishes a single-file, self-contained `win-x64` executable and optionally bundles a separately licensed FFmpeg binary. Build outputs and third-party binaries are excluded from Git.
+`scripts/package.ps1` publishes a single-file, self-contained `win-x64` executable and optionally bundles a separately licensed FFmpeg binary. `scripts/build-installer.ps1` wraps that layout in a per-user Inno Setup installer targeting `%LOCALAPPDATA%\Programs\ClipsToDiscord`; the ZIP remains the portable option. `scripts/get-inno-setup.ps1` pins and verifies the installer-compiler download. Build outputs and third-party binaries are excluded from Git.

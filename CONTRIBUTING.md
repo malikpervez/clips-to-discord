@@ -20,6 +20,14 @@ Thanks for helping improve Clips to Discord.
 
 5. Run the app from the build output or create a package with `scripts\package.ps1`.
 
+6. To build the Windows installer, prepare the package layout and use the pinned compiler helper:
+
+   ```powershell
+   .\scripts\package.ps1
+   $isccPath = .\scripts\get-inno-setup.ps1
+   .\scripts\build-installer.ps1 -IsccPath $isccPath
+   ```
+
 ## Pull requests
 
 - Keep changes focused and explain user-facing behavior.

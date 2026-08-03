@@ -27,3 +27,67 @@ jobs:
 
       - name: Run smoke tests
         run: dotnet run --project .\tests\ClipsToDiscord.SmokeTests\ClipsToDiscord.SmokeTests.csproj -c Release
+
+      - name: Build portable package layout
+        shell: powershell
+        run: .\scripts\package.ps1
+
+      - name: Build installer
+        shell: powershell
+        run: |
+          $isccPath = .\scripts\get-inno-setup.ps1
+          .\scripts\build-installer.ps1 -IsccPath $isccPath
+
+      - name: Smoke-test installer
+        shell: powershell
+        run: |
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'ClipsToDiscordInstalled'
+          $arguments = @(
+            '/VERYSILENT',
+            '/SUPPRESSMSGBOXES',
+            '/NORESTART',
+            '/NOICONS',
+            "/DIR=`"$installDirectory`""
+          )
+          $process = Start-Process `
+            -FilePath '.\artifacts\ClipsToDiscord-Setup.exe' `
+            -ArgumentList $arguments `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            throw "Installer exited with code $($process.ExitCode)."
+          }
+          $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
+          if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+            throw "Installed executable was not found: $installedExe"
+          }
+          $version = (Get-Item -LiteralPath $installedExe).VersionInfo.FileVersion
+          if ($version -ne '1.3.0.0') {
+            throw "Installed executable version was $version instead of 1.3.0.0."
+          }
+
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          New-ItemProperty `
+            -Path $runKey `
+            -Name 'ClipsToDiscord' `
+            -Value "`"$installedExe`"" `
+            -PropertyType String `
+            -Force | Out-Null
+
+          $uninstaller = Join-Path $installDirectory 'unins000.exe'
+          $uninstallProcess = Start-Process `
+            -FilePath $uninstaller `
+            -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($uninstallProcess.ExitCode -ne 0) {
+            throw "Uninstaller exited with code $($uninstallProcess.ExitCode)."
+          }
+          if (Get-ItemProperty -Path $runKey -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue) {
+            throw 'Uninstall left the ClipsToDiscord startup entry behind.'
+          }
+          if (Test-Path -LiteralPath $installDirectory) {
+            throw "Uninstall left the installation directory behind: $installDirectory"
+          }

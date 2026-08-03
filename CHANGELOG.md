@@ -2,6 +2,15 @@
 
 All notable user-facing changes are documented here.
 
+## 1.3.0 — 2026-08-03
+
+- Added a no-admin per-user Windows installer that installs under `%LOCALAPPDATA%\Programs\ClipsToDiscord`.
+- Added Start Menu and Add/Remove Programs integration plus an optional desktop shortcut.
+- Launch the installed copy after setup and remove the startup registry value during uninstall.
+- Retained the ZIP as a supported portable distribution.
+- Added reproducible installer build scripts with a pinned, checksum-verified Inno Setup compiler download.
+- Added CI compilation and silent-install verification of the installer.
+
 ## 1.2.2 — 2026-08-02
 
 - Captured the Discord-close decision without a second process re-poll, preventing updater relaunch races from permanently disabling monitoring.
