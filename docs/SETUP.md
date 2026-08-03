@@ -37,7 +37,8 @@ The app watches only the top level of the selected directory. It does not scan n
 2. Open **Integrations**, then **Webhooks**.
 3. Create a webhook, choose the channel that should receive clips, and copy its URL.
 4. Paste the URL into Clips to Discord.
-5. Select **Test webhook** and confirm the test message appears in the channel.
+5. Enter the uploader name that should appear with your clips. When friends share one webhook, each person should enter their own Discord display name.
+6. Select **Test webhook** and confirm the test message appears in the channel with the expected name.
 
 Discord's official guides: [Intro to Webhooks](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks) and [Server Integrations Page](https://support.discord.com/hc/en-us/articles/360045093012-Server-Integrations-Page).
 
@@ -55,6 +56,7 @@ The first scan records existing clips as a baseline and does not upload them. Af
 - Discord opens → the clip watcher starts.
 - A new `.mp4` remains unchanged across the stability window → the app hashes and queues it.
 - Two upload workers process the queue independently.
+- Discord receives visible text and an attachment description such as `Malik uploaded a clip from Battlefield™-6.` Mentions remain disabled for uploader-provided text.
 - Discord confirms the upload → the original moves into a case-insensitive `uploaded\<game name>` folder inferred from its timestamped filename. Unrecognized names use `uploaded\Uncategorized`.
 - Discord closes → the clip watcher stops.
 - Discord reopens → watching resumes automatically.

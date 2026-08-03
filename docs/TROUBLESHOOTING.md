@@ -33,6 +33,10 @@ After Discord accepts the upload, the app records it before moving the original.
 
 Folder matching is case-insensitive: `uploaded`, `Uploaded`, and `UPLOADED` are treated as the same archive folder, and differently-cased versions of one game reuse the existing game folder. When no archive exists, the app creates lowercase `uploaded` automatically. SteelSeries `Game__YYYY-MM-DD__HH-MM-SS`, common dotted timestamps, and compact timestamps are recognized; other filenames go into `Uncategorized`.
 
+## Multiple people share one webhook
+
+Open **Settings** on each computer and give every installation a different **Uploader name**, normally that person's Discord display name. Each upload is posted as visible text and attachment description, for example `Malik uploaded a clip from Battlefield™-6.` Existing installations upgrading from an earlier release initially use the Windows account name and can change it at any time.
+
 ## Logs and local state
 
 Open this directory in File Explorer:

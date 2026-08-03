@@ -213,6 +213,7 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
                     settings.WebhookUrl,
                     clip.FilePath,
                     settings.CompressionTargetMb,
+                    settings.UploaderName,
                     cancellationToken);
             }
             else

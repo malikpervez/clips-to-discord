@@ -25,11 +25,14 @@ internal sealed class DiscordWebhookClient : IDisposable
         };
     }
 
-    public async Task TestConnectionAsync(string webhookUrl, CancellationToken cancellationToken)
+    public async Task TestConnectionAsync(
+        string webhookUrl,
+        string uploaderName,
+        CancellationToken cancellationToken)
     {
         var payload = JsonSerializer.Serialize(new
         {
-            content = "**Clips to Discord connected.** Future clips will appear here automatically.",
+            content = $"**Clips to Discord connected.** Future clips from {DiscordClipMessage.EscapeMarkdown(AppSettings.NormalizeUploaderName(uploaderName))} will appear here automatically.",
             allowed_mentions = new { parse = Array.Empty<string>() }
         });
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
@@ -50,11 +53,20 @@ internal sealed class DiscordWebhookClient : IDisposable
         string webhookUrl,
         string filePath,
         int compressionTargetMb,
+        string uploaderName,
         CancellationToken cancellationToken)
     {
+        var message = DiscordClipMessage.BuildContent(uploaderName, Path.GetFileName(filePath));
+        var description = DiscordClipMessage.BuildDescription(uploaderName, Path.GetFileName(filePath));
         try
         {
-            await UploadOnceAsync(webhookUrl, filePath, Path.GetFileName(filePath), cancellationToken);
+            await UploadOnceAsync(
+                webhookUrl,
+                filePath,
+                Path.GetFileName(filePath),
+                message,
+                description,
+                cancellationToken);
         }
         catch (DiscordUploadException exception) when (exception.IsTooLarge)
         {
@@ -81,6 +93,8 @@ internal sealed class DiscordWebhookClient : IDisposable
                         webhookUrl,
                         compressedPath,
                         Path.GetFileName(filePath),
+                        message,
+                        description,
                         cancellationToken);
                     return;
                 }
@@ -105,15 +119,13 @@ internal sealed class DiscordWebhookClient : IDisposable
         string webhookUrl,
         string filePath,
         string originalName,
+        string message,
+        string description,
         CancellationToken cancellationToken)
     {
         using var multipart = new MultipartFormDataContent();
-        var message = $"**Clip: {Path.GetFileNameWithoutExtension(originalName)}**";
-        var payload = JsonSerializer.Serialize(new
-        {
-            content = message,
-            allowed_mentions = new { parse = Array.Empty<string>() }
-        });
+        var safeFileName = SanitizeFileName(originalName);
+        var payload = BuildUploadPayload(safeFileName, message, description);
         multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
 
         await using var stream = new FileStream(
@@ -125,7 +137,7 @@ internal sealed class DiscordWebhookClient : IDisposable
             useAsync: true);
         using var streamContent = new StreamContent(stream);
         streamContent.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
-        multipart.Add(streamContent, "files[0]", SanitizeFileName(originalName));
+        multipart.Add(streamContent, "files[0]", safeFileName);
 
         using var response = await PostWithDeadlineAsync(
             WithWait(webhookUrl),
@@ -145,6 +157,17 @@ internal sealed class DiscordWebhookClient : IDisposable
                 tooLarge);
         }
     }
+
+    internal static string BuildUploadPayload(string safeFileName, string message, string description) =>
+        JsonSerializer.Serialize(new
+        {
+            content = message,
+            attachments = new[]
+            {
+                new { id = 0, filename = safeFileName, description }
+            },
+            allowed_mentions = new { parse = Array.Empty<string>() }
+        });
 
     private async Task<HttpResponseMessage> PostWithDeadlineAsync(
         string requestUrl,
