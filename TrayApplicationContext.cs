@@ -5,6 +5,7 @@ namespace ClipsToDiscord;
 internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly SynchronizationContext _uiContext;
+    private readonly Icon _applicationIcon;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _statusItem;
     private AppSettings _settings;
@@ -14,6 +15,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     public TrayApplicationContext()
     {
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        _applicationIcon = LoadApplicationIcon();
         _settings = SettingsStore.Load();
 
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
@@ -30,7 +32,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = _applicationIcon,
             Text = "Clips to Discord",
             ContextMenuStrip = menu,
             Visible = true
@@ -111,11 +113,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
         Process.Start(new ProcessStartInfo("explorer.exe", _settings.ClipsFolder) { UseShellExecute = true });
     }
 
+    private static Icon LoadApplicationIcon()
+    {
+        var executablePath = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(executablePath))
+        {
+            using var extracted = Icon.ExtractAssociatedIcon(executablePath);
+            if (extracted is not null) return (Icon)extracted.Clone();
+        }
+
+        return (Icon)SystemIcons.Application.Clone();
+    }
+
     protected override void ExitThreadCore()
     {
         _controller?.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
+        _applicationIcon.Dispose();
         base.ExitThreadCore();
     }
 }

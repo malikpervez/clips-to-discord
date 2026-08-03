@@ -10,6 +10,15 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $artifactsDirectory = Join-Path $repositoryRoot 'artifacts'
 $installerScript = Join-Path $repositoryRoot 'installer\ClipsToDiscord.iss'
+$applicationIconPath = Join-Path $repositoryRoot 'assets\ClipsToDiscord.ico'
+
+if (-not (Test-Path -LiteralPath $applicationIconPath -PathType Leaf)) {
+    throw "The application icon was not found: $applicationIconPath"
+}
+$applicationIconItem = Get-Item -LiteralPath $applicationIconPath -Force
+if (($applicationIconItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "The application icon cannot be a reparse point: $applicationIconPath"
+}
 
 if (-not $PackageDirectory) {
     $PackageDirectory = Join-Path $artifactsDirectory 'ClipsToDiscord-win-x64'
@@ -87,6 +96,7 @@ if (Test-Path -LiteralPath $setupPath) {
     "/DMyAppVersion=$Version" `
     "/DPackageDir=$resolvedPackage" `
     "/DOutputDir=$resolvedOutput" `
+    "/DRepositoryRoot=$repositoryRoot" `
     $installerScript
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup failed with exit code $LASTEXITCODE"

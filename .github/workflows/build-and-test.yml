@@ -39,8 +39,16 @@ jobs:
           .\scripts\build-installer.ps1 `
             -IsccPath $isccPath `
             -OutputDirectory .\artifacts\previous-installer `
-            -Version 1.3.1
+            -Version 1.3.2
           .\scripts\build-installer.ps1 -IsccPath $isccPath
+
+      - name: Verify application and installer icons
+        shell: powershell
+        run: |
+          .\scripts\test-icons.ps1 `
+            -ApplicationPath .\artifacts\ClipsToDiscord-win-x64\ClipsToDiscord.exe `
+            -InstallerPath .\artifacts\ClipsToDiscord-Setup.exe `
+            -IconPath .\assets\ClipsToDiscord.ico
 
       - name: Reject tampered compiler cache
         shell: powershell
@@ -96,5 +104,5 @@ jobs:
           .\scripts\test-installer.ps1 `
             -InstallerPath .\artifacts\ClipsToDiscord-Setup.exe `
             -PreviousInstallerPath .\artifacts\previous-installer\ClipsToDiscord-Setup.exe `
-            -ExpectedVersion 1.3.2 `
-            -PreviousVersion 1.3.1
+            -ExpectedVersion 1.3.3 `
+            -PreviousVersion 1.3.2
