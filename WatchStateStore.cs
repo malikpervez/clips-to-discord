@@ -8,31 +8,42 @@ internal sealed class WatchStateStore
 {
     private const int CurrentVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-    private readonly string _statePath = Path.Combine(SettingsStore.DataDirectory, "state.json");
+    private readonly string _statePath;
+    private readonly string _safeBaselineMarkerPath;
+
+    public WatchStateStore()
+        : this(
+            Path.Combine(SettingsStore.DataDirectory, "state.json"),
+            SettingsStore.SafeBaselineMarkerPath)
+    {
+    }
+
+    internal WatchStateStore(string statePath, string safeBaselineMarkerPath)
+    {
+        _statePath = statePath;
+        _safeBaselineMarkerPath = safeBaselineMarkerPath;
+    }
 
     public async Task<WatchState> LoadOrInitializeAsync(
         string clipsFolder,
         Action<string> reportStatus,
         CancellationToken cancellationToken)
     {
-        var forceSafeBaseline = File.Exists(SettingsStore.SafeBaselineMarkerPath);
+        var forceSafeBaseline = File.Exists(_safeBaselineMarkerPath);
         WatchState? saved = null;
-        if (!forceSafeBaseline)
+        try
         {
-            try
+            if (File.Exists(_statePath))
             {
-                if (File.Exists(_statePath))
-                {
-                    saved = JsonSerializer.Deserialize<WatchState>(File.ReadAllText(_statePath), JsonOptions);
-                }
-            }
-            catch (Exception exception)
-            {
-                Log.Error("Could not read uploader state; creating a safe baseline.", exception);
+                saved = JsonSerializer.Deserialize<WatchState>(File.ReadAllText(_statePath), JsonOptions);
             }
         }
+        catch (Exception exception)
+        {
+            Log.Error("Could not read uploader state; creating a safe baseline.", exception);
+        }
 
-        if (saved is not null && saved.Version >= CurrentVersion)
+        if (!forceSafeBaseline && saved is not null && saved.Version >= CurrentVersion)
         {
             Normalize(saved);
             if (saved.ClipsFolder.Equals(clipsFolder, StringComparison.OrdinalIgnoreCase))
@@ -67,7 +78,9 @@ internal sealed class WatchStateStore
 
     public void Save(WatchState state)
     {
-        Directory.CreateDirectory(SettingsStore.DataDirectory);
+        var stateDirectory = Path.GetDirectoryName(_statePath)
+            ?? throw new InvalidOperationException("The state directory could not be determined.");
+        Directory.CreateDirectory(stateDirectory);
         var temporaryPath = _statePath + ".tmp";
         var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(state, JsonOptions));
         using (var stream = new FileStream(
@@ -151,9 +164,9 @@ internal sealed class WatchStateStore
         state.KnownSignatures = null;
     }
 
-    private static void TryDeleteSafeBaselineMarker()
+    private void TryDeleteSafeBaselineMarker()
     {
-        try { File.Delete(SettingsStore.SafeBaselineMarkerPath); } catch { }
+        try { File.Delete(_safeBaselineMarkerPath); } catch { }
     }
 }
 

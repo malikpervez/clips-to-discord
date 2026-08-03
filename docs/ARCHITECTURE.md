@@ -26,7 +26,7 @@ flowchart LR
 ## Components
 
 - `TrayApplicationContext` owns the notification-area UI, settings dialog, startup registration, and controller lifecycle.
-- `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes.
+- `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes, debounces brief absences, and observes each worker before restart or shutdown.
 - `FileReadinessTracker` requires stable metadata across multiple observations and exponentially backs off unreadable files.
 - `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two upload consumers.
 - `DiscordWebhookClient` sends multipart attachments with separate connection and total deadlines and progressively smaller compression retries.
@@ -47,6 +47,9 @@ flowchart LR
 - Archive-folder resolution reuses any case-insensitive `uploaded` match and creates lowercase `uploaded` only when none exists.
 - Upload failures retry after five minutes.
 - A named mutex prevents multiple tray-app instances.
+- Three consecutive two-second Discord-absence polls are required before watcher cancellation; a brief updater relaunch therefore does not churn the worker.
+- Controller disposal waits at most ten seconds on the UI thread, while any slower worker cleanup remains observed in the background.
+- Every runtime access to mutable watch-state collections is serialized through one gate shared by the scanner and both upload workers.
 - Version 1.1+ copies compatible settings from the former Moments to Discord data directory without deleting the original files.
 
 See [RELIABILITY.md](RELIABILITY.md) for the exact-once limitation and migration details.

@@ -8,6 +8,8 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
     private const int UploadWorkerCount = 2;
     private readonly WatchStateStore _stateStore = new();
     private readonly FileReadinessTracker _readiness = new();
+    // After initialization, every read and write of WatchState's mutable collections
+    // is performed while this gate is held by the scanner or an upload worker.
     private readonly SemaphoreSlim _stateGate = new(1, 1);
     private readonly ConcurrentDictionary<string, DateTime> _retryAfter = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _queuedHashes = new(StringComparer.OrdinalIgnoreCase);

@@ -1,5 +1,7 @@
 # Clips to Discord
 
+[![Build and test](https://github.com/malikpervez/clips-to-discord/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/malikpervez/clips-to-discord/actions/workflows/build-and-test.yml)
+
 A Windows tray app that uploads new MP4 clips from any chosen folder to a Discord channel through a webhook.
 
 [Download the latest release](https://github.com/malikpervez/clips-to-discord/releases/latest) · [Setup guide](docs/SETUP.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Privacy and security](docs/PRIVACY.md)

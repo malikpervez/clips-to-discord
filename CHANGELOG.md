@@ -2,6 +2,15 @@
 
 All notable user-facing changes are documented here.
 
+## 1.2.2 — 2026-08-02
+
+- Captured the Discord-close decision without a second process re-poll, preventing updater relaunch races from permanently disabling monitoring.
+- Require three consecutive absent polls before stopping the watcher, avoiding churn during brief Discord process flickers.
+- Always cancel and observe the watcher before disposing its linked token source.
+- Bounded UI-thread controller disposal to ten seconds and defer cleanup safely if a worker takes longer.
+- Preserved pending archive moves when an interrupted migration forces a safe-baseline rebuild.
+- Added controller and migration regression coverage plus Windows GitHub Actions build and smoke-test CI.
+
 ## 1.2.1 — 2026-08-02
 
 - Added an explicit 20-second minimum age to the existing two-observation file-stability check.

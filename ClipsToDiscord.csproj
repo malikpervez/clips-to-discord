@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>ClipsToDiscord</AssemblyName>
     <RootNamespace>ClipsToDiscord</RootNamespace>
-    <Version>1.2.1</Version>
+    <Version>1.2.2</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 

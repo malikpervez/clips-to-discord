@@ -18,6 +18,10 @@ Discovery writes to a bounded queue with two consumers. If one upload stalls, th
 
 Failed uploads retain the existing five-minute retry delay. Cancellation caused by Discord closing stops active requests cleanly.
 
+Discord must be absent for three consecutive two-second polls before the worker is cancelled. The controller records that exit reason instead of polling again, so a quick updater relaunch cannot strand it awaiting a still-running worker. Each linked cancellation source remains alive until its worker task has been observed. Application exit waits up to ten seconds on the UI thread; if cleanup takes longer, it remains observed in the background rather than hanging the tray application.
+
+The scanner and both upload consumers share mutable watch state. Every runtime collection read, mutation, enumeration, and save is serialized through the same semaphore. Baseline construction happens before the consumers start.
+
 ## Successful-upload ordering
 
 After Discord returns success, the app immediately adds the content hash and source path to state, writes a temporary state file, flushes it to disk, and atomically replaces the live state file. Only then does it attempt the archive move. A failed move therefore cannot trigger another upload; it remains a persisted pending move.
@@ -36,7 +40,7 @@ Discord documents a 10 MiB default per-file limit and notes that limits can be h
 
 Legacy files are copied into a staging directory. State is installed before settings, and a marker is created before either becomes active. If migration is interrupted, the next watcher startup ignores questionable state and builds a safe content-hash baseline before uploading anything.
 
-Missing or unreadable state always produces a baseline of existing top-level clips. Existing clips are never treated as a new upload queue merely because migration state is absent.
+Missing or unreadable state always produces a baseline of existing top-level clips. Existing clips are never treated as a new upload queue merely because migration state is absent. When an interrupted-migration marker forces the baseline, any readable `PendingMoves` are salvaged first so already-uploaded clips still reach the archive folder.
 
 ## Webhook validation and logging
 
