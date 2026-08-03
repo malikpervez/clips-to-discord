@@ -1,4 +1,4 @@
-CLIPS TO DISCORD
+CLIPS TO DISCORD — PORTABLE PACKAGE
 
 1. Keep every file from this ZIP together in one folder.
 2. Run ClipsToDiscord.exe.
@@ -16,3 +16,6 @@ The app works with any tool that saves MP4 clips into the selected folder.
 Keep your webhook URL private. If it is exposed, rotate or delete it in Discord.
 
 This app is not affiliated with Discord or any recording-software vendor.
+
+For an automatic per-user installation, download ClipsToDiscord-Setup.exe from
+the GitHub Releases page instead of this portable ZIP.

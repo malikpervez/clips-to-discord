@@ -9,13 +9,17 @@
 
 The release is self-contained. Friends do not need ChatGPT, PowerShell, .NET, or a separate FFmpeg installation.
 
-## 1. Download and extract the app
+## 1. Install the app
 
 1. Open the repository's [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
-2. Download `ClipsToDiscord-win-x64.zip`.
-3. Extract the ZIP into a permanent folder, such as `Documents\ClipsToDiscord`.
-4. Keep `ClipsToDiscord.exe`, `ffmpeg.exe`, and `FFMPEG-LICENSE.txt` together.
-5. Run `ClipsToDiscord.exe`.
+2. Download `ClipsToDiscord-Setup.exe`.
+3. Run the installer from Downloads, Desktop, or any other location.
+4. Select **Install**. Administrator permission is not required.
+5. Leave **Launch Clips to Discord** selected when setup completes.
+
+The installer copies the application to `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates a Start Menu shortcut and an Add/Remove Programs entry, and optionally creates a desktop shortcut. The downloaded setup file can be deleted after installation.
+
+The portable `ClipsToDiscord-win-x64.zip` remains available. Portable users must extract every file together and keep the extracted folder in place while **Start with Windows** is enabled.
 
 The release is not code-signed. Windows SmartScreen may display an unrecognized-app warning. Verify that the download came from this repository's Releases page before choosing **More info → Run anyway**.
 
@@ -61,8 +65,16 @@ Discord documents a default 10 MiB per-file limit, with potentially higher limit
 
 ## Updating from version 1.0
 
-Exit the old app from its notification-area menu, extract the new release into a permanent folder, and run `ClipsToDiscord.exe`. Version 1.1 copies compatible settings and upload state from `%LOCALAPPDATA%\MomentsToDiscord` into `%LOCALAPPDATA%\ClipsToDiscord` when the new location is empty.
+Exit the old app from its notification-area menu, download the current `ClipsToDiscord-Setup.exe`, and run it. The installed app copies compatible settings and upload state from `%LOCALAPPDATA%\MomentsToDiscord` into `%LOCALAPPDATA%\ClipsToDiscord` when the new location is empty.
 
 ## Updating later releases
 
-Exit the app from its notification-area menu, replace the application files with the newer release files, and reopen `ClipsToDiscord.exe`. Saved settings and upload state remain under `%LOCALAPPDATA%\ClipsToDiscord`.
+Exit the app from its notification-area menu and run the newer `ClipsToDiscord-Setup.exe`. It upgrades the existing per-user installation in place. Saved settings and upload state remain under `%LOCALAPPDATA%\ClipsToDiscord`.
+
+Portable users can exit the app, replace the extracted application files, and reopen `ClipsToDiscord.exe`.
+
+## Uninstalling
+
+Open **Settings → Apps → Installed apps**, find **Clips to Discord**, and select **Uninstall**. The uninstaller removes the application, its shortcuts, and its **Start with Windows** entry.
+
+Settings, logs, and upload history remain in `%LOCALAPPDATA%\ClipsToDiscord` so reinstalling does not lose the duplicate-upload protections. Delete that data directory manually only if you also want to reset the app completely.

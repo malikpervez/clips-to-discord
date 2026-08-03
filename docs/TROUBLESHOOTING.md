@@ -4,7 +4,7 @@
 
 Check the Windows notification area, including its hidden-icons menu. The app is designed to run without a normal main window after setup. Only one instance can run at a time.
 
-If Windows SmartScreen appears, verify the ZIP came from this repository's Releases page. The current community build is not code-signed.
+If Windows SmartScreen appears, verify the installer or portable ZIP came from this repository's Releases page. The current community build is not code-signed.
 
 ## A new clip did not upload
 
@@ -21,7 +21,7 @@ Clips already present during the first scan are recorded as a safe baseline and 
 
 ## The clip is too large
 
-The release ZIP includes `ffmpeg.exe`. Keep it beside `ClipsToDiscord.exe`; the app uses it only after Discord rejects an original clip for size. Compression can take a while on long clips.
+Both release packages include `ffmpeg.exe`. The installer keeps it with the application automatically. Portable users must keep it beside `ClipsToDiscord.exe`. The app uses FFmpeg only after Discord rejects an original clip for size, and compression can take a while on long clips.
 
 The compression target is configurable from 1–100 MB. If the selected target is still rejected, the app retries progressively smaller targets. Discord currently documents 10 MiB as the default per-file limit, with higher limits possible for some users or servers.
 

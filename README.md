@@ -24,22 +24,26 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 
 The app is not affiliated with Discord or any recording-software vendor.
 
-## Quick setup
+## Quick setup (recommended installer)
 
-1. Download `ClipsToDiscord-win-x64.zip` from the [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
-2. Extract the entire folder somewhere permanent.
-3. Run `ClipsToDiscord.exe`.
+1. Download `ClipsToDiscord-Setup.exe` from the [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
+2. Run the installer from Downloads, Desktop, or anywhere else.
+3. The installer places the app under `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates Start Menu and uninstall entries, and launches the installed copy.
 4. Select the folder where your clipping or recording tool saves finished MP4 clips.
 5. Paste the Discord webhook URL and optionally click **Test webhook**.
 6. Click **Save**.
 
-Each release includes `SHA256SUMS.txt` so the downloaded ZIP can be verified with `Get-FileHash` before it is opened.
+Each release includes `SHA256SUMS.txt` so the installer or portable ZIP can be verified with `Get-FileHash` before it is opened.
 
 The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord desktop is running.
 
-The executable is not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign it with a trusted code-signing certificate.
+The installer and executable are not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign both with a trusted code-signing certificate.
 
 See the [complete setup guide](docs/SETUP.md) for folder-selection and webhook instructions.
+
+### Portable ZIP
+
+`ClipsToDiscord-win-x64.zip` remains available for users who prefer a portable copy. Extract all files together and keep that folder in place if **Start with Windows** is enabled.
 
 ## Documentation
 
@@ -75,6 +79,13 @@ Create a self-contained package without FFmpeg:
 
 ```powershell
 .\scripts\package.ps1
+```
+
+Create the per-user installer after preparing the portable layout:
+
+```powershell
+$isccPath = .\scripts\get-inno-setup.ps1
+.\scripts\build-installer.ps1 -IsccPath $isccPath
 ```
 
 Create a package with FFmpeg compression support:
