@@ -8,14 +8,30 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $projectPath = Join-Path $repositoryRoot 'ClipsToDiscord.csproj'
 $artifactsDirectory = Join-Path $repositoryRoot 'artifacts'
+if ($Runtime -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    throw "Runtime contains unsafe path characters: $Runtime"
+}
 $publishDirectory = Join-Path $artifactsDirectory "publish-$Runtime"
 $packageDirectory = Join-Path $artifactsDirectory "ClipsToDiscord-$Runtime"
 $zipPath = Join-Path $artifactsDirectory "ClipsToDiscord-$Runtime.zip"
 
+if ([bool]$FfmpegPath -ne [bool]$FfmpegLicensePath) {
+    throw 'FfmpegPath and FfmpegLicensePath must either both be supplied or both be omitted.'
+}
+if ($FfmpegPath) {
+    if (-not (Test-Path -LiteralPath $FfmpegPath -PathType Leaf)) {
+        throw "FFmpeg was not found: $FfmpegPath"
+    }
+    if (-not (Test-Path -LiteralPath $FfmpegLicensePath -PathType Leaf)) {
+        throw "FFmpeg license was not found: $FfmpegLicensePath"
+    }
+}
+
 foreach ($target in @($publishDirectory, $packageDirectory)) {
-    $resolvedArtifacts = [IO.Path]::GetFullPath($artifactsDirectory)
+    $resolvedArtifacts = [IO.Path]::GetFullPath($artifactsDirectory).TrimEnd('\', '/')
     $resolvedTarget = [IO.Path]::GetFullPath($target)
-    if (-not $resolvedTarget.StartsWith($resolvedArtifacts, [StringComparison]::OrdinalIgnoreCase)) {
+    $artifactsPrefix = $resolvedArtifacts + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedTarget.StartsWith($artifactsPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to clean a path outside the artifacts directory: $resolvedTarget"
     }
     if (Test-Path -LiteralPath $resolvedTarget) {
@@ -43,15 +59,9 @@ Copy-Item -LiteralPath (Join-Path $publishDirectory 'ClipsToDiscord.exe') -Desti
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'README.txt') -Destination $packageDirectory
 
 if ($FfmpegPath) {
-    if (-not (Test-Path -LiteralPath $FfmpegPath -PathType Leaf)) {
-        throw "FFmpeg was not found: $FfmpegPath"
-    }
     Copy-Item -LiteralPath $FfmpegPath -Destination (Join-Path $packageDirectory 'ffmpeg.exe')
 }
 if ($FfmpegLicensePath) {
-    if (-not (Test-Path -LiteralPath $FfmpegLicensePath -PathType Leaf)) {
-        throw "FFmpeg license was not found: $FfmpegLicensePath"
-    }
     Copy-Item -LiteralPath $FfmpegLicensePath -Destination (Join-Path $packageDirectory 'FFMPEG-LICENSE.txt')
 }
 

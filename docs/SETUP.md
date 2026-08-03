@@ -13,11 +13,11 @@ The release is self-contained. Friends do not need ChatGPT, PowerShell, .NET, or
 
 1. Open the repository's [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
 2. Download `ClipsToDiscord-Setup.exe`.
-3. Run the installer from Downloads, Desktop, or any other location.
+3. Run the installer normally from Downloads, Desktop, or any other location. Do not choose **Run as administrator**.
 4. Select **Install**. Administrator permission is not required.
 5. Leave **Launch Clips to Discord** selected when setup completes.
 
-The installer copies the application to `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates a Start Menu shortcut and an Add/Remove Programs entry, and optionally creates a desktop shortcut. The downloaded setup file can be deleted after installation.
+The installer copies the application to `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates a Start Menu shortcut and an Add/Remove Programs entry, and optionally creates a desktop shortcut. Running it as another administrator account would install into that account's profile instead of yours. The downloaded setup file can be deleted after installation.
 
 The portable `ClipsToDiscord-win-x64.zip` remains available. Portable users must extract every file together and keep the extracted folder in place while **Start with Windows** is enabled.
 
@@ -70,6 +70,8 @@ Exit the old app from its notification-area menu, download the current `ClipsToD
 ## Updating later releases
 
 Exit the app from its notification-area menu and run the newer `ClipsToDiscord-Setup.exe`. It upgrades the existing per-user installation in place. Saved settings and upload state remain under `%LOCALAPPDATA%\ClipsToDiscord`.
+
+The installer deliberately refuses a silent update while the application mutex is active. Exit the tray app before an unattended update. Silent setup does not relaunch the app; interactive setup offers to launch it when finished.
 
 Portable users can exit the app, replace the extracted application files, and reopen `ClipsToDiscord.exe`.
 

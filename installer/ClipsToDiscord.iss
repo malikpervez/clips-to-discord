@@ -25,7 +25,6 @@ AppPublisherURL={#MyAppUrl}
 AppSupportURL={#MyAppUrl}/issues
 AppUpdatesURL={#MyAppUrl}/releases/latest
 DefaultDirName={localappdata}\Programs\ClipsToDiscord
-DefaultGroupName={#MyAppName}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -53,7 +52,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "{#PackageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PackageDir}\ClipsToDiscord.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#PackageDir}\FFMPEG-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{userprograms}\Clips to Discord"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

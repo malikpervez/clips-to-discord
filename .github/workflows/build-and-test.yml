@@ -36,58 +36,65 @@ jobs:
         shell: powershell
         run: |
           $isccPath = .\scripts\get-inno-setup.ps1
+          .\scripts\build-installer.ps1 `
+            -IsccPath $isccPath `
+            -OutputDirectory .\artifacts\previous-installer `
+            -Version 1.3.0
           .\scripts\build-installer.ps1 -IsccPath $isccPath
 
-      - name: Smoke-test installer
+      - name: Reject tampered compiler cache
         shell: powershell
         run: |
-          $installDirectory = Join-Path $env:RUNNER_TEMP 'ClipsToDiscordInstalled'
-          $arguments = @(
-            '/VERYSILENT',
-            '/SUPPRESSMSGBOXES',
-            '/NORESTART',
-            '/NOICONS',
-            "/DIR=`"$installDirectory`""
-          )
-          $process = Start-Process `
-            -FilePath '.\artifacts\ClipsToDiscord-Setup.exe' `
-            -ArgumentList $arguments `
-            -Wait `
-            -PassThru `
-            -WindowStyle Hidden
-          if ($process.ExitCode -ne 0) {
-            throw "Installer exited with code $($process.ExitCode)."
+          $tamperedDirectory = Join-Path $env:RUNNER_TEMP 'TamperedInnoSetup'
+          Copy-Item `
+            -LiteralPath .\artifacts\tools\InnoSetup `
+            -Destination $tamperedDirectory `
+            -Recurse
+          Add-Content `
+            -LiteralPath (Join-Path $tamperedDirectory 'ISCC.exe') `
+            -Value 'tampered'
+          $rejected = $false
+          try {
+            .\scripts\get-inno-setup.ps1 -DestinationDirectory $tamperedDirectory
           }
-          $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
-          if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
-            throw "Installed executable was not found: $installedExe"
+          catch {
+            if ($_.Exception.Message -notlike '*compiler integrity check failed*') {
+              throw
+            }
+            $rejected = $true
           }
-          $version = (Get-Item -LiteralPath $installedExe).VersionInfo.FileVersion
-          if ($version -ne '1.3.0.0') {
-            throw "Installed executable version was $version instead of 1.3.0.0."
+          if (-not $rejected) {
+            throw 'The tampered compiler cache was accepted.'
           }
 
-          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-          New-ItemProperty `
-            -Path $runKey `
-            -Name 'ClipsToDiscord' `
-            -Value "`"$installedExe`"" `
-            -PropertyType String `
-            -Force | Out-Null
+      - name: Reject unexpected package files
+        shell: powershell
+        run: |
+          $unexpectedFile = '.\artifacts\ClipsToDiscord-win-x64\settings.json'
+          Set-Content -LiteralPath $unexpectedFile -Value '{"mustNotShip":true}'
+          $rejected = $false
+          try {
+            .\scripts\build-installer.ps1 `
+              -IsccPath .\artifacts\tools\InnoSetup\ISCC.exe
+          }
+          catch {
+            if ($_.Exception.Message -notlike '*unexpected or unsafe items*') {
+              throw
+            }
+            $rejected = $true
+          }
+          finally {
+            Remove-Item -LiteralPath $unexpectedFile -Force
+          }
+          if (-not $rejected) {
+            throw 'An unexpected settings.json file was accepted for packaging.'
+          }
 
-          $uninstaller = Join-Path $installDirectory 'unins000.exe'
-          $uninstallProcess = Start-Process `
-            -FilePath $uninstaller `
-            -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
-            -Wait `
-            -PassThru `
-            -WindowStyle Hidden
-          if ($uninstallProcess.ExitCode -ne 0) {
-            throw "Uninstaller exited with code $($uninstallProcess.ExitCode)."
-          }
-          if (Get-ItemProperty -Path $runKey -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue) {
-            throw 'Uninstall left the ClipsToDiscord startup entry behind.'
-          }
-          if (Test-Path -LiteralPath $installDirectory) {
-            throw "Uninstall left the installation directory behind: $installDirectory"
-          }
+      - name: Test install, upgrade, mutex, and uninstall
+        shell: powershell
+        run: |
+          .\scripts\test-installer.ps1 `
+            -InstallerPath .\artifacts\ClipsToDiscord-Setup.exe `
+            -PreviousInstallerPath .\artifacts\previous-installer\ClipsToDiscord-Setup.exe `
+            -ExpectedVersion 1.3.1 `
+            -PreviousVersion 1.3.0

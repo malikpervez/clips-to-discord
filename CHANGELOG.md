@@ -2,6 +2,15 @@
 
 All notable user-facing changes are documented here.
 
+## 1.3.1 — 2026-08-03
+
+- Replaced the recursive installer payload wildcard with four explicit permitted files and rejected every unexpected directory, file, or reparse point before compilation.
+- Required FFmpeg and its license to appear as a pair, with an additional release-build switch that makes both mandatory.
+- Verified the complete pinned Inno Setup compiler tree on every cached use and after installation; removed automatic fallback to unverified system compilers.
+- Downloaded the compiler installer through a temporary file and published it to the cache only after its pinned SHA-256 passes.
+- Expanded CI to cover the default install path, Start Menu behavior, startup non-creation and cleanup, in-place upgrades, application-data preservation, running-app mutex rejection, compiler tampering, and unexpected package files.
+- Documented normal unelevated installation and the requirement to exit the tray app before updates.
+
 ## 1.3.0 — 2026-08-03
 
 - Added a no-admin per-user Windows installer that installs under `%LOCALAPPDATA%\Programs\ClipsToDiscord`.

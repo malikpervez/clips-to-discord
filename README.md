@@ -27,7 +27,7 @@ The app is not affiliated with Discord or any recording-software vendor.
 ## Quick setup (recommended installer)
 
 1. Download `ClipsToDiscord-Setup.exe` from the [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
-2. Run the installer from Downloads, Desktop, or anywhere else.
+2. Run the installer normally from Downloads, Desktop, or anywhere else. Do not use **Run as administrator**.
 3. The installer places the app under `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates Start Menu and uninstall entries, and launches the installed copy.
 4. Select the folder where your clipping or recording tool saves finished MP4 clips.
 5. Paste the Discord webhook URL and optionally click **Test webhook**.
@@ -84,8 +84,7 @@ Create a self-contained package without FFmpeg:
 Create the per-user installer after preparing the portable layout:
 
 ```powershell
-$isccPath = .\scripts\get-inno-setup.ps1
-.\scripts\build-installer.ps1 -IsccPath $isccPath
+.\scripts\build-installer.ps1
 ```
 
 Create a package with FFmpeg compression support:
@@ -94,9 +93,11 @@ Create a package with FFmpeg compression support:
 .\scripts\package.ps1 `
   -FfmpegPath 'C:\path\to\ffmpeg.exe' `
   -FfmpegLicensePath 'C:\path\to\FFmpeg\LICENSE'
+
+.\scripts\build-installer.ps1 -RequireFfmpeg
 ```
 
-FFmpeg binaries are intentionally not committed to this repository. If you distribute an FFmpeg binary, include its corresponding license and comply with that build's license terms.
+FFmpeg binaries are intentionally not committed to this repository. FFmpeg and its license must be supplied together, and release installer builds should use `-RequireFfmpeg`. If you distribute an FFmpeg binary, comply with that build's license terms.
 
 ## Local data
 
