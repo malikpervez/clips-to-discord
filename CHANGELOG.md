@@ -4,6 +4,8 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.3.6 — 2026-08-04
+
 - Added stable-only update discovery through the official GitHub Releases API with strict repository, HTTPS, semantic-version, installer, and SHA-256 verification.
 - Added a manual **Check for updates** action plus **View changes**, **Download update**, **Skip this version**, and **Remind me later** choices; download actions open the official release page and never install silently.
 - Limited automatic checks to once per 24 hours, prevented concurrent checks, persisted skip/remind preferences atomically, and isolated all update failures from clip watching and uploads.
