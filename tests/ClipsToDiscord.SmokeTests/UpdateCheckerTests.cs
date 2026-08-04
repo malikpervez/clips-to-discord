@@ -96,6 +96,16 @@ internal static class UpdateCheckerTests
 
         using (var checker = CreateChecker(
                    checksumJson,
+                   checksumContent: $"\uFEFF{ValidDigest}  ClipsToDiscord-Setup.exe\r\n"))
+        {
+            var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
+            Assert(result.Status == UpdateCheckStatus.UpdateAvailable &&
+                   result.Release?.InstallerSha256 == ValidDigest,
+                "A UTF-8 BOM at the start of a checksum manifest must be accepted.");
+        }
+
+        using (var checker = CreateChecker(
+                   checksumJson,
                    checksumContent:
                        $"{ValidDigest}  ClipsToDiscord-Setup.exe\r\n{new string('f', 64)}  ClipsToDiscord-Setup.exe\r\n"))
         {
@@ -138,11 +148,25 @@ internal static class UpdateCheckerTests
             Assert(result.Status == UpdateCheckStatus.Failed,
                 "Malformed JSON must produce a non-fatal failed result.");
         }
-        using (var checker = CreateChecker(new string('x', 1_048_577)))
+        var oversizedReleaseJson = BuildReleaseJson(body: new string('x', 1_048_577));
+        using (var checker = CreateChecker(oversizedReleaseJson))
         {
             var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
             Assert(result.Status == UpdateCheckStatus.Failed,
-                "An oversized release response must be rejected before parsing.");
+                "An oversized valid release response with a declared length must be rejected before parsing.");
+        }
+        using (var content = new StreamContent(
+                   new NonSeekableReadStream(Encoding.UTF8.GetBytes(oversizedReleaseJson))))
+        using (var client = new HttpClient(new StubHttpMessageHandler((_, _) =>
+                   Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content })))
+               { Timeout = Timeout.InfiniteTimeSpan })
+        using (var checker = new GitHubUpdateChecker(client, operationTimeout: TimeSpan.FromSeconds(2)))
+        {
+            Assert(content.Headers.ContentLength is null,
+                "The streaming size-cap test must not send a Content-Length header.");
+            var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
+            Assert(result.Status == UpdateCheckStatus.Failed,
+                "An oversized valid streamed release response must be rejected while reading.");
         }
 
         await AssertChecksumRedirectAllowListAsync();
@@ -224,17 +248,24 @@ internal static class UpdateCheckerTests
 
     private static async Task AssertCallerCancellationAsync()
     {
-        using var client = new HttpClient(new StubHttpMessageHandler((_, cancellationToken) =>
-            Task.FromCanceled<HttpResponseMessage>(cancellationToken)))
+        var requestStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var client = new HttpClient(new StubHttpMessageHandler(async (_, cancellationToken) =>
+        {
+            requestStarted.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return JsonResponse(BuildReleaseJson());
+        }))
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
         using var checker = new GitHubUpdateChecker(client, operationTimeout: TimeSpan.FromSeconds(2));
         using var cancellation = new CancellationTokenSource();
+        var check = checker.CheckAsync(InstalledVersion, cancellation.Token);
+        await requestStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
         cancellation.Cancel();
         try
         {
-            await checker.CheckAsync(InstalledVersion, cancellation.Token);
+            await check;
             throw new InvalidOperationException("Caller cancellation should propagate from the update checker.");
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -455,7 +486,8 @@ internal static class UpdateCheckerTests
         string? digest = "sha256:" + ValidDigest,
         string? installerUrl = null,
         bool includeChecksum = false,
-        bool duplicateInstaller = false)
+        bool duplicateInstaller = false,
+        string? body = null)
     {
         htmlUrl ??= $"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}";
         installerUrl ??=
@@ -487,14 +519,16 @@ internal static class UpdateCheckerTests
             });
         }
 
-        return JsonSerializer.Serialize(new Dictionary<string, object?>
+        var release = new Dictionary<string, object?>
         {
             ["tag_name"] = tag,
             ["html_url"] = htmlUrl,
             ["draft"] = draft,
             ["prerelease"] = prerelease,
             ["assets"] = assets
-        });
+        };
+        if (body is not null) release["body"] = body;
+        return JsonSerializer.Serialize(release);
     }
 
     internal static UpdateRelease CreateRelease(StableVersion version)
@@ -550,6 +584,41 @@ internal static class UpdateCheckerTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class NonSeekableReadStream(byte[] content) : Stream
+    {
+        private readonly MemoryStream _inner = new(content, writable: false);
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) => _inner.ReadAsync(buffer, cancellationToken);
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
     }
 
     private sealed class BlockingUpdateChecker(UpdateCheckResult result) : IUpdateChecker
