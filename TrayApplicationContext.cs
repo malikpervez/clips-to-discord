@@ -8,15 +8,29 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _applicationIcon;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _statusItem;
+    private readonly System.Windows.Forms.Timer _updateTimer;
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly UpdateCoordinator _updateCoordinator;
     private AppSettings _settings;
     private DiscordAwareController? _controller;
     private bool _settingsOpen;
+    private bool _automaticUpdateCheckScheduled;
 
     public TrayApplicationContext()
     {
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _applicationIcon = LoadApplicationIcon();
         _settings = SettingsStore.Load();
+        var assemblyVersion = typeof(TrayApplicationContext).Assembly.GetName().Version ?? new Version(0, 0, 0);
+        _updateCoordinator = new UpdateCoordinator(
+            GitHubUpdateChecker.Create(),
+            new UpdatePreferencesStore(),
+            StableVersion.FromAssemblyVersion(assemblyVersion));
+        _updateTimer = new System.Windows.Forms.Timer
+        {
+            Interval = (int)TimeSpan.FromHours(1).TotalMilliseconds
+        };
+        _updateTimer.Tick += UpdateTimerTick;
 
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
         var configureItem = new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings());
@@ -62,7 +76,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settingsOpen = true;
         try
         {
-            using var form = new SettingsForm(_settings, (Icon)_applicationIcon.Clone());
+            using var form = new SettingsForm(
+                _settings,
+                (Icon)_applicationIcon.Clone(),
+                CheckForUpdatesManuallyAsync);
             if (form.ShowDialog() == DialogResult.OK && form.SavedSettings is not null)
             {
                 SettingsStore.Save(form.SavedSettings);
@@ -96,7 +113,141 @@ internal sealed class TrayApplicationContext : ApplicationContext
         StartupManager.Apply(settings.StartWithWindows);
         UploadedFolder.GetOrCreate(settings.ClipsFolder);
         _controller = new DiscordAwareController(settings, SetStatus);
+        StartUpdateChecks();
     }
+
+    private void StartUpdateChecks()
+    {
+        _updateTimer.Start();
+        if (_automaticUpdateCheckScheduled) return;
+
+        _automaticUpdateCheckScheduled = true;
+        Application.Idle += CheckForUpdatesOnIdle;
+    }
+
+    private async void CheckForUpdatesOnIdle(object? sender, EventArgs eventArgs)
+    {
+        Application.Idle -= CheckForUpdatesOnIdle;
+        _automaticUpdateCheckScheduled = false;
+        await CheckForUpdatesAutomaticallyAsync();
+    }
+
+    private async void UpdateTimerTick(object? sender, EventArgs eventArgs) =>
+        await CheckForUpdatesAutomaticallyAsync();
+
+    private async Task CheckForUpdatesAutomaticallyAsync()
+    {
+        var cancellationToken = _lifetimeCancellation.Token;
+        try
+        {
+            var result = await _updateCoordinator.CheckAsync(
+                manual: false,
+                cancellationToken);
+            if (result.Status == UpdateCheckStatus.UpdateAvailable && result.Release is not null)
+            {
+                var owner = Application.OpenForms.Cast<Form>().FirstOrDefault(form => form.Visible);
+                PresentAvailableUpdate(result.Release, owner);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Automatic update check failed.", exception);
+        }
+    }
+
+    private async Task CheckForUpdatesManuallyAsync(IWin32Window owner)
+    {
+        var result = await _updateCoordinator.CheckAsync(
+            manual: true,
+            _lifetimeCancellation.Token);
+        switch (result.Status)
+        {
+            case UpdateCheckStatus.UpdateAvailable when result.Release is not null:
+                PresentAvailableUpdate(result.Release, owner);
+                break;
+            case UpdateCheckStatus.UpToDate:
+                MessageBox.Show(
+                    owner,
+                    "You already have the latest stable release.",
+                    "No update available",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                break;
+            case UpdateCheckStatus.Busy:
+                MessageBox.Show(
+                    owner,
+                    "An update check is already running.",
+                    "Update check in progress",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                break;
+            case UpdateCheckStatus.InvalidRelease:
+                MessageBox.Show(
+                    owner,
+                    "The latest release could not be verified safely. No download was opened.",
+                    "Release verification failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                break;
+            case UpdateCheckStatus.Failed:
+                MessageBox.Show(
+                    owner,
+                    "GitHub could not be reached. Clip watching and uploads are unaffected.",
+                    "Update check unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                break;
+        }
+    }
+
+    private void PresentAvailableUpdate(UpdateRelease release, IWin32Window? owner)
+    {
+        using var dialog = new UpdateAvailableDialog(release, (Icon)_applicationIcon.Clone());
+        if (owner is null) dialog.ShowDialog();
+        else dialog.ShowDialog(owner);
+
+        switch (dialog.SelectedAction)
+        {
+            case UpdateDialogAction.ViewChanges:
+            case UpdateDialogAction.DownloadUpdate:
+                OpenReleasePage(release.ReleasePageUri, owner);
+                break;
+            case UpdateDialogAction.SkipVersion:
+                if (!_updateCoordinator.Skip(release)) ShowPreferenceSaveError(owner);
+                break;
+            case UpdateDialogAction.RemindLater:
+                if (!_updateCoordinator.RemindLater(release)) ShowPreferenceSaveError(owner);
+                break;
+        }
+    }
+
+    private static void OpenReleasePage(Uri releasePageUri, IWin32Window? owner)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(releasePageUri.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not open the verified release page.", exception);
+            MessageBox.Show(
+                owner,
+                "Windows could not open the official GitHub release page.",
+                "Could not open update",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    private static void ShowPreferenceSaveError(IWin32Window? owner) => MessageBox.Show(
+        owner,
+        "The update preference could not be saved. The application will continue normally.",
+        "Could not save update preference",
+        MessageBoxButtons.OK,
+        MessageBoxIcon.Warning);
 
     private void SetStatus(string status)
     {
@@ -127,7 +278,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        Application.Idle -= CheckForUpdatesOnIdle;
+        _updateTimer.Stop();
+        _updateTimer.Dispose();
+        _lifetimeCancellation.Cancel();
         _controller?.Dispose();
+        _updateCoordinator.Dispose();
+        _lifetimeCancellation.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         _applicationIcon.Dispose();

@@ -19,15 +19,21 @@ internal sealed class SettingsForm : Form
     };
     private readonly CheckBox _startWithWindows = new() { Text = "Start with Windows", AutoSize = true };
     private readonly Button _testButton = new() { Text = "Test webhook", AutoSize = true };
+    private readonly Button _checkUpdatesButton = new() { Text = "Check for updates", AutoSize = true };
     private readonly Button _saveButton = new() { Text = "Save", AutoSize = true };
     private readonly Label _statusLabel = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
+    private readonly Func<IWin32Window, Task>? _checkForUpdatesAsync;
 
     public AppSettings? SavedSettings { get; private set; }
 
-    public SettingsForm(AppSettings settings, Icon? applicationIcon = null)
+    public SettingsForm(
+        AppSettings settings,
+        Icon? applicationIcon = null,
+        Func<IWin32Window, Task>? checkForUpdatesAsync = null)
     {
         Text = "Clips to Discord — Settings";
         _ownedApplicationIcon = applicationIcon;
+        _checkForUpdatesAsync = checkForUpdatesAsync;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
@@ -50,6 +56,8 @@ internal sealed class SettingsForm : Form
         var browseButton = new Button { Text = "Browse…", AutoSize = true };
         browseButton.Click += BrowseClicked;
         _testButton.Click += TestClicked;
+        _checkUpdatesButton.Click += CheckUpdatesClicked;
+        _checkUpdatesButton.Enabled = _checkForUpdatesAsync is not null;
         _saveButton.Click += SaveClicked;
         var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
 
@@ -113,12 +121,12 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 1,
-            RowCount = 13,
+            RowCount = 14,
             AutoSize = false,
             AutoScroll = true
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var row = 0; row < 11; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (var row = 0; row < 12; row++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -169,8 +177,9 @@ internal sealed class SettingsForm : Form
         }, 0, 8);
         layout.Controls.Add(compressionRow, 0, 9);
         layout.Controls.Add(_startWithWindows, 0, 10);
-        layout.Controls.Add(_statusLabel, 0, 11);
-        layout.Controls.Add(buttonRow, 0, 12);
+        layout.Controls.Add(_checkUpdatesButton, 0, 11);
+        layout.Controls.Add(_statusLabel, 0, 12);
+        layout.Controls.Add(buttonRow, 0, 13);
         Controls.Add(layout);
 
         AcceptButton = _saveButton;
@@ -227,6 +236,35 @@ internal sealed class SettingsForm : Form
         Close();
     }
 
+    private async void CheckUpdatesClicked(object? sender, EventArgs eventArgs)
+    {
+        if (_checkForUpdatesAsync is null) return;
+
+        SetBusy(true, "Checking for updates…");
+        try
+        {
+            await _checkForUpdatesAsync(this);
+            _statusLabel.ForeColor = SystemColors.GrayText;
+            _statusLabel.Text = "Update check finished.";
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not complete a manual update check.", exception);
+            _statusLabel.ForeColor = Color.DarkRed;
+            _statusLabel.Text = "Update check failed.";
+            MessageBox.Show(
+                this,
+                "The update check could not be completed.",
+                "Update check failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
     private bool TryValidate(out AppSettings settings)
     {
         settings = new AppSettings(
@@ -260,6 +298,7 @@ internal sealed class SettingsForm : Form
     private void SetBusy(bool busy, string? status = null)
     {
         _testButton.Enabled = !busy;
+        _checkUpdatesButton.Enabled = !busy && _checkForUpdatesAsync is not null;
         _saveButton.Enabled = !busy;
         if (status is not null)
         {

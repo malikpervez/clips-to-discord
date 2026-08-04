@@ -42,6 +42,18 @@ Legacy files are copied into a staging directory. State is installed before sett
 
 Missing or unreadable state always produces a baseline of existing top-level clips. Existing clips are never treated as a new upload queue merely because migration state is absent. When an interrupted-migration marker forces the baseline, any readable `PendingMoves` are salvaged first so already-uploaded clips still reach the archive folder.
 
+## Stable update discovery
+
+Automatic checks persist their attempt time before contacting GitHub and run no more than once every 24 hours; an hourly UI timer only asks the coordinator whether a check is due. Manual checks bypass that schedule, and a semaphore rejects overlapping checks.
+
+The client has a five-second connection deadline, a twelve-second total timeout, and bounded release/checksum response sizes. It sends only fixed GitHub API headers—never the webhook, uploader name, clip paths, or application settings. Network, timeout, rate-limit, and malformed-response failures produce a non-fatal result and do not share the watcher or uploader lifecycle.
+
+Stable mode calls only the repository's fixed `releases/latest` endpoint. The response is still treated as untrusted: draft/prerelease flags, semantic version, official HTTPS release path, exact installer name/state/path, and SHA-256 evidence are validated before presentation. GitHub's installer asset digest is preferred; a small official `SHA256SUMS.txt` asset is a bounded fallback. Branches, pull requests, tags without releases, and Actions artifacts cannot enter this path.
+
+Skip and reminder choices live in a versioned `updates.json` written through a flushed temporary file and same-directory replacement. Missing, older, or corrupt preference data falls back to safe defaults. A skipped version does not hide a later version, and a reminder expires after 24 hours.
+
+Both update actions open the already validated GitHub release page. The application never downloads or launches an installer, which keeps the existing unsigned-release warning and user verification step visible.
+
 ## Webhook validation and logging
 
 Validation permits Discord's unversioned `/api/webhooks/...` path and versioned `/api/v{number}/webhooks/...` path while retaining HTTPS and Discord-host allow-list checks.

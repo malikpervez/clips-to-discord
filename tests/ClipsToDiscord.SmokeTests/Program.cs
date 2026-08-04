@@ -339,6 +339,8 @@ try
         Volatile.Read(ref watcherCancellations) == 2,
         "Controller disposal must cancel and await the active watcher.");
 
+    await UpdateCheckerTests.RunAsync(temporaryRoot);
+
     Console.WriteLine("All smoke tests passed.");
 }
 finally
@@ -368,7 +370,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
-            using var form = new SettingsForm(settings);
+            using var form = new SettingsForm(settings, checkForUpdatesAsync: _ => Task.CompletedTask);
             form.CreateControl();
             AssertControlsFit(form);
             form.Size = form.MinimumSize;
@@ -379,13 +381,29 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .OfType<Button>()
                 .Select(button => button.Text)
                 .ToHashSet(StringComparer.Ordinal);
-            Assert(buttonTexts.SetEquals(["Browse…", "Test webhook", "Save", "Cancel"]),
+            Assert(buttonTexts.SetEquals(["Browse…", "Test webhook", "Check for updates", "Save", "Cancel"]),
                 "The settings form must keep all action buttons available.");
             var startupCheckbox = EnumerateControls(form)
                 .OfType<CheckBox>()
                 .Single(checkBox => checkBox.Text == "Start with Windows");
             Assert(startupCheckbox.Width > 0 && startupCheckbox.Height > 0,
                 "The Start with Windows checkbox must occupy visible layout space.");
+
+            using var updateDialog = new UpdateAvailableDialog(
+                UpdateCheckerTests.CreateRelease(new StableVersion(2, 0, 0)));
+            updateDialog.CreateControl();
+            AssertControlsFit(updateDialog);
+            var updateActions = EnumerateControls(updateDialog)
+                .OfType<Button>()
+                .Select(button => button.Text)
+                .ToHashSet(StringComparer.Ordinal);
+            Assert(updateActions.SetEquals([
+                    "View changes",
+                    "Download update",
+                    "Skip this version",
+                    "Remind me later"
+                ]),
+                "The update prompt must expose every required action.");
         }
         catch (Exception exception)
         {
