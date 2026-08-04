@@ -16,6 +16,8 @@ internal static class UpdateCheckerTests
             "Prerelease suffixes must not parse as stable versions.");
         Assert(!StableVersion.TryParse("v01.3.5", out _),
             "Non-canonical leading zeroes must be rejected.");
+        Assert(StableVersion.FromAssemblyVersion(new Version(1, 3, 5, 0)) == InstalledVersion,
+            "Assembly versions must compare using their major, minor, and build components.");
 
         var observedUris = new List<Uri>();
         var observedAuthorization = false;
@@ -61,6 +63,8 @@ internal static class UpdateCheckerTests
             "A non-HTTPS release page must be rejected.");
         await AssertStatusAsync(BuildReleaseJson(includeInstaller: false), UpdateCheckStatus.InvalidRelease,
             "A release without the exact installer asset must be rejected.");
+        await AssertStatusAsync(BuildReleaseJson(duplicateInstaller: true), UpdateCheckStatus.InvalidRelease,
+            "A release with duplicate expected installer assets must be rejected.");
         await AssertStatusAsync(
             "{\"tag_name\":\"v2.0.0\",\"html_url\":\"https://github.com/malikpervez/clips-to-discord/releases/tag/v2.0.0\",\"draft\":false,\"prerelease\":false,\"assets\":null}",
             UpdateCheckStatus.InvalidRelease,
@@ -81,7 +85,7 @@ internal static class UpdateCheckerTests
         using (var checker = CreateChecker(
                    checksumJson,
                    _ => checksumRequests++,
-                   $"{ValidDigest.ToUpperInvariant()}  ClipsToDiscord-Setup.exe\n"))
+                   $"{ValidDigest.ToUpperInvariant()}  ClipsToDiscord-Setup.exe\r\n"))
         {
             var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
             Assert(result.Status == UpdateCheckStatus.UpdateAvailable &&
@@ -89,6 +93,16 @@ internal static class UpdateCheckerTests
                 "A bounded official checksum manifest must verify an installer without an API digest.");
         }
         Assert(checksumRequests == 2, "Checksum fallback must perform exactly one additional fixed asset request.");
+
+        using (var checker = CreateChecker(
+                   checksumJson,
+                   checksumContent:
+                       $"{ValidDigest}  ClipsToDiscord-Setup.exe\r\n{new string('f', 64)}  ClipsToDiscord-Setup.exe\r\n"))
+        {
+            var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
+            Assert(result.Status == UpdateCheckStatus.InvalidRelease,
+                "A checksum manifest with duplicate installer entries must be rejected as ambiguous.");
+        }
 
         using (var checker = CreateChecker(
                    checksumJson,
@@ -124,9 +138,108 @@ internal static class UpdateCheckerTests
             Assert(result.Status == UpdateCheckStatus.Failed,
                 "Malformed JSON must produce a non-fatal failed result.");
         }
+        using (var checker = CreateChecker(new string('x', 1_048_577)))
+        {
+            var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
+            Assert(result.Status == UpdateCheckStatus.Failed,
+                "An oversized release response must be rejected before parsing.");
+        }
 
+        await AssertChecksumRedirectAllowListAsync();
+        await AssertWholeOperationDeadlineAsync();
+        await AssertCallerCancellationAsync();
         await AssertConcurrentChecksAreRejectedAsync();
         await AssertPreferencesAndThrottleAsync(temporaryRoot);
+        await AssertCoordinatorConcurrencyAsync(temporaryRoot);
+    }
+
+    private static async Task AssertChecksumRedirectAllowListAsync()
+    {
+        var releaseJson = BuildReleaseJson(digest: null, includeChecksum: true);
+        var allowedRedirect = new Uri(
+            "https://release-assets.githubusercontent.com/github-production-release-asset/test?signature=value");
+        var requests = new List<Uri>();
+        using (var client = new HttpClient(new StubHttpMessageHandler((request, _) =>
+               {
+                   requests.Add(request.RequestUri!);
+                   if (request.RequestUri == GitHubUpdateChecker.LatestReleaseApiUri)
+                   {
+                       return Task.FromResult(JsonResponse(releaseJson));
+                   }
+                   if (request.RequestUri!.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+                   {
+                       var redirect = new HttpResponseMessage(HttpStatusCode.Redirect);
+                       redirect.Headers.Location = allowedRedirect;
+                       return Task.FromResult(redirect);
+                   }
+                   return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                   {
+                       Content = new StringContent(
+                           $"{ValidDigest}  ClipsToDiscord-Setup.exe\r\n",
+                           Encoding.UTF8,
+                           "text/plain")
+                   });
+               })) { Timeout = Timeout.InfiniteTimeSpan })
+        using (var checker = new GitHubUpdateChecker(client, operationTimeout: TimeSpan.FromSeconds(2)))
+        {
+            var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
+            Assert(result.Status == UpdateCheckStatus.UpdateAvailable && requests.Count == 3,
+                "Checksum fallback must follow one allow-listed GitHub asset redirect.");
+        }
+
+        using (var client = new HttpClient(new StubHttpMessageHandler((request, _) =>
+               {
+                   if (request.RequestUri == GitHubUpdateChecker.LatestReleaseApiUri)
+                   {
+                       return Task.FromResult(JsonResponse(releaseJson));
+                   }
+                   var redirect = new HttpResponseMessage(HttpStatusCode.Redirect);
+                   redirect.Headers.Location = new Uri("https://example.com/untrusted-checksums.txt");
+                   return Task.FromResult(redirect);
+               })) { Timeout = Timeout.InfiniteTimeSpan })
+        using (var checker = new GitHubUpdateChecker(client, operationTimeout: TimeSpan.FromSeconds(2)))
+        {
+            var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
+            Assert(result.Status == UpdateCheckStatus.Failed,
+                "Checksum fallback must reject redirects outside the GitHub asset host allow-list.");
+        }
+    }
+
+    private static async Task AssertWholeOperationDeadlineAsync()
+    {
+        using var client = new HttpClient(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new NeverEndingReadStream())
+            }))) { Timeout = Timeout.InfiniteTimeSpan };
+        using var checker = new GitHubUpdateChecker(
+            client,
+            operationTimeout: TimeSpan.FromMilliseconds(75));
+
+        var startedAt = DateTime.UtcNow;
+        var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
+        Assert(result.Status == UpdateCheckStatus.Failed && DateTime.UtcNow - startedAt < TimeSpan.FromSeconds(2),
+            "The update deadline must cancel a response body that never completes.");
+    }
+
+    private static async Task AssertCallerCancellationAsync()
+    {
+        using var client = new HttpClient(new StubHttpMessageHandler((_, cancellationToken) =>
+            Task.FromCanceled<HttpResponseMessage>(cancellationToken)))
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+        using var checker = new GitHubUpdateChecker(client, operationTimeout: TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        try
+        {
+            await checker.CheckAsync(InstalledVersion, cancellation.Token);
+            throw new InvalidOperationException("Caller cancellation should propagate from the update checker.");
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
     }
 
     private static async Task AssertConcurrentChecksAreRejectedAsync()
@@ -189,10 +302,92 @@ internal static class UpdateCheckerTests
                saved.RemindAfterUtc == now + UpdateCoordinator.ReminderInterval,
             "Remind-me-later must replace skip state and persist its deadline atomically.");
 
+        var olderRelease = CreateRelease(new StableVersion(1, 9, 0));
+        Assert(coordinator.Skip(olderRelease), "An older release skip must persist successfully.");
+        Assert(coordinator.RemindLater(release), "A newer release reminder must persist successfully.");
+        saved = store.Load();
+        Assert(saved.SkippedVersion == "1.9.0" && saved.RemindVersion == "2.0.0",
+            "Deferring a newer release must preserve an unrelated skipped version.");
+
+        var reminderPath = Path.Combine(temporaryRoot, "reminder-preferences", "updates.json");
+        var reminderStore = new UpdatePreferencesStore(reminderPath);
+        reminderStore.Save(new UpdatePreferences(
+            now - UpdateCoordinator.AutomaticCheckInterval - TimeSpan.FromMinutes(1),
+            RemindVersion: "2.0.0",
+            RemindAfterUtc: now + TimeSpan.FromHours(1)));
+        using (var reminderChecker = new StubUpdateChecker(UpdateCheckResult.Available(release)))
+        using (var reminderCoordinator = new UpdateCoordinator(
+                   reminderChecker,
+                   reminderStore,
+                   InstalledVersion,
+                   () => now))
+        {
+            Assert((await reminderCoordinator.CheckAsync(manual: false, CancellationToken.None)).Status ==
+                   UpdateCheckStatus.Suppressed,
+                "An unexpired reminder must suppress the same release during automatic checks.");
+        }
+
+        reminderStore.Save(new UpdatePreferences(
+            now - UpdateCoordinator.AutomaticCheckInterval - TimeSpan.FromMinutes(1),
+            RemindVersion: "2.0.0",
+            RemindAfterUtc: now - TimeSpan.FromMinutes(1)));
+        using (var expiredChecker = new StubUpdateChecker(UpdateCheckResult.Available(release)))
+        using (var expiredCoordinator = new UpdateCoordinator(
+                   expiredChecker,
+                   reminderStore,
+                   InstalledVersion,
+                   () => now))
+        {
+            Assert((await expiredCoordinator.CheckAsync(manual: false, CancellationToken.None)).Status ==
+                   UpdateCheckStatus.UpdateAvailable,
+                "An expired reminder must offer the release again.");
+        }
+
+        reminderStore.Save(new UpdatePreferences(
+            now - UpdateCoordinator.AutomaticCheckInterval - TimeSpan.FromMinutes(1),
+            RemindVersion: "2.0.0",
+            RemindAfterUtc: now + TimeSpan.FromDays(3650)));
+        using (var skewChecker = new StubUpdateChecker(UpdateCheckResult.Available(release)))
+        using (var skewCoordinator = new UpdateCoordinator(
+                   skewChecker,
+                   reminderStore,
+                   InstalledVersion,
+                   () => now))
+        {
+            Assert((await skewCoordinator.CheckAsync(manual: false, CancellationToken.None)).Status ==
+                   UpdateCheckStatus.UpdateAvailable,
+                "A far-future reminder caused by clock skew must not suppress updates indefinitely.");
+        }
+
         await File.WriteAllTextAsync(preferencePath, "{not valid json");
         var recovered = store.Load();
         Assert(recovered == new UpdatePreferences(),
             "Corrupt update preferences must migrate to a safe empty default without stopping the app.");
+
+        await File.WriteAllTextAsync(preferencePath, "{\"Version\":0,\"SkippedVersion\":\"2.0.0\"}");
+        recovered = store.Load();
+        Assert(recovered == new UpdatePreferences(),
+            "An older update-preference schema must migrate to safe defaults.");
+    }
+
+    private static async Task AssertCoordinatorConcurrencyAsync(string temporaryRoot)
+    {
+        var preferencePath = Path.Combine(temporaryRoot, "coordinator-concurrency", "updates.json");
+        var release = CreateRelease(new StableVersion(2, 0, 0));
+        using var checker = new BlockingUpdateChecker(UpdateCheckResult.Available(release));
+        using var coordinator = new UpdateCoordinator(
+            checker,
+            new UpdatePreferencesStore(preferencePath),
+            InstalledVersion);
+
+        var first = coordinator.CheckAsync(manual: true, CancellationToken.None);
+        await checker.Started.Task;
+        var second = await coordinator.CheckAsync(manual: true, CancellationToken.None);
+        Assert(second.Status == UpdateCheckStatus.Busy,
+            "The coordinator must reject a concurrent manual or automatic check.");
+        checker.Release.TrySetResult();
+        Assert((await first).Status == UpdateCheckStatus.UpdateAvailable,
+            "The coordinator's original check must complete after rejecting a concurrent attempt.");
     }
 
     private static async Task AssertStatusAsync(
@@ -259,7 +454,8 @@ internal static class UpdateCheckerTests
         bool includeInstaller = true,
         string? digest = "sha256:" + ValidDigest,
         string? installerUrl = null,
-        bool includeChecksum = false)
+        bool includeChecksum = false,
+        bool duplicateInstaller = false)
     {
         htmlUrl ??= $"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}";
         installerUrl ??=
@@ -267,14 +463,16 @@ internal static class UpdateCheckerTests
         var assets = new List<Dictionary<string, object?>>();
         if (includeInstaller)
         {
-            assets.Add(new Dictionary<string, object?>
+            var installer = new Dictionary<string, object?>
             {
                 ["name"] = "ClipsToDiscord-Setup.exe",
                 ["state"] = "uploaded",
                 ["size"] = 123456,
                 ["digest"] = digest,
                 ["browser_download_url"] = installerUrl
-            });
+            };
+            assets.Add(installer);
+            if (duplicateInstaller) assets.Add(new Dictionary<string, object?>(installer));
         }
         if (includeChecksum)
         {
@@ -321,6 +519,56 @@ internal static class UpdateCheckerTests
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken) => handler(request, cancellationToken);
+    }
+
+    private sealed class NeverEndingReadStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class BlockingUpdateChecker(UpdateCheckResult result) : IUpdateChecker
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<UpdateCheckResult> CheckAsync(
+            StableVersion currentVersion,
+            CancellationToken cancellationToken)
+        {
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return result;
+        }
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class StubUpdateChecker(UpdateCheckResult result) : IUpdateChecker

@@ -404,6 +404,18 @@ static void AssertSettingsFormLayout(AppSettings settings)
                     "Remind me later"
                 ]),
                 "The update prompt must expose every required action.");
+
+            using (var ownerForm = new Form { ShowInTaskbar = false })
+            {
+                ownerForm.Show();
+                Assert(ReferenceEquals(TrayApplicationContext.GetUsableOwner(ownerForm), ownerForm),
+                    "A visible live form must remain a valid update-dialog owner.");
+                ownerForm.Dispose();
+                Assert(TrayApplicationContext.GetUsableOwner(ownerForm) is null,
+                    "A disposed Settings form must be dropped before update UI uses its handle.");
+            }
+
+            AssertManualCheckCloseProtection(settings);
         }
         catch (Exception exception)
         {
@@ -414,6 +426,49 @@ static void AssertSettingsFormLayout(AppSettings settings)
     thread.Start();
     thread.Join();
     if (failure is not null) throw new InvalidOperationException("Settings form layout validation failed.", failure);
+}
+
+static void AssertManualCheckCloseProtection(AppSettings settings)
+{
+    var releaseCheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var checkedBusyState = false;
+    using var form = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: async _ => await releaseCheck.Task);
+    form.Shown += (_, _) =>
+    {
+        var buttons = EnumerateControls(form).OfType<Button>().ToArray();
+        var checkButton = buttons.Single(button => button.Text == "Check for updates");
+        var cancelButton = buttons.Single(button => button.Text == "Cancel");
+        checkButton.PerformClick();
+
+        var inspectTimer = new System.Windows.Forms.Timer { Interval = 20 };
+        inspectTimer.Tick += (_, _) =>
+        {
+            inspectTimer.Stop();
+            inspectTimer.Dispose();
+            Assert(!cancelButton.Enabled && !form.ControlBox,
+                "Cancel, Esc, and the close box must be disabled during a manual update check.");
+            form.Close();
+            Assert(form.Visible,
+                "A user close request must not dispose Settings while its update callback is in flight.");
+            checkedBusyState = true;
+            releaseCheck.TrySetResult();
+
+            var closeTimer = new System.Windows.Forms.Timer { Interval = 20 };
+            closeTimer.Tick += (_, _) =>
+            {
+                closeTimer.Stop();
+                closeTimer.Dispose();
+                form.Close();
+            };
+            closeTimer.Start();
+        };
+        inspectTimer.Start();
+    };
+
+    form.ShowDialog();
+    Assert(checkedBusyState, "The manual update-check close-protection test did not run.");
 }
 
 static void AssertControlsFit(Form form)

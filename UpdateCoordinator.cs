@@ -65,10 +65,13 @@ internal sealed class UpdateCoordinator : IDisposable
             }
 
             if (_preferences.RemindVersion?.Equals(availableVersion, StringComparison.Ordinal) == true &&
-                _preferences.RemindAfterUtc is not null &&
-                now < _preferences.RemindAfterUtc)
+                _preferences.RemindAfterUtc is not null)
             {
-                return new UpdateCheckResult(UpdateCheckStatus.Suppressed);
+                var remaining = _preferences.RemindAfterUtc.Value - now;
+                if (remaining > TimeSpan.Zero && remaining <= ReminderInterval)
+                {
+                    return new UpdateCheckResult(UpdateCheckStatus.Suppressed);
+                }
             }
 
             return result;
@@ -88,7 +91,11 @@ internal sealed class UpdateCoordinator : IDisposable
 
     public bool RemindLater(UpdateRelease release) => TrySave(_preferences with
     {
-        SkippedVersion = null,
+        SkippedVersion = _preferences.SkippedVersion?.Equals(
+            release.Version.ToString(),
+            StringComparison.Ordinal) == true
+                ? null
+                : _preferences.SkippedVersion,
         RemindVersion = release.Version.ToString(),
         RemindAfterUtc = _utcNow().ToUniversalTime() + ReminderInterval
     });

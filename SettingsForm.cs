@@ -21,8 +21,10 @@ internal sealed class SettingsForm : Form
     private readonly Button _testButton = new() { Text = "Test webhook", AutoSize = true };
     private readonly Button _checkUpdatesButton = new() { Text = "Check for updates", AutoSize = true };
     private readonly Button _saveButton = new() { Text = "Save", AutoSize = true };
+    private readonly Button _cancelButton = new() { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
     private readonly Label _statusLabel = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Func<IWin32Window, Task>? _checkForUpdatesAsync;
+    private bool _busy;
 
     public AppSettings? SavedSettings { get; private set; }
 
@@ -59,7 +61,7 @@ internal sealed class SettingsForm : Form
         _checkUpdatesButton.Click += CheckUpdatesClicked;
         _checkUpdatesButton.Enabled = _checkForUpdatesAsync is not null;
         _saveButton.Click += SaveClicked;
-        var cancelButton = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
+        FormClosing += FormClosingWhileBusy;
 
         var folderRow = new TableLayoutPanel
         {
@@ -114,7 +116,7 @@ internal sealed class SettingsForm : Form
             Margin = Padding.Empty
         };
         buttonRow.Controls.Add(_saveButton);
-        buttonRow.Controls.Add(cancelButton);
+        buttonRow.Controls.Add(_cancelButton);
 
         var layout = new TableLayoutPanel
         {
@@ -183,7 +185,7 @@ internal sealed class SettingsForm : Form
         Controls.Add(layout);
 
         AcceptButton = _saveButton;
-        CancelButton = cancelButton;
+        CancelButton = _cancelButton;
     }
 
     private void BrowseClicked(object? sender, EventArgs eventArgs)
@@ -244,12 +246,14 @@ internal sealed class SettingsForm : Form
         try
         {
             await _checkForUpdatesAsync(this);
+            if (IsDisposed || Disposing) return;
             _statusLabel.ForeColor = SystemColors.GrayText;
             _statusLabel.Text = "Update check finished.";
         }
         catch (Exception exception)
         {
             Log.Error("Could not complete a manual update check.", exception);
+            if (IsDisposed || Disposing) return;
             _statusLabel.ForeColor = Color.DarkRed;
             _statusLabel.Text = "Update check failed.";
             MessageBox.Show(
@@ -297,13 +301,26 @@ internal sealed class SettingsForm : Form
 
     private void SetBusy(bool busy, string? status = null)
     {
+        _busy = busy;
+        if (IsDisposed || Disposing) return;
+
         _testButton.Enabled = !busy;
         _checkUpdatesButton.Enabled = !busy && _checkForUpdatesAsync is not null;
         _saveButton.Enabled = !busy;
+        _cancelButton.Enabled = !busy;
+        ControlBox = !busy;
         if (status is not null)
         {
             _statusLabel.ForeColor = SystemColors.GrayText;
             _statusLabel.Text = status;
+        }
+    }
+
+    private void FormClosingWhileBusy(object? sender, FormClosingEventArgs eventArgs)
+    {
+        if (_busy && eventArgs.CloseReason == CloseReason.UserClosing)
+        {
+            eventArgs.Cancel = true;
         }
     }
 

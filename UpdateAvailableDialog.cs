@@ -36,7 +36,7 @@ internal sealed class UpdateAvailableDialog : Form
         };
         var explanation = new Label
         {
-            Text = "The release includes the expected installer and a verified SHA-256 digest. " +
+            Text = "The release includes the expected installer and SHA-256 verification information. " +
                    "For safety, this app never downloads or installs updates silently. " +
                    "View changes and Download update both open the official GitHub release page.",
             AutoSize = false,

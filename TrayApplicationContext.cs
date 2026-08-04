@@ -163,14 +163,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var result = await _updateCoordinator.CheckAsync(
             manual: true,
             _lifetimeCancellation.Token);
+        var safeOwner = GetUsableOwner(owner);
         switch (result.Status)
         {
             case UpdateCheckStatus.UpdateAvailable when result.Release is not null:
-                PresentAvailableUpdate(result.Release, owner);
+                PresentAvailableUpdate(result.Release, safeOwner);
                 break;
             case UpdateCheckStatus.UpToDate:
                 MessageBox.Show(
-                    owner,
+                    safeOwner,
                     "You already have the latest stable release.",
                     "No update available",
                     MessageBoxButtons.OK,
@@ -178,7 +179,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 break;
             case UpdateCheckStatus.Busy:
                 MessageBox.Show(
-                    owner,
+                    safeOwner,
                     "An update check is already running.",
                     "Update check in progress",
                     MessageBoxButtons.OK,
@@ -186,7 +187,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 break;
             case UpdateCheckStatus.InvalidRelease:
                 MessageBox.Show(
-                    owner,
+                    safeOwner,
                     "The latest release could not be verified safely. No download was opened.",
                     "Release verification failed",
                     MessageBoxButtons.OK,
@@ -194,7 +195,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 break;
             case UpdateCheckStatus.Failed:
                 MessageBox.Show(
-                    owner,
+                    safeOwner,
                     "GitHub could not be reached. Clip watching and uploads are unaffected.",
                     "Update check unavailable",
                     MessageBoxButtons.OK,
@@ -203,9 +204,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    internal static IWin32Window? GetUsableOwner(IWin32Window requestedOwner) =>
+        requestedOwner is Control
+        {
+            IsDisposed: false,
+            Disposing: false,
+            IsHandleCreated: true,
+            Visible: true
+        } control
+            ? control
+            : null;
+
     private void PresentAvailableUpdate(UpdateRelease release, IWin32Window? owner)
     {
         using var dialog = new UpdateAvailableDialog(release, (Icon)_applicationIcon.Clone());
+        dialog.StartPosition = owner is null ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
         if (owner is null) dialog.ShowDialog();
         else dialog.ShowDialog(owner);
 

@@ -91,6 +91,7 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
     internal const string Repository = "clips-to-discord";
     internal const string InstallerFileName = "ClipsToDiscord-Setup.exe";
     internal const string ChecksumsFileName = "SHA256SUMS.txt";
+    internal static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(12);
     internal static readonly Uri LatestReleaseApiUri = new(
         $"https://api.github.com/repos/{Owner}/{Repository}/releases/latest");
 
@@ -98,27 +99,45 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
     private const int MaximumChecksumResponseBytes = 65_536;
     private readonly HttpClient _httpClient;
     private readonly bool _disposeHttpClient;
+    private readonly TimeSpan _operationTimeout;
     private readonly SemaphoreSlim _checkGate = new(1, 1);
+    private static readonly HashSet<string> AllowedAssetRedirectHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com"
+    };
 
     public static GitHubUpdateChecker Create()
     {
         var handler = new SocketsHttpHandler
         {
             AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+            AllowAutoRedirect = false,
             ConnectTimeout = TimeSpan.FromSeconds(5),
             PooledConnectionLifetime = TimeSpan.FromMinutes(5)
         };
         var client = new HttpClient(handler)
         {
-            Timeout = TimeSpan.FromSeconds(12)
+            Timeout = Timeout.InfiniteTimeSpan
         };
-        return new GitHubUpdateChecker(client, disposeHttpClient: true);
+        return new GitHubUpdateChecker(
+            client,
+            disposeHttpClient: true,
+            operationTimeout: DefaultOperationTimeout);
     }
 
-    internal GitHubUpdateChecker(HttpClient httpClient, bool disposeHttpClient = false)
+    internal GitHubUpdateChecker(
+        HttpClient httpClient,
+        bool disposeHttpClient = false,
+        TimeSpan? operationTimeout = null)
     {
         _httpClient = httpClient;
         _disposeHttpClient = disposeHttpClient;
+        _operationTimeout = operationTimeout ?? DefaultOperationTimeout;
+        if (_operationTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(operationTimeout));
+        }
     }
 
     public async Task<UpdateCheckResult> CheckAsync(
@@ -132,27 +151,30 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
 
         try
         {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(_operationTimeout);
+            var operationToken = deadline.Token;
             using var request = CreateRequest(LatestReleaseApiUri, acceptJson: true);
             using var response = await _httpClient.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
+                operationToken);
             response.EnsureSuccessStatusCode();
-            var payload = await ReadBoundedAsync(response, MaximumReleaseResponseBytes, cancellationToken);
+            var payload = await ReadBoundedAsync(response, MaximumReleaseResponseBytes, operationToken);
             var release = JsonSerializer.Deserialize<GitHubReleaseDto>(payload);
             if (release is null)
             {
                 return Invalid("GitHub returned an empty release document.");
             }
 
-            return await ValidateReleaseAsync(release, currentVersion, cancellationToken);
+            return await ValidateReleaseAsync(release, currentVersion, operationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
         catch (Exception exception) when (
-            exception is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException or ObjectDisposedException)
+            exception is HttpRequestException or OperationCanceledException or JsonException or InvalidDataException or ObjectDisposedException)
         {
             Log.Error("Update check failed.", exception);
             return new UpdateCheckResult(
@@ -245,16 +267,43 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
             return null;
         }
 
-        using var request = CreateRequest(manifestUri, acceptJson: false);
-        using var response = await _httpClient.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken);
+        using var response = await SendChecksumRequestAsync(manifestUri, cancellationToken);
         response.EnsureSuccessStatusCode();
         var payload = await ReadBoundedAsync(response, MaximumChecksumResponseBytes, cancellationToken);
         var manifestText = Encoding.UTF8.GetString(payload);
-        var match = InstallerChecksumPattern().Match(manifestText);
-        return match.Success ? match.Groups["hash"].Value.ToLowerInvariant() : null;
+        var matches = InstallerChecksumPattern().Matches(manifestText);
+        return matches.Count == 1 ? matches[0].Groups["hash"].Value.ToLowerInvariant() : null;
+    }
+
+    private async Task<HttpResponseMessage> SendChecksumRequestAsync(
+        Uri manifestUri,
+        CancellationToken cancellationToken)
+    {
+        using var request = CreateRequest(manifestUri, acceptJson: false);
+        var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        if (!IsRedirect(response.StatusCode)) return response;
+
+        var location = response.Headers.Location;
+        response.Dispose();
+        if (!TryValidateAssetRedirectUri(location, out var redirectUri))
+        {
+            throw new InvalidDataException("The checksum asset redirect was not an allowed GitHub host.");
+        }
+
+        using var redirectRequest = CreateRequest(redirectUri, acceptJson: false);
+        var redirectedResponse = await _httpClient.SendAsync(
+            redirectRequest,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        if (IsRedirect(redirectedResponse.StatusCode))
+        {
+            redirectedResponse.Dispose();
+            throw new InvalidDataException("The checksum asset exceeded its redirect limit.");
+        }
+        return redirectedResponse;
     }
 
     private static HttpRequestMessage CreateRequest(Uri uri, bool acceptJson)
@@ -327,6 +376,30 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
         return false;
     }
 
+    private static bool TryValidateAssetRedirectUri(Uri? candidate, out Uri uri)
+    {
+        if (candidate is not null &&
+            candidate.IsAbsoluteUri &&
+            candidate.Scheme == Uri.UriSchemeHttps &&
+            candidate.IsDefaultPort &&
+            string.IsNullOrEmpty(candidate.UserInfo) &&
+            AllowedAssetRedirectHosts.Contains(candidate.Host))
+        {
+            uri = candidate;
+            return true;
+        }
+
+        uri = null!;
+        return false;
+    }
+
+    private static bool IsRedirect(HttpStatusCode statusCode) => statusCode is
+        HttpStatusCode.MovedPermanently or
+        HttpStatusCode.Redirect or
+        HttpStatusCode.RedirectMethod or
+        HttpStatusCode.TemporaryRedirect or
+        HttpStatusCode.PermanentRedirect;
+
     private static string? NormalizeSha256Digest(string? digest)
     {
         var match = Sha256DigestPattern().Match(digest ?? string.Empty);
@@ -344,10 +417,10 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
         if (_disposeHttpClient) _httpClient.Dispose();
     }
 
-    [GeneratedRegex(@"^sha256:(?<hash>[a-f0-9]{64})$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^sha256:(?<hash>[a-f0-9]{64})\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Sha256DigestPattern();
 
-    [GeneratedRegex(@"^(?<hash>[a-f0-9]{64})[ \t]+\*?ClipsToDiscord-Setup\.exe[ \t]*$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^\uFEFF?(?<hash>[a-f0-9]{64})[ \t]+\*?ClipsToDiscord-Setup\.exe[ \t]*\r?$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex InstallerChecksumPattern();
 
     private sealed class GitHubReleaseDto
