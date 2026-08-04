@@ -2,6 +2,12 @@
 
 All notable user-facing changes are documented here.
 
+## Unreleased
+
+- Added stable-only update discovery through the official GitHub Releases API with strict repository, HTTPS, semantic-version, installer, and SHA-256 verification.
+- Added a manual **Check for updates** action plus **View changes**, **Download update**, **Skip this version**, and **Remind me later** choices; download actions open the official release page and never install silently.
+- Limited automatic checks to once per 24 hours, prevented concurrent checks, persisted skip/remind preferences atomically, and isolated all update failures from clip watching and uploads.
+
 ## 1.3.5 — 2026-08-03
 
 - Stopped over-escaping ordinary game-name punctuation so names such as `Battlefield™-6` and `Half-Life` display without visible backslashes in Discord.

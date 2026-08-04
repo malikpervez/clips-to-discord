@@ -17,6 +17,11 @@ The app works with any tool that saves MP4 clips into the selected folder.
 
 Keep your webhook URL private. If it is exposed, rotate or delete it in Discord.
 
+The app checks the official GitHub Releases API at most once per day for a newer
+stable release. It never downloads or installs an update silently. Use "Check for
+updates" in Settings for an immediate check; update actions open the official
+GitHub release page.
+
 This app is not affiliated with Discord or any recording-software vendor.
 
 The bundled FFmpeg 8.1.2 essentials build is provided by Gyan.dev under GPLv3.

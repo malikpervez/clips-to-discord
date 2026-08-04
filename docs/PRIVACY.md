@@ -17,13 +17,16 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`:
 - Path/length/timestamp keys used only to preserve the initial do-not-upload baseline
 - SHA-256 hashes of clip contents used for stable duplicate detection
 - Pending archive moves
+- The last automatic update-check time and optional skipped/reminder version
 - Operational logs
 
 The webhook cannot normally be decrypted by another Windows account or after moving the settings file to another Windows installation.
 
 ## Network access
 
-Normal operation connects only to the Discord webhook URL supplied by the user. Each upload sends the configured uploader name and parsed game name as visible message text and attachment description. When a clip is too large, compression is performed locally by the bundled FFmpeg executable before the smaller copy is uploaded.
+Normal upload operation connects only to the Discord webhook URL supplied by the user. Each upload sends the configured uploader name and parsed game name as visible message text and attachment description. When a clip is too large, compression is performed locally by the bundled FFmpeg executable before the smaller copy is uploaded.
+
+The app also makes an anonymous HTTPS request to the fixed official `malikpervez/clips-to-discord` GitHub Releases API no more than once every 24 hours, or when the user explicitly selects **Check for updates**. If GitHub's installer metadata lacks its own digest, the app may fetch the release's small checksum file through the validated GitHub URL and at most one allow-listed GitHub asset-CDN redirect. These requests do not contain the webhook, uploader name, clip names or paths, settings, or a project account identifier. If a verified update is offered, choosing an update action opens the official GitHub release page in the default browser; the app does not download or install it.
 
 SHA-256 hashing and FFmpeg compression are performed locally. Clip content and hashes are not sent to a project-operated server. Operational log messages pass through a webhook-URL redactor before being written.
 

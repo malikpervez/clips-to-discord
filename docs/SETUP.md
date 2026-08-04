@@ -73,6 +73,12 @@ Exit the old app from its notification-area menu, download the current `ClipsToD
 
 Exit the app from its notification-area menu and run the newer `ClipsToDiscord-Setup.exe`. It upgrades the existing per-user installation in place. Saved settings and upload state remain under `%LOCALAPPDATA%\ClipsToDiscord`.
 
+The app checks the official `malikpervez/clips-to-discord` GitHub Releases API no more than once every 24 hours. Stable checks ignore drafts and prereleases and offer only a newer release containing the expected installer plus a verifiable SHA-256 digest or checksum entry. Use **Check for updates** in Settings to check immediately.
+
+When an update is available, **View changes** and **Download update** both open the verified official GitHub release page. The app does not download, execute, or install anything silently. **Skip this version** suppresses that exact version during automatic checks; **Remind me later** waits 24 hours. A later stable version is not hidden by either choice.
+
+Branches, pull requests, Actions artifacts, tags without GitHub releases, drafts, and prereleases are never shown to stable users. An offline or failed update check does not stop clip watching or uploads.
+
 The installer deliberately refuses a silent update while the application mutex is active. Exit the tray app before an unattended update. Silent setup does not relaunch the app; interactive setup offers to launch it when finished.
 
 Portable users can exit the app, replace the extracted application files, and reopen `ClipsToDiscord.exe`.
