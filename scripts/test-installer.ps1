@@ -1,8 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$PreviousInstallerPath,
-    [string]$ExpectedVersion = '1.3.5',
-    [string]$PreviousVersion = '1.3.4'
+    [string]$ExpectedVersion = '1.3.6',
+    [string]$PreviousVersion = '1.3.5'
 )
 
 $ErrorActionPreference = 'Stop'
