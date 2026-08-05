@@ -1,4 +1,4 @@
-CLIPS TO DISCORD — PORTABLE PACKAGE
+CLIPCORD — PORTABLE PACKAGE
 
 1. Keep every file from this ZIP together in one folder.
 2. Run ClipsToDiscord.exe.
@@ -28,5 +28,5 @@ The bundled FFmpeg 8.1.2 essentials build is provided by Gyan.dev under GPLv3.
 Its license is in FFMPEG-LICENSE.txt. The corresponding FFmpeg source revision is:
 https://github.com/FFmpeg/FFmpeg/commit/38b88335f9
 
-For an automatic per-user installation, download ClipsToDiscord-Setup.exe from
+For an automatic per-user installation, download ClipCord-Setup.exe from
 the GitHub Releases page instead of this portable ZIP.

@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$PreviousInstallerPath,
-    [string]$ExpectedVersion = '1.3.6',
+    [string]$ExpectedVersion = '1.3.7',
     [string]$PreviousVersion = '1.3.5'
 )
 
@@ -17,8 +17,10 @@ foreach ($path in @($installer, $previousInstaller)) {
 $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\ClipsToDiscord'
 $dataDirectory = Join-Path $env:LOCALAPPDATA 'ClipsToDiscord'
 $dataSentinel = Join-Path $dataDirectory "installer-preservation-$([Guid]::NewGuid().ToString('N')).txt"
-$startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Clips to Discord.lnk'
-$desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Clips to Discord.lnk'
+$legacyStartMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Clips to Discord.lnk'
+$legacyDesktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Clips to Discord.lnk'
+$startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\ClipCord.lnk'
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ClipCord.lnk'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $mutexReady = Join-Path ([IO.Path]::GetTempPath()) "ClipsToDiscordMutex-$([Guid]::NewGuid().ToString('N')).ready"
 $mutexHolder = $null
@@ -26,7 +28,7 @@ $mutexHolder = $null
 function Get-UninstallEntries {
     @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' `
         -ErrorAction SilentlyContinue |
-        Where-Object DisplayName -eq 'Clips to Discord')
+        Where-Object DisplayName -in @('Clips to Discord', 'ClipCord'))
 }
 
 function Invoke-Installer {
@@ -65,7 +67,8 @@ function Get-DataSnapshot {
 function Assert-InstalledVersion {
     param(
         [Parameter(Mandatory = $true)][string]$SetupVersion,
-        [Parameter(Mandatory = $true)][string]$ExecutableVersion
+        [Parameter(Mandatory = $true)][string]$ExecutableVersion,
+        [Parameter(Mandatory = $true)][string]$DisplayName
     )
 
     $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
@@ -83,6 +86,9 @@ function Assert-InstalledVersion {
     if ($entries[0].DisplayVersion -ne $SetupVersion) {
         throw "Uninstall entry version was $($entries[0].DisplayVersion) instead of $SetupVersion."
     }
+    if ($entries[0].DisplayName -ne $DisplayName) {
+        throw "Uninstall entry name was $($entries[0].DisplayName) instead of $DisplayName."
+    }
     if ([IO.Path]::GetFullPath($entries[0].InstallLocation).TrimEnd('\') -ne
         [IO.Path]::GetFullPath($installDirectory).TrimEnd('\')) {
         throw "Unexpected default installation directory: $($entries[0].InstallLocation)"
@@ -92,7 +98,12 @@ function Assert-InstalledVersion {
 if (Get-Process -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue) {
     throw 'A ClipsToDiscord process is already running.'
 }
-foreach ($path in @($installDirectory, $startMenuShortcut, $desktopShortcut)) {
+foreach ($path in @(
+    $installDirectory,
+    $legacyStartMenuShortcut,
+    $legacyDesktopShortcut,
+    $startMenuShortcut,
+    $desktopShortcut)) {
     if (Test-Path -LiteralPath $path) {
         throw "Installer smoke test requires a clean runner; found: $path"
     }
@@ -120,11 +131,12 @@ try {
     }
     Assert-InstalledVersion `
         -SetupVersion $PreviousVersion `
-        -ExecutableVersion $PreviousVersion
-    if (-not (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)) {
-        throw "Start Menu shortcut was not created: $startMenuShortcut"
+        -ExecutableVersion $PreviousVersion `
+        -DisplayName 'Clips to Discord'
+    if (-not (Test-Path -LiteralPath $legacyStartMenuShortcut -PathType Leaf)) {
+        throw "Legacy Start Menu shortcut was not created: $legacyStartMenuShortcut"
     }
-    if (Test-Path -LiteralPath $desktopShortcut) {
+    if (Test-Path -LiteralPath $legacyDesktopShortcut) {
         throw 'The unchecked desktop shortcut task was unexpectedly enabled.'
     }
     if ($null -ne (Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue).ClipsToDiscord) {
@@ -137,9 +149,16 @@ try {
     }
     Assert-InstalledVersion `
         -SetupVersion $ExpectedVersion `
-        -ExecutableVersion $ExpectedVersion
+        -ExecutableVersion $ExpectedVersion `
+        -DisplayName 'ClipCord'
     if (-not (Test-Path -LiteralPath $dataSentinel -PathType Leaf)) {
         throw 'Upgrade removed the application-data sentinel.'
+    }
+    if (-not (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)) {
+        throw "ClipCord Start Menu shortcut was not created: $startMenuShortcut"
+    }
+    if (Test-Path -LiteralPath $legacyStartMenuShortcut) {
+        throw 'Upgrade left the legacy Start Menu shortcut behind.'
     }
 
     $escapedReadyPath = $mutexReady.Replace("'", "''")
@@ -169,7 +188,8 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     }
     Assert-InstalledVersion `
         -SetupVersion $ExpectedVersion `
-        -ExecutableVersion $ExpectedVersion
+        -ExecutableVersion $ExpectedVersion `
+        -DisplayName 'ClipCord'
 
     if ($null -ne $mutexHolder -and -not $mutexHolder.HasExited) {
         Stop-Process -Id $mutexHolder.Id -Force

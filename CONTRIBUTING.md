@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Clips to Discord.
+Thanks for helping improve ClipCord.
 
 ## Development setup
 

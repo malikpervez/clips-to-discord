@@ -12,8 +12,8 @@ if ($Runtime -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
     throw "Runtime contains unsafe path characters: $Runtime"
 }
 $publishDirectory = Join-Path $artifactsDirectory "publish-$Runtime"
-$packageDirectory = Join-Path $artifactsDirectory "ClipsToDiscord-$Runtime"
-$zipPath = Join-Path $artifactsDirectory "ClipsToDiscord-$Runtime.zip"
+$packageDirectory = Join-Path $artifactsDirectory "ClipCord-$Runtime"
+$zipPath = Join-Path $artifactsDirectory "ClipCord-$Runtime.zip"
 
 if ([bool]$FfmpegPath -ne [bool]$FfmpegLicensePath) {
     throw 'FfmpegPath and FfmpegLicensePath must either both be supplied or both be omitted.'

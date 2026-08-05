@@ -4,7 +4,7 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 
 ## Product principles
 
-- Keep the app local-first: no Clips to Discord account or hosted service is required.
+- Keep the app local-first: no ClipCord account or hosted service is required.
 - Keep ordinary Discord webhooks as the integration boundary; do not require a bot token.
 - Preserve atomic settings/state writes, DPAPI secret encryption, centralized webhook redaction, host allow-listing, bounded work, retry/backoff, persisted deduplication, and persist-before-move recovery.
 - Existing installations must migrate without upload spam, lost settings, or silent behavior changes.
@@ -68,7 +68,7 @@ Suggested handoff prompt:
 
 ## Deliberate non-goals
 
-- A Clips to Discord cloud account or central upload service.
+- A ClipCord cloud account or central upload service.
 - A Discord bot-token requirement for ordinary operation.
 - Silent update installation before the release-signing model supports it safely.
 - A general-purpose video editor.
