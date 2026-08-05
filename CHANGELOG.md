@@ -4,6 +4,10 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- Added an in-app update download with visible progress, cancellation, retry, and automatic restart after a successful install.
+- Verified the exact official GitHub release URL, allowed asset redirect, declared file length, and SHA-256 digest before staging an installer under the current user's local application data.
+- Reverify and confine the staged installer immediately before launch, release the single-instance mutex before setup starts, and leave the current installation untouched when download or verification fails.
+
 ## 1.4.1 — 2026-08-05
 
 - Replaced the simplified Settings-header symbol with the official ClipCord app artwork.

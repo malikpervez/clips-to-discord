@@ -4,7 +4,7 @@ internal enum UpdateDialogAction
 {
     RemindLater,
     ViewChanges,
-    DownloadUpdate,
+    InstallUpdate,
     SkipVersion
 }
 
@@ -37,15 +37,15 @@ internal sealed class UpdateAvailableDialog : Form
         var explanation = new Label
         {
             Text = "The release includes the expected installer and SHA-256 verification information. " +
-                   "For safety, this app never downloads or installs updates silently. " +
-                   "View changes and Download update both open the official GitHub release page.",
+                   "ClipCord can download and verify the update here, then Windows will install it after ClipCord closes. " +
+                   "Nothing is downloaded until you choose Install update.",
             AutoSize = false,
             Dock = DockStyle.Fill,
             Margin = Padding.Empty
         };
 
         var viewChangesButton = CreateActionButton("View changes", UpdateDialogAction.ViewChanges);
-        var downloadButton = CreateActionButton("Download update", UpdateDialogAction.DownloadUpdate);
+        var downloadButton = CreateActionButton("Install update", UpdateDialogAction.InstallUpdate);
         var skipButton = CreateActionButton("Skip this version", UpdateDialogAction.SkipVersion);
         var remindButton = CreateActionButton("Remind me later", UpdateDialogAction.RemindLater);
 

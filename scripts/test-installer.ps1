@@ -24,6 +24,7 @@ $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ClipCord
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $mutexReady = Join-Path ([IO.Path]::GetTempPath()) "ClipsToDiscordMutex-$([Guid]::NewGuid().ToString('N')).ready"
 $mutexHolder = $null
+$inAppRestartProcess = $null
 
 function Get-UninstallEntries {
     @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' `
@@ -197,6 +198,42 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     }
     $mutexHolder = $null
 
+    if (Get-Process -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue) {
+        throw 'Ordinary silent setup unexpectedly launched ClipCord.'
+    }
+    $inAppUpdateProcess = Start-Process `
+        -FilePath $installer `
+        -ArgumentList @(
+            '/VERYSILENT',
+            '/SUPPRESSMSGBOXES',
+            '/NORESTART',
+            '/CLOSEAPPLICATIONS',
+            '/CLIPCORDRESTART=1') `
+        -Wait `
+        -PassThru `
+        -WindowStyle Hidden
+    if ($inAppUpdateProcess.ExitCode -ne 0) {
+        throw "In-app update simulation exited with code $($inAppUpdateProcess.ExitCode)."
+    }
+    $restartDeadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $restartedApps = @(Get-Process -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue)
+        if ($restartedApps.Count -eq 1) {
+            $inAppRestartProcess = $restartedApps[0]
+            break
+        }
+        if ($restartedApps.Count -gt 1) {
+            throw "In-app update launched $($restartedApps.Count) ClipCord processes instead of one."
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $restartDeadline)
+    if ($null -eq $inAppRestartProcess) {
+        throw 'The dedicated in-app update parameter did not reopen ClipCord.'
+    }
+    Stop-Process -Id $inAppRestartProcess.Id -Force
+    $inAppRestartProcess.WaitForExit()
+    $inAppRestartProcess = $null
+
     $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
     if (-not (Test-Path -LiteralPath $runKey)) {
         New-Item -Path $runKey -Force | Out-Null
@@ -241,6 +278,10 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     }
 }
 finally {
+    if ($null -ne $inAppRestartProcess -and -not $inAppRestartProcess.HasExited) {
+        Stop-Process -Id $inAppRestartProcess.Id -Force
+        $inAppRestartProcess.WaitForExit()
+    }
     if ($null -ne $mutexHolder -and -not $mutexHolder.HasExited) {
         Stop-Process -Id $mutexHolder.Id -Force
         $mutexHolder.WaitForExit()

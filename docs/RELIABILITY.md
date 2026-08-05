@@ -52,7 +52,9 @@ Stable mode calls only the repository's fixed `releases/latest` endpoint. The re
 
 Skip and reminder choices live in a versioned `updates.json` written through a flushed temporary file and same-directory replacement. Missing, older, or corrupt preference data falls back to safe defaults. A skipped version does not hide a later version, deferring a newer release does not erase an older skip, and a reminder expires after 24 hours. Reminder deadlines more than 24 hours in the future are treated as clock skew rather than suppressing a release indefinitely.
 
-Both update actions open the already validated GitHub release page. The application never downloads or launches an installer, which keeps the existing unsigned-release warning and user verification step visible.
+**View changes** opens the already validated GitHub release page. **Install update** is an explicit user action that starts a separate, cancellable 30-minute download. The installer is capped at 512 MiB, follows at most one HTTPS redirect to an allow-listed GitHub asset CDN, and must match both the release's exact byte length and SHA-256 digest. It is streamed to a uniquely named partial file, flushed to disk, and moved to the final per-version path only after verification; failures and cancellation remove the partial.
+
+An already staged file is reused only after its length and digest are checked again. Before execution, the launcher confines the exact filename to `%LOCALAPPDATA%\ClipsToDiscord\updates\v<version>`, rejects reparse points, and rehashes the file. The tray application then exits and releases its named mutex before setup starts, avoiding an installer/application race. If launch fails, the installed version is unchanged and ClipCord attempts to reopen itself. Ordinary automatic checks never download or execute anything.
 
 ## Webhook validation and logging
 

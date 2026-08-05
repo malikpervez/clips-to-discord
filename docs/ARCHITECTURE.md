@@ -35,6 +35,8 @@ flowchart LR
 - `WatchStateStore` uses durable atomic replacement for content hashes, safe-baseline keys, and pending archive moves.
 - `GitHubUpdateChecker` fetches only the repository's fixed latest-release endpoint, validates stable release and installer metadata, and uses bounded response sizes and deadlines.
 - `UpdateCoordinator` enforces the 24-hour automatic-check interval, prevents concurrent checks, and applies persisted skip/remind choices.
+- `UpdateDownloadService` follows at most one allow-listed GitHub asset redirect, streams into a temporary per-version file, enforces the release size, computes SHA-256 incrementally, and commits the verified installer atomically.
+- `UpdateInstallerLauncher` confines and rehashes the staged installer after the application mutex is released, then starts the per-user installer with an explicit reopen request.
 - `UpdatePreferencesStore` atomically stores non-secret update timing and suppression preferences separately from the DPAPI-protected webhook settings.
 - The application manifest declares `longPathAware` for supported Windows systems, reducing legacy `MAX_PATH` failures when clips are archived under game subfolders.
 - `SensitiveDataRedactor` strips registered or recognizable Discord webhook URLs before log output.
@@ -56,7 +58,9 @@ flowchart LR
 - Controller disposal waits at most ten seconds on the UI thread, while any slower worker cleanup remains observed in the background.
 - Every runtime access to mutable watch-state collections is serialized through one gate shared by the scanner and both upload workers.
 - Version 1.1+ copies compatible settings from the former Moments to Discord data directory without deleting the original files.
-- Stable update discovery accepts only a newer semantic version with exact official GitHub release/asset paths and a SHA-256 asset digest or bounded checksum-manifest entry. It opens the release page and never executes an installer.
+- Stable update discovery accepts only a newer semantic version with exact official GitHub release/asset paths and a SHA-256 asset digest or bounded checksum-manifest entry.
+- Update installation remains user-initiated. Downloads have visible progress and cancellation, are limited to 512 MiB, follow at most one allow-listed redirect, and are deleted if their length or digest fails verification.
+- Verified installers are staged below `%LOCALAPPDATA%\ClipsToDiscord\updates\v<version>`. ClipCord exits and releases its mutex before revalidating and launching the exact staged file; setup reopens ClipCord only for this in-app path.
 
 See [RELIABILITY.md](RELIABILITY.md) for the exact-once limitation and migration details.
 

@@ -357,6 +357,7 @@ try
         "Controller disposal must cancel and await the active watcher.");
 
     await UpdateCheckerTests.RunAsync(temporaryRoot);
+    await UpdateDownloadServiceTests.RunAsync(temporaryRoot);
 
     Console.WriteLine("All smoke tests passed.");
 }
@@ -490,11 +491,26 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .ToHashSet(StringComparer.Ordinal);
             Assert(updateActions.SetEquals([
                     "View changes",
-                    "Download update",
+                    "Install update",
                     "Skip this version",
                     "Remind me later"
                 ]),
                 "The update prompt must expose every required action.");
+
+            using var downloadService = new NeverCalledUpdateDownloadService();
+            using var downloadDialog = new UpdateDownloadDialog(
+                UpdateCheckerTests.CreateRelease(new StableVersion(2, 0, 0)),
+                downloadService);
+            downloadDialog.CreateControl();
+            Assert(downloadDialog.Text == "ClipCord — Downloading update",
+                "The update download window must use the ClipCord brand.");
+            AssertControlsFit(downloadDialog);
+            var downloadActions = EnumerateControls(downloadDialog)
+                .OfType<Button>()
+                .Select(button => button.Text)
+                .ToHashSet(StringComparer.Ordinal);
+            Assert(downloadActions.SetEquals(["Retry", "Cancel"]),
+                "The update download window must expose retry and cancellation actions.");
 
             using (var ownerForm = new Form { ShowInTaskbar = false })
             {
@@ -795,5 +811,18 @@ static IEnumerable<Control> EnumerateControls(Control parent)
     {
         yield return control;
         foreach (var descendant in EnumerateControls(control)) yield return descendant;
+    }
+}
+
+internal sealed class NeverCalledUpdateDownloadService : IUpdateDownloadService
+{
+    public Task<DownloadedUpdate> DownloadAsync(
+        UpdateRelease release,
+        IProgress<UpdateDownloadProgress>? progress,
+        CancellationToken cancellationToken) =>
+        throw new InvalidOperationException("The layout test must not start a download.");
+
+    public void Dispose()
+    {
     }
 }

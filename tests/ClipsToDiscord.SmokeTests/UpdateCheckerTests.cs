@@ -38,6 +38,8 @@ internal static class UpdateCheckerTests
                 "The offered release version must match its stable tag.");
             Assert(availableRelease.InstallerSha256 == ValidDigest,
                 "The GitHub asset digest must be normalized to a bare lowercase SHA-256 hash.");
+            Assert(availableRelease.InstallerSize == 123456,
+                "The verified installer size must be carried into the download handoff.");
         }
         Assert(observedUris.SequenceEqual([GitHubUpdateChecker.LatestReleaseApiUri]),
             "A digest-backed update check must query only the fixed latest-release endpoint.");
@@ -79,6 +81,10 @@ internal static class UpdateCheckerTests
             BuildReleaseJson(installerUrl: "http://github.com/malikpervez/clips-to-discord/releases/download/v2.0.0/ClipCord-Setup.exe"),
             UpdateCheckStatus.InvalidRelease,
             "A non-HTTPS installer URL must be rejected.");
+        await AssertStatusAsync(
+            BuildReleaseJson(installerSize: GitHubUpdateChecker.MaximumInstallerBytes + 1),
+            UpdateCheckStatus.InvalidRelease,
+            "An implausibly large installer must be rejected before a download is offered.");
 
         var checksumJson = BuildReleaseJson(digest: null, includeChecksum: true);
         var checksumRequests = 0;
@@ -487,6 +493,7 @@ internal static class UpdateCheckerTests
         string? installerUrl = null,
         bool includeChecksum = false,
         bool duplicateInstaller = false,
+        long installerSize = 123456,
         string? body = null)
     {
         htmlUrl ??= $"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}";
@@ -499,7 +506,7 @@ internal static class UpdateCheckerTests
             {
                 ["name"] = "ClipCord-Setup.exe",
                 ["state"] = "uploaded",
-                ["size"] = 123456,
+                ["size"] = installerSize,
                 ["digest"] = digest,
                 ["browser_download_url"] = installerUrl
             };
@@ -539,7 +546,8 @@ internal static class UpdateCheckerTests
             tag,
             new Uri($"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}"),
             new Uri($"https://github.com/malikpervez/clips-to-discord/releases/download/{tag}/ClipCord-Setup.exe"),
-            ValidDigest);
+            ValidDigest,
+            123456);
     }
 
     private static void Assert(bool condition, string message)

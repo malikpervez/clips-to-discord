@@ -77,3 +77,10 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Flags: nowait; Check: IsInAppUpdate
+
+[Code]
+function IsInAppUpdate: Boolean;
+begin
+  Result := CompareText(ExpandConstant('{param:clipcordrestart|0}'), '1') = 0;
+end;

@@ -58,7 +58,8 @@ internal sealed record UpdateRelease(
     string TagName,
     Uri ReleasePageUri,
     Uri InstallerUri,
-    string InstallerSha256);
+    string InstallerSha256,
+    long InstallerSize);
 
 internal enum UpdateCheckStatus
 {
@@ -91,6 +92,7 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
     internal const string Repository = "clips-to-discord";
     internal const string InstallerFileName = "ClipCord-Setup.exe";
     internal const string ChecksumsFileName = "SHA256SUMS.txt";
+    internal const long MaximumInstallerBytes = 536_870_912;
     internal static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(12);
     internal static readonly Uri LatestReleaseApiUri = new(
         $"https://api.github.com/repos/{Owner}/{Repository}/releases/latest");
@@ -223,7 +225,7 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
 
         var installer = installerAssets[0];
         if (!string.Equals(installer.State, "uploaded", StringComparison.Ordinal) ||
-            installer.Size <= 0 ||
+            installer.Size is <= 0 or > MaximumInstallerBytes ||
             !TryValidateAssetUri(installer.BrowserDownloadUrl, release.TagName!, InstallerFileName, out var installerUri))
         {
             return Invalid("The installer asset metadata was invalid.");
@@ -245,7 +247,8 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
             release.TagName!,
             releasePageUri,
             installerUri,
-            digest));
+            digest,
+            installer.Size));
     }
 
     private async Task<string?> GetManifestDigestAsync(
@@ -356,6 +359,9 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
         return TryValidateGitHubUri(value, expectedPath, out uri);
     }
 
+    internal static bool IsExpectedInstallerUri(Uri candidate, string tagName) =>
+        TryValidateAssetUri(candidate.AbsoluteUri, tagName, InstallerFileName, out _);
+
     private static bool TryValidateGitHubUri(string? value, string expectedPath, out Uri uri)
     {
         var parsed = Uri.TryCreate(value, UriKind.Absolute, out var candidate) ? candidate : null;
@@ -376,7 +382,7 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
         return false;
     }
 
-    private static bool TryValidateAssetRedirectUri(Uri? candidate, out Uri uri)
+    internal static bool TryValidateAssetRedirectUri(Uri? candidate, out Uri uri)
     {
         if (candidate is not null &&
             candidate.IsAbsoluteUri &&

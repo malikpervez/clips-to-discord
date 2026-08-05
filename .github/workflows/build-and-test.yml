@@ -140,7 +140,7 @@ jobs:
             throw 'An unexpected settings.json file was accepted for packaging.'
           }
 
-      - name: Test install, upgrade, mutex, and uninstall
+      - name: Test install, upgrade, mutex, in-app restart, and uninstall
         shell: powershell
         run: |
           .\scripts\test-installer.ps1 `
