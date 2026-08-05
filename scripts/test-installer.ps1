@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$PreviousInstallerPath,
-    [string]$ExpectedVersion = '1.4.1',
+    [string]$ExpectedVersion = '1.5.0',
     [string]$PreviousVersion = '1.3.5'
 )
 
@@ -24,6 +24,7 @@ $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ClipCord
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $mutexReady = Join-Path ([IO.Path]::GetTempPath()) "ClipsToDiscordMutex-$([Guid]::NewGuid().ToString('N')).ready"
 $mutexHolder = $null
+$inAppRestartProcess = $null
 
 function Get-UninstallEntries {
     @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' `
@@ -197,16 +198,59 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     }
     $mutexHolder = $null
 
+    if (Get-Process -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue) {
+        throw 'Ordinary silent setup unexpectedly launched ClipCord.'
+    }
     $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
     if (-not (Test-Path -LiteralPath $runKey)) {
         New-Item -Path $runKey -Force | Out-Null
     }
+    $portableStartupPath = Join-Path $env:TEMP 'PortableClipCord\ClipsToDiscord.exe'
     New-ItemProperty `
         -Path $runKey `
         -Name 'ClipsToDiscord' `
-        -Value "`"$installedExe`"" `
+        -Value "`"$portableStartupPath`"" `
         -PropertyType String `
         -Force | Out-Null
+    $inAppUpdateProcess = Start-Process `
+        -FilePath $installer `
+        -ArgumentList @(
+            '/SILENT',
+            '/NORESTART',
+            '/CLOSEAPPLICATIONS',
+            '/CLIPCORDRESTART=1') `
+        -PassThru `
+        -WindowStyle Hidden
+    if (-not $inAppUpdateProcess.WaitForExit(120000)) {
+        Stop-Process -Id $inAppUpdateProcess.Id -Force
+        $inAppUpdateProcess.WaitForExit()
+        throw 'In-app update simulation exceeded its two-minute deadline.'
+    }
+    if ($inAppUpdateProcess.ExitCode -ne 0) {
+        throw "In-app update simulation exited with code $($inAppUpdateProcess.ExitCode)."
+    }
+    $restartDeadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $restartedApps = @(Get-Process -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue)
+        if ($restartedApps.Count -eq 1) {
+            $inAppRestartProcess = $restartedApps[0]
+            break
+        }
+        if ($restartedApps.Count -gt 1) {
+            throw "In-app update launched $($restartedApps.Count) ClipCord processes instead of one."
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $restartDeadline)
+    if ($null -eq $inAppRestartProcess) {
+        throw 'The dedicated in-app update parameter did not reopen ClipCord.'
+    }
+    Stop-Process -Id $inAppRestartProcess.Id -Force
+    $inAppRestartProcess.WaitForExit()
+    $inAppRestartProcess = $null
+    $updatedRunValue = (Get-ItemProperty -Path $runKey -ErrorAction Stop).ClipsToDiscord
+    if ($updatedRunValue -ne "`"$installedExe`"") {
+        throw "In-app update left Start with Windows pointing at '$updatedRunValue'."
+    }
 
     $uninstaller = Join-Path $installDirectory 'unins000.exe'
     $uninstallProcess = Start-Process `
@@ -241,6 +285,10 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     }
 }
 finally {
+    if ($null -ne $inAppRestartProcess -and -not $inAppRestartProcess.HasExited) {
+        Stop-Process -Id $inAppRestartProcess.Id -Force
+        $inAppRestartProcess.WaitForExit()
+    }
     if ($null -ne $mutexHolder -and -not $mutexHolder.HasExited) {
         Stop-Process -Id $mutexHolder.Id -Force
         $mutexHolder.WaitForExit()

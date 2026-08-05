@@ -11,10 +11,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _updateTimer;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly UpdateCoordinator _updateCoordinator;
+    private readonly IUpdateDownloadService _updateDownloadService;
     private AppSettings _settings;
     private DiscordAwareController? _controller;
     private bool _settingsOpen;
     private bool _automaticUpdateCheckScheduled;
+    private bool _updateDialogOpen;
+    private bool _shutdownScheduled;
+
+    internal UpdateLaunchRequest? PendingUpdateLaunch { get; private set; }
 
     public TrayApplicationContext()
     {
@@ -26,6 +31,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             GitHubUpdateChecker.Create(),
             new UpdatePreferencesStore(),
             StableVersion.FromAssemblyVersion(assemblyVersion));
+        _updateDownloadService = UpdateDownloadService.Create();
         _updateTimer = new System.Windows.Forms.Timer
         {
             Interval = (int)TimeSpan.FromHours(1).TotalMilliseconds
@@ -81,7 +87,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 (Icon)_applicationIcon.Clone(),
                 CheckForUpdatesManuallyAsync,
                 () => _statusItem.Text ?? "Starting…");
-            if (form.ShowDialog() == DialogResult.OK && form.SavedSettings is not null)
+            if (form.ShowDialog() == DialogResult.OK &&
+                form.SavedSettings is not null &&
+                !_shutdownScheduled)
             {
                 SettingsStore.Save(form.SavedSettings);
                 _settings = form.SavedSettings;
@@ -218,24 +226,54 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void PresentAvailableUpdate(UpdateRelease release, IWin32Window? owner)
     {
-        using var dialog = new UpdateAvailableDialog(release, (Icon)_applicationIcon.Clone());
-        dialog.StartPosition = owner is null ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
-        if (owner is null) dialog.ShowDialog();
-        else dialog.ShowDialog(owner);
-
-        switch (dialog.SelectedAction)
+        if (_updateDialogOpen) return;
+        _updateDialogOpen = true;
+        try
         {
-            case UpdateDialogAction.ViewChanges:
-            case UpdateDialogAction.DownloadUpdate:
-                OpenReleasePage(release.ReleasePageUri, owner);
-                break;
-            case UpdateDialogAction.SkipVersion:
-                if (!_updateCoordinator.Skip(release)) ShowPreferenceSaveError(owner);
-                break;
-            case UpdateDialogAction.RemindLater:
-                if (!_updateCoordinator.RemindLater(release)) ShowPreferenceSaveError(owner);
-                break;
+            using var dialog = new UpdateAvailableDialog(release, (Icon)_applicationIcon.Clone());
+            dialog.StartPosition = owner is null ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
+            if (owner is null) dialog.ShowDialog();
+            else dialog.ShowDialog(owner);
+
+            switch (dialog.SelectedAction)
+            {
+                case UpdateDialogAction.ViewChanges:
+                    OpenReleasePage(release.ReleasePageUri, owner);
+                    break;
+                case UpdateDialogAction.InstallUpdate:
+                    DownloadAndInstallUpdate(release, owner);
+                    break;
+                case UpdateDialogAction.SkipVersion:
+                    if (!_updateCoordinator.Skip(release)) ShowPreferenceSaveError(owner);
+                    break;
+                case UpdateDialogAction.RemindLater:
+                    if (!_updateCoordinator.RemindLater(release)) ShowPreferenceSaveError(owner);
+                    break;
+            }
         }
+        finally
+        {
+            _updateDialogOpen = false;
+        }
+    }
+
+    private void DownloadAndInstallUpdate(UpdateRelease release, IWin32Window? owner)
+    {
+        using var dialog = new UpdateDownloadDialog(
+            release,
+            _updateDownloadService,
+            (Icon)_applicationIcon.Clone(),
+            _lifetimeCancellation.Token);
+        dialog.StartPosition = owner is null ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
+        var result = owner is null ? dialog.ShowDialog() : dialog.ShowDialog(owner);
+        if (result != DialogResult.OK || dialog.DownloadedUpdate is null) return;
+
+        PendingUpdateLaunch = new UpdateLaunchRequest(
+            release.Version,
+            dialog.DownloadedUpdate.InstallerPath,
+            release.InstallerSha256);
+        _shutdownScheduled = true;
+        _uiContext.Post(_ => ExitThread(), null);
     }
 
     private static void OpenReleasePage(Uri releasePageUri, IWin32Window? owner)
@@ -298,6 +336,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _lifetimeCancellation.Cancel();
         _controller?.Dispose();
         _updateCoordinator.Dispose();
+        _updateDownloadService.Dispose();
         _lifetimeCancellation.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();

@@ -70,5 +70,5 @@ Suggested handoff prompt:
 
 - A ClipCord cloud account or central upload service.
 - A Discord bot-token requirement for ordinary operation.
-- Silent update installation before the release-signing model supports it safely.
+- Background or forced update installation without an explicit user choice.
 - A general-purpose video editor.

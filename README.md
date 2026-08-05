@@ -23,7 +23,7 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 - Uses a configurable compression target and retries smaller targets when Discord rejects a file for size.
 - Identifies who uploaded each clip and, when recognized, which game it came from—even when friends share one webhook.
 - Redacts Discord webhook URLs from all application log messages.
-- Checks the official GitHub Releases API at most once per day for a newer verified stable installer; it never installs updates silently.
+- Checks the official GitHub Releases API at most once per day and, only after you choose **Install update**, downloads, verifies, installs, and reopens the newer stable version in app.
 - Can start automatically when the user signs into Windows.
 - Uses one recognizable icon across the system tray, executable, shortcuts, and installer.
 

@@ -5,18 +5,18 @@ using ClipsToDiscord;
 
 internal static class UpdateCheckerTests
 {
-    private static readonly StableVersion InstalledVersion = new(1, 4, 1);
+    private static readonly StableVersion InstalledVersion = new(1, 5, 0);
     private const string ValidDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     public static async Task RunAsync(string temporaryRoot)
     {
-        Assert(StableVersion.TryParse("v1.4.1", out var parsedVersion) && parsedVersion == InstalledVersion,
+        Assert(StableVersion.TryParse("v1.5.0", out var parsedVersion) && parsedVersion == InstalledVersion,
             "Stable versions must accept the repository's v-prefixed release tags.");
-        Assert(!StableVersion.TryParse("v1.4.1-beta.1", out _),
+        Assert(!StableVersion.TryParse("v1.5.0-beta.1", out _),
             "Prerelease suffixes must not parse as stable versions.");
-        Assert(!StableVersion.TryParse("v01.4.1", out _),
+        Assert(!StableVersion.TryParse("v01.5.0", out _),
             "Non-canonical leading zeroes must be rejected.");
-        Assert(StableVersion.FromAssemblyVersion(new Version(1, 4, 1, 0)) == InstalledVersion,
+        Assert(StableVersion.FromAssemblyVersion(new Version(1, 5, 0, 0)) == InstalledVersion,
             "Assembly versions must compare using their major, minor, and build components.");
 
         var observedUris = new List<Uri>();
@@ -38,6 +38,8 @@ internal static class UpdateCheckerTests
                 "The offered release version must match its stable tag.");
             Assert(availableRelease.InstallerSha256 == ValidDigest,
                 "The GitHub asset digest must be normalized to a bare lowercase SHA-256 hash.");
+            Assert(availableRelease.InstallerSize == 123456,
+                "The verified installer size must be carried into the download handoff.");
         }
         Assert(observedUris.SequenceEqual([GitHubUpdateChecker.LatestReleaseApiUri]),
             "A digest-backed update check must query only the fixed latest-release endpoint.");
@@ -47,7 +49,7 @@ internal static class UpdateCheckerTests
             "Draft releases must be ignored.");
         await AssertStatusAsync(BuildReleaseJson(prerelease: true), UpdateCheckStatus.UpToDate,
             "Prereleases must be ignored in stable mode.");
-        await AssertStatusAsync(BuildReleaseJson(tag: "v1.4.1"), UpdateCheckStatus.UpToDate,
+        await AssertStatusAsync(BuildReleaseJson(tag: "v1.5.0"), UpdateCheckStatus.UpToDate,
             "The installed release must not be offered again.");
         await AssertStatusAsync(BuildReleaseJson(tag: "v1.4.0"), UpdateCheckStatus.UpToDate,
             "An older release must never be offered as a downgrade.");
@@ -79,6 +81,10 @@ internal static class UpdateCheckerTests
             BuildReleaseJson(installerUrl: "http://github.com/malikpervez/clips-to-discord/releases/download/v2.0.0/ClipCord-Setup.exe"),
             UpdateCheckStatus.InvalidRelease,
             "A non-HTTPS installer URL must be rejected.");
+        await AssertStatusAsync(
+            BuildReleaseJson(installerSize: GitHubUpdateChecker.MaximumInstallerBytes + 1),
+            UpdateCheckStatus.InvalidRelease,
+            "An implausibly large installer must be rejected before a download is offered.");
 
         var checksumJson = BuildReleaseJson(digest: null, includeChecksum: true);
         var checksumRequests = 0;
@@ -487,6 +493,7 @@ internal static class UpdateCheckerTests
         string? installerUrl = null,
         bool includeChecksum = false,
         bool duplicateInstaller = false,
+        long installerSize = 123456,
         string? body = null)
     {
         htmlUrl ??= $"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}";
@@ -499,7 +506,7 @@ internal static class UpdateCheckerTests
             {
                 ["name"] = "ClipCord-Setup.exe",
                 ["state"] = "uploaded",
-                ["size"] = 123456,
+                ["size"] = installerSize,
                 ["digest"] = digest,
                 ["browser_download_url"] = installerUrl
             };
@@ -539,7 +546,8 @@ internal static class UpdateCheckerTests
             tag,
             new Uri($"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}"),
             new Uri($"https://github.com/malikpervez/clips-to-discord/releases/download/{tag}/ClipCord-Setup.exe"),
-            ValidDigest);
+            ValidDigest,
+            123456);
     }
 
     private static void Assert(bool condition, string message)

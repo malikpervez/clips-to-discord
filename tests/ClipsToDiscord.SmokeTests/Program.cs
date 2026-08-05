@@ -357,6 +357,7 @@ try
         "Controller disposal must cancel and await the active watcher.");
 
     await UpdateCheckerTests.RunAsync(temporaryRoot);
+    await UpdateDownloadServiceTests.RunAsync(temporaryRoot);
 
     Console.WriteLine("All smoke tests passed.");
 }
@@ -490,11 +491,28 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .ToHashSet(StringComparer.Ordinal);
             Assert(updateActions.SetEquals([
                     "View changes",
-                    "Download update",
+                    "Install update",
                     "Skip this version",
                     "Remind me later"
                 ]),
                 "The update prompt must expose every required action.");
+
+            using var downloadService = new NeverCalledUpdateDownloadService();
+            using var downloadDialog = new UpdateDownloadDialog(
+                UpdateCheckerTests.CreateRelease(new StableVersion(2, 0, 0)),
+                downloadService);
+            downloadDialog.CreateControl();
+            Assert(downloadDialog.Text == "ClipCord — Downloading update",
+                "The update download window must use the ClipCord brand.");
+            AssertControlsFit(downloadDialog);
+            var downloadActions = EnumerateControls(downloadDialog)
+                .OfType<Button>()
+                .Select(button => button.Text)
+                .ToHashSet(StringComparer.Ordinal);
+            Assert(downloadActions.SetEquals(["Retry", "Cancel"]),
+                "The update download window must expose retry and cancellation actions.");
+            AssertUpdateDownloadDialogBehavior(
+                UpdateCheckerTests.CreateRelease(new StableVersion(2, 0, 0)));
 
             using (var ownerForm = new Form { ShowInTaskbar = false })
             {
@@ -795,5 +813,151 @@ static IEnumerable<Control> EnumerateControls(Control parent)
     {
         yield return control;
         foreach (var descendant in EnumerateControls(control)) yield return descendant;
+    }
+}
+
+static void AssertUpdateDownloadDialogBehavior(UpdateRelease release)
+{
+    using (var service = new CompletingUpdateDownloadService())
+    using (var form = new UpdateDownloadDialog(release, service))
+    {
+        form.Show();
+        PumpWindowsMessagesUntil(() => service.Started, "The update download did not start.");
+        var cancel = EnumerateControls(form).OfType<Button>().Single(button => button.Text == "Cancel");
+        cancel.PerformClick();
+        service.Complete(new DownloadedUpdate(release, "unused-after-cancel.exe"));
+        PumpWindowsMessagesUntil(() => !form.Visible, "The cancelled update dialog did not close.");
+        Assert(form.DialogResult == DialogResult.Cancel && form.DownloadedUpdate is null,
+            "Cancellation must remain authoritative when the download completes at the same moment.");
+    }
+
+    using (var service = new FailingUpdateDownloadService())
+    using (var form = new UpdateDownloadDialog(release, service))
+    {
+        form.Show();
+        PumpWindowsMessagesUntil(
+            () => EnumerateControls(form).OfType<Button>().Any(button => button.Text == "Retry" && button.Visible),
+            "The verification-failure state was not shown.");
+        form.PerformLayout();
+        AssertControlsFit(form);
+        var detail = EnumerateControls(form)
+            .OfType<Label>()
+            .Single(label => label.Text.StartsWith("The downloaded update could not be verified", StringComparison.Ordinal));
+        var measured = TextRenderer.MeasureText(
+            detail.Text,
+            detail.Font,
+            new Size(detail.Width, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+        Assert(detail.Height >= measured.Height,
+            $"The update failure explanation is clipped: actual {detail.Height}px, required {measured.Height}px.");
+        form.Close();
+    }
+
+    var closeHandler = typeof(UpdateDownloadDialog).GetMethod(
+        "HandleFormClosing",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    foreach (var reason in new[]
+             {
+                 CloseReason.UserClosing,
+                 CloseReason.WindowsShutDown,
+                 CloseReason.ApplicationExitCall,
+                 CloseReason.TaskManagerClosing
+             })
+    {
+        using var service = new CompletingUpdateDownloadService();
+        using var form = new UpdateDownloadDialog(release, service);
+        form.Show();
+        PumpWindowsMessagesUntil(() => service.Started, $"The {reason} close test did not start.");
+        var eventArgs = new FormClosingEventArgs(reason, cancel: false);
+        closeHandler.Invoke(form, [form, eventArgs]);
+        Assert(eventArgs.Cancel == (reason == CloseReason.UserClosing),
+            $"The update dialog handled {reason} incorrectly; cancelled={eventArgs.Cancel}.");
+        service.Complete(new DownloadedUpdate(release, "unused-after-close.exe"));
+        PumpWindowsMessagesUntil(
+            () => !service.IsPending,
+            $"The {reason} close test did not release its download.");
+        Application.DoEvents();
+        if (!form.IsDisposed) form.Close();
+    }
+
+    var disposableService = new NeverCalledUpdateDownloadService();
+    var disposableForm = new UpdateDownloadDialog(release, disposableService);
+    disposableForm.Dispose();
+    disposableForm.Dispose();
+    disposableService.Dispose();
+
+    using var activeService = new CompletingUpdateDownloadService();
+    var activeForm = new UpdateDownloadDialog(release, activeService);
+    activeForm.Show();
+    PumpWindowsMessagesUntil(() => activeService.Started, "The active-disposal test did not start.");
+    activeForm.Dispose();
+    activeForm.Dispose();
+    activeForm.Dispose();
+    activeService.Complete(new DownloadedUpdate(release, "unused-after-dispose.exe"));
+    PumpWindowsMessagesUntil(() => !activeService.IsPending, "The active-disposal test did not complete.");
+    Application.DoEvents();
+    Assert(activeForm.DownloadedUpdate is null,
+        "A completion arriving after active dialog disposal must not become installable.");
+}
+
+static void PumpWindowsMessagesUntil(Func<bool> condition, string failureMessage)
+{
+    var deadline = DateTime.UtcNow.AddSeconds(3);
+    while (!condition())
+    {
+        if (DateTime.UtcNow >= deadline) throw new InvalidOperationException(failureMessage);
+        Application.DoEvents();
+        Thread.Sleep(5);
+    }
+    Application.DoEvents();
+}
+
+internal sealed class NeverCalledUpdateDownloadService : IUpdateDownloadService
+{
+    public Task<DownloadedUpdate> DownloadAsync(
+        UpdateRelease release,
+        IProgress<UpdateDownloadProgress>? progress,
+        CancellationToken cancellationToken) =>
+        throw new InvalidOperationException("The layout test must not start a download.");
+
+    public void Dispose()
+    {
+    }
+}
+
+internal sealed class CompletingUpdateDownloadService : IUpdateDownloadService
+{
+    private readonly TaskCompletionSource<DownloadedUpdate> _completion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public bool Started { get; private set; }
+    public bool IsPending => !_completion.Task.IsCompleted;
+
+    public Task<DownloadedUpdate> DownloadAsync(
+        UpdateRelease release,
+        IProgress<UpdateDownloadProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        Started = true;
+        return _completion.Task;
+    }
+
+    public void Complete(DownloadedUpdate update) => _completion.TrySetResult(update);
+
+    public void Dispose()
+    {
+    }
+}
+
+internal sealed class FailingUpdateDownloadService : IUpdateDownloadService
+{
+    public Task<DownloadedUpdate> DownloadAsync(
+        UpdateRelease release,
+        IProgress<UpdateDownloadProgress>? progress,
+        CancellationToken cancellationToken) =>
+        Task.FromException<DownloadedUpdate>(new InvalidDataException("Simulated verification failure."));
+
+    public void Dispose()
+    {
     }
 }
