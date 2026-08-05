@@ -5,18 +5,18 @@ using ClipsToDiscord;
 
 internal static class UpdateCheckerTests
 {
-    private static readonly StableVersion InstalledVersion = new(1, 3, 7);
+    private static readonly StableVersion InstalledVersion = new(1, 4, 0);
     private const string ValidDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     public static async Task RunAsync(string temporaryRoot)
     {
-        Assert(StableVersion.TryParse("v1.3.7", out var parsedVersion) && parsedVersion == InstalledVersion,
+        Assert(StableVersion.TryParse("v1.4.0", out var parsedVersion) && parsedVersion == InstalledVersion,
             "Stable versions must accept the repository's v-prefixed release tags.");
-        Assert(!StableVersion.TryParse("v1.3.7-beta.1", out _),
+        Assert(!StableVersion.TryParse("v1.4.0-beta.1", out _),
             "Prerelease suffixes must not parse as stable versions.");
-        Assert(!StableVersion.TryParse("v01.3.7", out _),
+        Assert(!StableVersion.TryParse("v01.4.0", out _),
             "Non-canonical leading zeroes must be rejected.");
-        Assert(StableVersion.FromAssemblyVersion(new Version(1, 3, 7, 0)) == InstalledVersion,
+        Assert(StableVersion.FromAssemblyVersion(new Version(1, 4, 0, 0)) == InstalledVersion,
             "Assembly versions must compare using their major, minor, and build components.");
 
         var observedUris = new List<Uri>();
@@ -47,7 +47,7 @@ internal static class UpdateCheckerTests
             "Draft releases must be ignored.");
         await AssertStatusAsync(BuildReleaseJson(prerelease: true), UpdateCheckStatus.UpToDate,
             "Prereleases must be ignored in stable mode.");
-        await AssertStatusAsync(BuildReleaseJson(tag: "v1.3.7"), UpdateCheckStatus.UpToDate,
+        await AssertStatusAsync(BuildReleaseJson(tag: "v1.4.0"), UpdateCheckStatus.UpToDate,
             "The installed release must not be offered again.");
         await AssertStatusAsync(BuildReleaseJson(tag: "v1.3.6"), UpdateCheckStatus.UpToDate,
             "An older release must never be offered as a downgrade.");
