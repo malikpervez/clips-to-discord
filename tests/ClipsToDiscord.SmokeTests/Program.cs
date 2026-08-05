@@ -465,6 +465,18 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 "The Activity navigation label must remain visibly unavailable.");
             Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Watching"),
                 "The branded header must present a concise live watcher status.");
+            var headerLogo = EnumerateControls(form)
+                .OfType<ClipCordLogoControl>()
+                .Single(control => control.Name == "HeaderLogo");
+            var productName = EnumerateControls(form)
+                .OfType<Label>()
+                .Single(control => control.Name == "ProductNameLabel");
+            Assert(ClipCordLogoControl.EmbeddedAssetSize == new Size(1024, 1024),
+                "The branded header must render the full-resolution embedded app-icon.png asset.");
+            Assert(Math.Min(headerLogo.Width, headerLogo.Height) >= productName.Height,
+                $"The branded header logo must be at least as tall as the wordmark; logo={headerLogo.Size}, wordmark={productName.Size}.");
+            AssertVerticalCentersMatch(headerLogo, productName);
+            AssertOfficialLogoArtworkPainted(headerLogo);
 
             using var updateDialog = new UpdateAvailableDialog(
                 UpdateCheckerTests.CreateRelease(new StableVersion(2, 0, 0)));
@@ -734,6 +746,35 @@ static void AssertDpiRefit(SettingsForm form)
         "DPI refitting must recompute the compression host from the ComboBox preferred height.");
     compression.Font = originalFont;
     form.RefitDpiSensitiveControls();
+}
+
+static void AssertVerticalCentersMatch(Control first, Control second)
+{
+    var firstCenter = first.PointToScreen(new Point(first.Width / 2, first.Height / 2));
+    var secondCenter = second.PointToScreen(new Point(second.Width / 2, second.Height / 2));
+    Assert(Math.Abs(firstCenter.Y - secondCenter.Y) <= 1,
+        $"The logo and wordmark must remain vertically centered; centers were {firstCenter.Y} and {secondCenter.Y}.");
+}
+
+static void AssertOfficialLogoArtworkPainted(ClipCordLogoControl logo)
+{
+    using var bitmap = new Bitmap(logo.Width, logo.Height);
+    logo.DrawToBitmap(bitmap, new Rectangle(Point.Empty, logo.Size));
+
+    var officialCoralSeen = false;
+    var officialVioletSeen = false;
+    for (var y = 0; y < bitmap.Height && !(officialCoralSeen && officialVioletSeen); y++)
+    {
+        for (var x = 0; x < bitmap.Width; x++)
+        {
+            var color = bitmap.GetPixel(x, y);
+            officialCoralSeen |= color.R >= 238 && color.G is >= 55 and <= 115 && color.B is >= 45 and <= 105;
+            officialVioletSeen |= color.R is >= 115 and <= 180 && color.G is >= 40 and <= 105 && color.B >= 210;
+        }
+    }
+
+    Assert(officialCoralSeen && officialVioletSeen,
+        "The header logo must paint the official PNG's bright coral and violet artwork.");
 }
 
 static bool IsAutoScrollViewport(Control control) =>

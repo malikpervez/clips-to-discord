@@ -10,7 +10,7 @@
     <Product>ClipCord</Product>
     <AssemblyTitle>ClipCord</AssemblyTitle>
     <Description>Automatically relay completed gaming clips to Discord.</Description>
-    <Version>1.4.0</Version>
+    <Version>1.4.1</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>assets\ClipsToDiscord.ico</ApplicationIcon>
   </PropertyGroup>
@@ -21,5 +21,6 @@
 
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
+    <EmbeddedResource Include="assets\app-icon.png" LogicalName="ClipsToDiscord.Assets.AppIcon.png" />
   </ItemGroup>
 </Project>

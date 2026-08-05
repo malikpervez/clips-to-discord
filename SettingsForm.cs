@@ -183,7 +183,7 @@ internal sealed class SettingsForm : Form
             BackColor = ClipCordTheme.Shell
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
         root.Controls.Add(BuildHeader(), 0, 0);
@@ -204,7 +204,7 @@ internal sealed class SettingsForm : Form
             Padding = new Padding(24, 0, 0, 0),
             BackColor = ClipCordTheme.Header
         };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
@@ -213,22 +213,26 @@ internal sealed class SettingsForm : Form
 
         var logo = new ClipCordLogoControl
         {
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0, 15, 12, 13)
+            Name = "HeaderLogo",
+            Size = new Size(84, 84),
+            Anchor = AnchorStyles.None,
+            Margin = new Padding(0, 12, 8, 12)
         };
         var version = typeof(SettingsForm).Assembly.GetName().Version ?? new Version(0, 0, 0);
         var identity = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Anchor = AnchorStyles.Left,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Margin = Padding.Empty,
-            Padding = new Padding(0, 28, 0, 0),
+            Padding = Padding.Empty,
             BackColor = ClipCordTheme.Header
         };
         var productName = new Label
         {
+            Name = "ProductNameLabel",
             Text = "ClipCord",
             AutoSize = true,
             ForeColor = ClipCordTheme.ShellText,
@@ -253,7 +257,7 @@ internal sealed class SettingsForm : Form
             BackColor = Color.FromArgb(29, 38, 58),
             BorderColor = Color.FromArgb(61, 72, 96),
             CornerRadius = 20,
-            Margin = new Padding(0, 27, 10, 25),
+            Margin = new Padding(0, 27, 10, 33),
             Padding = new Padding(16, 0, 12, 0)
         };
         var statusLayout = new BufferedTableLayoutPanel

@@ -663,55 +663,43 @@ internal sealed class TitleBarButton : Control
 
 internal sealed class ClipCordLogoControl : Control
 {
+    private const string LogoResourceName = "ClipsToDiscord.Assets.AppIcon.png";
+    private static readonly Lazy<Bitmap> LogoImage = new(LoadLogoImage);
+
+    internal static Size EmbeddedAssetSize => LogoImage.Value.Size;
+
     public ClipCordLogoControl()
     {
         DoubleBuffered = true;
         TabStop = false;
         SetStyle(ControlStyles.Selectable, false);
+        SetStyle(ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
         AccessibleName = "ClipCord logo";
         AccessibleRole = AccessibleRole.Graphic;
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
-        if (Width <= 20 || Height <= 20) return;
+        base.OnPaint(eventArgs);
+        if (Width <= 0 || Height <= 0) return;
+
         eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        var size = Math.Min(Width, Height) - 8;
-        var left = (Width - size) / 2f;
-        var top = (Height - size) / 2f;
-        var frame = new RectangleF(left + 2, top + 6, size - 4, size - 12);
-        using var framePen = new Pen(ClipCordTheme.Coral, Math.Max(3f, size * .085f))
-        {
-            StartCap = LineCap.Round,
-            EndCap = LineCap.Round,
-            LineJoin = LineJoin.Round
-        };
-        using var framePath = RoundedPanel.CreateRoundedPath(Rectangle.Round(frame), 9);
-        eventArgs.Graphics.DrawPath(framePen, framePath);
+        eventArgs.Graphics.CompositingQuality = CompositingQuality.HighQuality;
+        eventArgs.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-        using var sprocketBrush = new SolidBrush(ClipCordTheme.Coral);
-        var hole = Math.Max(3f, size * .085f);
-        for (var index = 0; index < 3; index++)
-        {
-            var y = top + size * (.25f + index * .24f);
-            eventArgs.Graphics.FillRectangle(sprocketBrush, left + size * .12f, y, hole, hole);
-        }
+        var side = Math.Min(Width, Height);
+        var destination = new Rectangle((Width - side) / 2, (Height - side) / 2, side, side);
+        eventArgs.Graphics.DrawImage(LogoImage.Value, destination);
+    }
 
-        var bolt = new[]
-        {
-            new PointF(left + size * .59f, top),
-            new PointF(left + size * .31f, top + size * .52f),
-            new PointF(left + size * .49f, top + size * .52f),
-            new PointF(left + size * .39f, top + size),
-            new PointF(left + size * .75f, top + size * .39f),
-            new PointF(left + size * .56f, top + size * .39f)
-        };
-        using var boltBrush = new LinearGradientBrush(
-            Rectangle.Round(new RectangleF(left, top, size, size)),
-            Color.FromArgb(179, 82, 255),
-            ClipCordTheme.Violet,
-            LinearGradientMode.Vertical);
-        eventArgs.Graphics.FillPolygon(boltBrush, bolt);
+    private static Bitmap LoadLogoImage()
+    {
+        using var stream = typeof(ClipCordLogoControl).Assembly.GetManifestResourceStream(LogoResourceName)
+            ?? throw new InvalidOperationException($"Embedded ClipCord logo '{LogoResourceName}' was not found.");
+        using var decoded = Image.FromStream(stream, useEmbeddedColorManagement: true, validateImageData: true);
+        return new Bitmap(decoded);
     }
 }
 
