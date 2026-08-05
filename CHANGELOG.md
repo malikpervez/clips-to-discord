@@ -4,6 +4,8 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.3.7 — 2026-08-04
+
 - Renamed the app to ClipCord across the user interface, installer, portable package, and documentation.
 - Preserved the existing installer identity, executable name, data directory, startup value, and mutex so current users upgrade in place without losing settings or duplicate-upload history.
 - Added a legacy `ClipsToDiscord-Setup.exe` release alias so pre-ClipCord update checkers can discover the transition release.
