@@ -4,6 +4,12 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.4.1 — 2026-08-05
+
+- Replaced the simplified Settings-header symbol with the official ClipCord app artwork.
+- Enlarged the header logo and centered it with the ClipCord wordmark using DPI-independent layout.
+- Added regression coverage that verifies the embedded PNG is decoded, displayed at a proportional size, and visibly painted with the official brand colors.
+
 ## 1.4.0 — 2026-08-05
 
 - Redesigned Settings with ClipCord's coral/violet branding, clearer cards, live watcher status, and a DPI-safe responsive layout.
