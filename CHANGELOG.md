@@ -4,6 +4,11 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- Redesigned Settings with ClipCord's coral/violet branding, clearer cards, live watcher status, and a DPI-safe responsive layout.
+- Added a visibly disabled Activity navigation item with a "Coming in a future release" tooltip and accessibility description.
+- Added reliable twelve-pixel edge and corner resizing, multi-monitor working-area-aware maximizing, keyboard navigation, accessible field names, and responsive behavior across DPI changes.
+- Fixed stale buffered pixels appearing behind the Start with Windows toggle after repainting or resizing the Settings window.
+
 ## 1.3.7 — 2026-08-04
 
 - Renamed the app to ClipCord across the user interface, installer, portable package, and documentation.

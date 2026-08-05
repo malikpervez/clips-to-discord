@@ -79,7 +79,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             using var form = new SettingsForm(
                 _settings,
                 (Icon)_applicationIcon.Clone(),
-                CheckForUpdatesManuallyAsync);
+                CheckForUpdatesManuallyAsync,
+                () => _statusItem.Text ?? "Starting…");
             if (form.ShowDialog() == DialogResult.OK && form.SavedSettings is not null)
             {
                 SettingsStore.Save(form.SavedSettings);

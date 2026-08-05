@@ -3,6 +3,10 @@ using System.Text.Json;
 using System.Windows.Forms;
 using ClipsToDiscord;
 
+Application.SetHighDpiMode(HighDpiMode.SystemAware);
+Application.EnableVisualStyles();
+Application.SetCompatibleTextRenderingDefault(false);
+
 var temporaryRoot = Path.Combine(Path.GetTempPath(), "ClipsToDiscordTests", Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temporaryRoot);
 
@@ -125,6 +129,19 @@ try
         Assert(root.GetProperty("allowed_mentions").GetProperty("parse").GetArrayLength() == 0,
             "Uploader-controlled text must not enable Discord mentions.");
     }
+
+    Assert(SettingsForm.TryParseCompressionTarget("95 MB", out var compression95) && compression95 == 95,
+        "The compression selector must accept a value with the MB suffix.");
+    Assert(SettingsForm.TryParseCompressionTarget("37", out var compression37) && compression37 == 37,
+        "The compression selector must preserve arbitrary values in its supported range.");
+    foreach (var invalidCompression in new[] { "", "0", "101", "-5", "7.5 MB", "5 MB extra", "1 000", "abc" })
+    {
+        Assert(!SettingsForm.TryParseCompressionTarget(invalidCompression, out var parsedCompression) &&
+               parsedCompression == 0,
+            $"The compression selector must reject ambiguous value '{invalidCompression}'.");
+    }
+    Assert(ReferenceEquals(ClipCordTheme.InterfaceFont(10f), ClipCordTheme.InterfaceFont(10f)),
+        "ClipCord fonts must be cached instead of allocating GDI font handles for every control.");
 
     AssertSettingsFormLayout(new AppSettings(
         gameArchiveRoot,
@@ -370,25 +387,84 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
-            using var form = new SettingsForm(settings, checkForUpdatesAsync: _ => Task.CompletedTask);
+            using var form = new SettingsForm(
+                settings,
+                checkForUpdatesAsync: _ => Task.CompletedTask,
+                watcherStatusProvider: () => "Discord open — watching for clips");
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
+            form.Show();
+            Application.DoEvents();
+            AssertControlsFit(form);
+            AssertCriticalTextFits(form);
+            AssertAccessibility(form);
+            AssertOpaqueCustomControlsPaintEveryPixel(form);
+            form.Invalidate(true);
+            form.Update();
+            AssertOpaqueCustomControlsPaintEveryPixel(form);
+            Assert(form.Padding.All >= SettingsForm.ResizeGrip,
+                "The borderless window must leave the full resize grip exposed around docked content.");
+            var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+            Assert(rootLayout.Bounds == new Rectangle(
+                       form.Padding.Left,
+                       form.Padding.Top,
+                       form.ClientSize.Width - form.Padding.Horizontal,
+                       form.ClientSize.Height - form.Padding.Vertical),
+                "Docked content must not cover any part of the reserved resize frame.");
+            var cornerInset = SettingsForm.ResizeGrip - 1;
+            Assert(form.Region?.IsVisible(cornerInset, cornerInset) != false &&
+                   form.HitTestResizeGrip(new Point(cornerInset, cornerInset)) == 13 &&
+                   form.HitTestResizeGrip(new Point(form.ClientSize.Width - cornerInset, cornerInset)) == 14 &&
+                   form.HitTestResizeGrip(new Point(cornerInset, form.ClientSize.Height - cornerInset)) == 16 &&
+                   form.HitTestResizeGrip(new Point(form.ClientSize.Width - cornerInset, form.ClientSize.Height - cornerInset)) == 17,
+                "All four diagonal resize hit targets must remain reachable.");
+            var reachableDiagonalPixels = Enumerable.Range(0, SettingsForm.ResizeGrip)
+                .Count(inset => form.Region?.IsVisible(inset, inset) != false &&
+                                form.HitTestResizeGrip(new Point(inset, inset)) == 13);
+            Assert(reachableDiagonalPixels >= 8,
+                $"The diagonal resize target is too small: only {reachableDiagonalPixels} pixels are reachable.");
+            AssertDpiRefit(form);
+            form.ToggleMaximize();
+            Application.DoEvents();
+            Assert(!form.HasExplicitMaximizedBounds,
+                "Custom maximize must leave MaximizedBounds empty so WM_GETMINMAXINFO remains monitor-relative.");
+            form.ToggleMaximize();
+            Application.DoEvents();
+            form.Hide();
             form.Size = form.MinimumSize;
             form.PerformLayout();
             AssertControlsFit(form);
+            form.Show();
+            Application.DoEvents();
+            AssertControlsFit(form);
+            AssertCriticalTextFits(form);
+            form.Hide();
 
             var buttonTexts = EnumerateControls(form)
                 .OfType<Button>()
                 .Select(button => button.Text)
                 .ToHashSet(StringComparer.Ordinal);
-            Assert(buttonTexts.SetEquals(["Browse…", "Test webhook", "Check for updates", "Save", "Cancel"]),
+            Assert(buttonTexts.SetEquals(["Browse", "Test webhook", "Check for updates", "Save changes", "Cancel"]),
                 "The settings form must keep all action buttons available.");
             var startupCheckbox = EnumerateControls(form)
                 .OfType<CheckBox>()
                 .Single(checkBox => checkBox.Text == "Start with Windows");
             Assert(startupCheckbox.Width > 0 && startupCheckbox.Height > 0,
                 "The Start with Windows checkbox must occupy visible layout space.");
+            var activityItem = EnumerateControls(form)
+                .Single(control => control.Name == "ActivityNavItem");
+            Assert(activityItem.Tag as string == SettingsForm.ActivityComingSoonText &&
+                   activityItem.AccessibleDescription == SettingsForm.ActivityComingSoonText &&
+                   activityItem.AccessibilityObject.State.HasFlag(AccessibleStates.Unavailable),
+                "The disabled Activity navigation must explain that it belongs to a future release.");
+            var activityLabel = EnumerateControls(activityItem)
+                .OfType<Label>()
+                .Single(label => label.Name == "ActivityNavLabel");
+            Assert(!activityLabel.Enabled,
+                "The Activity navigation label must remain visibly unavailable.");
+            Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Watching"),
+                "The branded header must present a concise live watcher status.");
 
             using var updateDialog = new UpdateAvailableDialog(
                 UpdateCheckerTests.CreateRelease(new StableVersion(2, 0, 0)));
@@ -418,6 +494,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
                     "A disposed Settings form must be dropped before update UI uses its handle.");
             }
 
+            AssertSettingsRoundTrip(settings);
             AssertManualCheckCloseProtection(settings);
         }
         catch (Exception exception)
@@ -443,6 +520,7 @@ static void AssertManualCheckCloseProtection(AppSettings settings)
         var buttons = EnumerateControls(form).OfType<Button>().ToArray();
         var checkButton = buttons.Single(button => button.Text == "Check for updates");
         var cancelButton = buttons.Single(button => button.Text == "Cancel");
+        var titleButtons = EnumerateControls(form).OfType<TitleBarButton>().ToArray();
         checkButton.PerformClick();
 
         var inspectTimer = new System.Windows.Forms.Timer { Interval = 20 };
@@ -450,8 +528,8 @@ static void AssertManualCheckCloseProtection(AppSettings settings)
         {
             inspectTimer.Stop();
             inspectTimer.Dispose();
-            Assert(!cancelButton.Enabled && !form.ControlBox,
-                "Cancel, Esc, and the close box must be disabled during a manual update check.");
+            Assert(!cancelButton.Enabled && titleButtons.All(button => !button.Enabled),
+                "Cancel, Esc, and every custom title-bar action must be disabled during a manual update check.");
             form.Close();
             Assert(form.Visible,
                 "A user close request must not dispose Settings while its update callback is in flight.");
@@ -480,17 +558,194 @@ static void AssertControlsFit(Form form)
     foreach (var control in EnumerateControls(form).Where(control => control.Visible))
     {
         control.PerformLayout();
+        if (control.Parent is not null && !IsAutoScrollViewport(control.Parent))
+        {
+            var parentBounds = control.Parent.ClientRectangle;
+            Assert(control.Left >= -1 && control.Top >= -1 &&
+                   control.Right <= parentBounds.Right + 1 &&
+                   control.Bottom <= parentBounds.Bottom + 1,
+                $"Control {control.GetType().Name} '{control.Name}' ('{control.Text}') is clipped by parent " +
+                $"{control.Parent.GetType().Name} '{control.Parent.Name}': child={control.Bounds}, parent={parentBounds}, " +
+                $"grandparent={control.Parent.Parent?.GetType().Name} '{control.Parent.Parent?.Name}' bounds={control.Parent.Parent?.Bounds}.");
+        }
         var bounds = control.Bounds;
         for (var parent = control.Parent; parent is not null && parent != form; parent = parent.Parent)
         {
             bounds.Offset(parent.Left, parent.Top);
         }
 
-        Assert(bounds.Left >= 0 && bounds.Top >= 0 &&
-               bounds.Right <= form.ClientSize.Width + 1 &&
-               bounds.Bottom <= form.ClientSize.Height + 1,
-            $"Control '{control.Text}' is clipped at {bounds} inside {form.ClientSize}.");
+        if (!HasAutoScrollAncestor(control))
+        {
+            Assert(bounds.Left >= 0 && bounds.Top >= 0 &&
+                   bounds.Right <= form.ClientSize.Width + 1 &&
+                   bounds.Bottom <= form.ClientSize.Height + 1,
+                $"Control {control.GetType().Name} '{control.Name}' ('{control.Text}') is clipped at {bounds} inside {form.ClientSize}; parent={control.Parent?.GetType().Name} '{control.Parent?.Name}' bounds={control.Parent?.Bounds}.");
+        }
     }
+}
+
+static void AssertSettingsRoundTrip(AppSettings original)
+{
+    using var form = new SettingsForm(original, checkForUpdatesAsync: _ => Task.CompletedTask);
+    form.Show();
+    Application.DoEvents();
+    var controls = EnumerateControls(form).ToArray();
+    var changedFolder = Directory.CreateDirectory(Path.Combine(original.ClipsFolder, "round-trip-clips")).FullName;
+    const string changedWebhook = "https://discord.com/api/v10/webhooks/987654/round-trip-token";
+    ((TextBox)controls.Single(control => control.AccessibleName == "Clips folder")).Text = changedFolder;
+    ((TextBox)controls.Single(control => control.AccessibleName == "Discord webhook URL")).Text = changedWebhook;
+    ((TextBox)controls.Single(control => control.AccessibleName == "Uploader name")).Text = "Round Trip User";
+    ((ComboBox)controls.Single(control => control.AccessibleName == "Compression target in megabytes")).Text = "37 MB";
+    var startup = controls.OfType<CheckBox>().Single(control => control.Text == "Start with Windows");
+    startup.Checked = !original.StartWithWindows;
+    controls.OfType<Button>().Single(control => control.Text == "Save changes").PerformClick();
+
+    Assert(form.SavedSettings is not null &&
+           form.SavedSettings.ClipsFolder == changedFolder &&
+           form.SavedSettings.WebhookUrl == changedWebhook &&
+           form.SavedSettings.UploaderName == "Round Trip User" &&
+           form.SavedSettings.StartWithWindows == !original.StartWithWindows &&
+           form.SavedSettings.CompressionTargetMb == 37,
+        "Every settings value must survive the branded form save round trip.");
+}
+
+static void AssertCriticalTextFits(Form form)
+{
+    var criticalText = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "Clip source",
+        "Clips folder",
+        "Discord destination",
+        "Uploader name",
+        "Webhook URL",
+        "Upload preferences",
+        "Compression target",
+        "Start with Windows",
+        "Save changes",
+        "Cancel"
+    };
+    foreach (var control in EnumerateControls(form).Where(control => control.Visible && criticalText.Contains(control.Text)))
+    {
+        var measured = TextRenderer.MeasureText(control.Text, control.Font, Size.Empty, TextFormatFlags.SingleLine);
+        Assert(measured.Width <= control.ClientSize.Width + 4 && measured.Height <= control.ClientSize.Height + 4,
+            $"Text '{control.Text}' does not fit {control.GetType().Name}: measured={measured}, client={control.ClientSize}.");
+    }
+
+    var toggle = EnumerateControls(form).OfType<ToggleSwitch>().Single();
+    var toggleText = TextRenderer.MeasureText(toggle.Text, toggle.Font, Size.Empty, TextFormatFlags.SingleLine);
+    Assert(toggleText.Width <= toggle.GetTextBounds().Width + 4 &&
+           toggleText.Height <= toggle.GetTextBounds().Height + 4,
+        $"Toggle text does not fit its painted text area: measured={toggleText}, paintBounds={toggle.GetTextBounds()}.");
+
+    foreach (var layout in EnumerateControls(form).OfType<TableLayoutPanel>())
+    {
+        var children = layout.Controls.Cast<Control>().Where(control => control.Visible).ToArray();
+        for (var first = 0; first < children.Length; first++)
+        {
+            for (var second = first + 1; second < children.Length; second++)
+            {
+                Assert(!children[first].Bounds.IntersectsWith(children[second].Bounds),
+                    $"Sibling controls '{children[first].Text}' and '{children[second].Text}' overlap in {layout.Name}.");
+            }
+        }
+    }
+}
+
+static void AssertAccessibility(Form form)
+{
+    foreach (var input in EnumerateControls(form).Where(control => control is TextBox or ComboBox))
+    {
+        Assert(!string.IsNullOrWhiteSpace(input.AccessibleName),
+            $"Input {input.GetType().Name} must have an accessible name.");
+    }
+
+    foreach (var decorative in EnumerateControls(form).Where(control =>
+                 control is BrandGlyphControl or BrandIconTile or ClipCordLogoControl or GradientStrip))
+    {
+        Assert(!decorative.TabStop,
+            $"Decorative control {decorative.GetType().Name} must not be a keyboard tab stop.");
+    }
+
+    Assert(EnumerateControls(form).Single(control => control.Name == "ActivityNavItem").TabStop,
+        "Activity must be keyboard reachable so its future-release description can be announced.");
+    Assert(EnumerateControls(form).Single(control => control.Name == "AboutNavItem").TabStop,
+        "About must be keyboard reachable.");
+    Assert(EnumerateControls(form).Single(control => control.Name == "SettingsNavItem").TabStop,
+        "The current Settings navigation item must participate in the sidebar keyboard order.");
+}
+
+static void AssertOpaqueCustomControlsPaintEveryPixel(Form form)
+{
+    var getStyle = typeof(Control).GetMethod(
+        "GetStyle",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var customTypes = new HashSet<Type>
+    {
+        typeof(ToggleSwitch),
+        typeof(GradientButton),
+        typeof(OutlineButton),
+        typeof(TitleBarButton),
+        typeof(BrandIconTile),
+        typeof(ClipCordLogoControl),
+        typeof(GradientStrip)
+    };
+    var sentinel = Color.FromArgb(255, 1, 254, 1);
+    foreach (var control in EnumerateControls(form).Where(control =>
+                 control.Visible &&
+                 control.Width > 0 &&
+                 control.Height > 0 &&
+                 customTypes.Contains(control.GetType()) &&
+                 (bool)getStyle.Invoke(control, [ControlStyles.Opaque])!))
+    {
+        using var bitmap = new Bitmap(control.Width, control.Height);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.Clear(sentinel);
+        using var paint = new PaintEventArgs(graphics, control.ClientRectangle);
+        var onPaint = control.GetType().GetMethod(
+            "OnPaint",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        onPaint.Invoke(control, [paint]);
+
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                if (control.Region?.IsVisible(x, y) == false) continue;
+                Assert(bitmap.GetPixel(x, y).ToArgb() != sentinel.ToArgb(),
+                    $"Opaque {control.GetType().Name} left pixel ({x}, {y}) unpainted.");
+            }
+        }
+    }
+}
+
+static void AssertDpiRefit(SettingsForm form)
+{
+    var compression = EnumerateControls(form)
+        .OfType<ComboBox>()
+        .Single(control => control.AccessibleName == "Compression target in megabytes");
+    var host = (RoundedPanel)compression.Parent!;
+    var originalFont = compression.Font;
+    compression.Font = ClipCordTheme.InterfaceFont(18f);
+    host.MaximumSize = Size.Empty;
+    host.MinimumSize = Size.Empty;
+    host.Height = 1;
+    form.RefitDpiSensitiveControls();
+    Assert(host.Height >= compression.PreferredHeight + host.Padding.Vertical,
+        "DPI refitting must recompute the compression host from the ComboBox preferred height.");
+    compression.Font = originalFont;
+    form.RefitDpiSensitiveControls();
+}
+
+static bool IsAutoScrollViewport(Control control) =>
+    control is ScrollableControl scrollable && scrollable.AutoScroll;
+
+static bool HasAutoScrollAncestor(Control control)
+{
+    for (var parent = control.Parent; parent is not null; parent = parent.Parent)
+    {
+        if (IsAutoScrollViewport(parent)) return true;
+    }
+    return false;
 }
 
 static IEnumerable<Control> EnumerateControls(Control parent)
