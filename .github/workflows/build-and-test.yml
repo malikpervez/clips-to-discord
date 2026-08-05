@@ -146,7 +146,7 @@ jobs:
           .\scripts\test-installer.ps1 `
             -InstallerPath .\artifacts\ClipCord-Setup.exe `
             -PreviousInstallerPath .\artifacts\previous-installer\ClipsToDiscord-Setup.exe `
-            -ExpectedVersion 1.3.7 `
+            -ExpectedVersion 1.4.0 `
             -PreviousVersion 1.3.5
 
       - name: Create legacy updater alias
