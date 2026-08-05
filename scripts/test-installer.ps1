@@ -201,11 +201,21 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     if (Get-Process -Name 'ClipsToDiscord' -ErrorAction SilentlyContinue) {
         throw 'Ordinary silent setup unexpectedly launched ClipCord.'
     }
+    $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
+    if (-not (Test-Path -LiteralPath $runKey)) {
+        New-Item -Path $runKey -Force | Out-Null
+    }
+    $portableStartupPath = Join-Path $env:TEMP 'PortableClipCord\ClipsToDiscord.exe'
+    New-ItemProperty `
+        -Path $runKey `
+        -Name 'ClipsToDiscord' `
+        -Value "`"$portableStartupPath`"" `
+        -PropertyType String `
+        -Force | Out-Null
     $inAppUpdateProcess = Start-Process `
         -FilePath $installer `
         -ArgumentList @(
-            '/VERYSILENT',
-            '/SUPPRESSMSGBOXES',
+            '/SILENT',
             '/NORESTART',
             '/CLOSEAPPLICATIONS',
             '/CLIPCORDRESTART=1') `
@@ -233,17 +243,10 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
     Stop-Process -Id $inAppRestartProcess.Id -Force
     $inAppRestartProcess.WaitForExit()
     $inAppRestartProcess = $null
-
-    $installedExe = Join-Path $installDirectory 'ClipsToDiscord.exe'
-    if (-not (Test-Path -LiteralPath $runKey)) {
-        New-Item -Path $runKey -Force | Out-Null
+    $updatedRunValue = (Get-ItemProperty -Path $runKey -ErrorAction Stop).ClipsToDiscord
+    if ($updatedRunValue -ne "`"$installedExe`"") {
+        throw "In-app update left Start with Windows pointing at '$updatedRunValue'."
     }
-    New-ItemProperty `
-        -Path $runKey `
-        -Name 'ClipsToDiscord' `
-        -Value "`"$installedExe`"" `
-        -PropertyType String `
-        -Force | Out-Null
 
     $uninstaller = Join-Path $installDirectory 'unins000.exe'
     $uninstallProcess = Start-Process `

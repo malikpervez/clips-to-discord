@@ -17,6 +17,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _settingsOpen;
     private bool _automaticUpdateCheckScheduled;
     private bool _updateDialogOpen;
+    private bool _shutdownScheduled;
 
     internal UpdateLaunchRequest? PendingUpdateLaunch { get; private set; }
 
@@ -86,7 +87,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 (Icon)_applicationIcon.Clone(),
                 CheckForUpdatesManuallyAsync,
                 () => _statusItem.Text ?? "Starting…");
-            if (form.ShowDialog() == DialogResult.OK && form.SavedSettings is not null)
+            if (form.ShowDialog() == DialogResult.OK &&
+                form.SavedSettings is not null &&
+                !_shutdownScheduled)
             {
                 SettingsStore.Save(form.SavedSettings);
                 _settings = form.SavedSettings;
@@ -269,7 +272,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             release.Version,
             dialog.DownloadedUpdate.InstallerPath,
             release.InstallerSha256);
-        ExitThread();
+        _shutdownScheduled = true;
+        _uiContext.Post(_ => ExitThread(), null);
     }
 
     private static void OpenReleasePage(Uri releasePageUri, IWin32Window? owner)

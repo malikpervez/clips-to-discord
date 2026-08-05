@@ -5,7 +5,7 @@ internal sealed class UpdateDownloadDialog : Form
     private readonly UpdateRelease _release;
     private readonly IUpdateDownloadService _downloadService;
     private readonly CancellationToken _applicationCancellation;
-    private readonly Icon? _ownedApplicationIcon;
+    private Icon? _ownedApplicationIcon;
     private readonly Label _statusLabel;
     private readonly Label _detailLabel;
     private readonly ProgressBar _progressBar;
@@ -15,6 +15,7 @@ internal sealed class UpdateDownloadDialog : Form
     private bool _attemptRunning;
     private bool _allowClose;
     private bool _userCancellationRequested;
+    private bool _closingWithoutWait;
 
     public DownloadedUpdate? DownloadedUpdate { get; private set; }
 
@@ -36,7 +37,7 @@ internal sealed class UpdateDownloadDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(570, 190);
+        ClientSize = new Size(570, 220);
         AutoScaleMode = AutoScaleMode.Dpi;
 
         var title = new Label
@@ -64,8 +65,9 @@ internal sealed class UpdateDownloadDialog : Form
         _detailLabel = new Label
         {
             Text = "The installer will be verified before it is allowed to run.",
-            AutoSize = false,
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            MaximumSize = new Size(534, 0),
+            Dock = DockStyle.Top,
             ForeColor = SystemColors.GrayText,
             Margin = Padding.Empty
         };
@@ -127,6 +129,7 @@ internal sealed class UpdateDownloadDialog : Form
 
         var progress = new Progress<UpdateDownloadProgress>(value =>
         {
+            if (_closingWithoutWait || IsDisposed) return;
             _progressBar.Value = value.Percentage;
             _statusLabel.Text = $"Downloading ClipCord {value.Percentage}%";
             _detailLabel.Text = $"{FormatBytes(value.BytesReceived)} of {FormatBytes(value.TotalBytes)}";
@@ -134,10 +137,24 @@ internal sealed class UpdateDownloadDialog : Form
 
         try
         {
-            DownloadedUpdate = await _downloadService.DownloadAsync(
+            var downloadedUpdate = await _downloadService.DownloadAsync(
                 _release,
                 progress,
                 _attemptCancellation.Token);
+            if (_userCancellationRequested ||
+                _applicationCancellation.IsCancellationRequested ||
+                _closingWithoutWait)
+            {
+                if (!_closingWithoutWait && !IsDisposed)
+                {
+                    _allowClose = true;
+                    DialogResult = DialogResult.Cancel;
+                    Close();
+                }
+                return;
+            }
+
+            DownloadedUpdate = downloadedUpdate;
             _progressBar.Value = 100;
             _statusLabel.Text = "Download verified";
             _detailLabel.Text = "ClipCord will close, install the update, and reopen automatically.";
@@ -147,6 +164,7 @@ internal sealed class UpdateDownloadDialog : Form
         }
         catch (OperationCanceledException)
         {
+            if (_closingWithoutWait || IsDisposed) return;
             if (_applicationCancellation.IsCancellationRequested || _userCancellationRequested)
             {
                 _allowClose = true;
@@ -161,21 +179,25 @@ internal sealed class UpdateDownloadDialog : Form
         catch (InvalidDataException exception)
         {
             Log.Error("The update installer failed verification.", exception);
+            if (_closingWithoutWait || IsDisposed) return;
             ShowFailure("The downloaded update could not be verified, so ClipCord deleted it and did not run it.");
         }
         catch (HttpRequestException exception)
         {
             Log.Error("The verified update installer could not be downloaded.", exception);
+            if (_closingWithoutWait || IsDisposed) return;
             ShowFailure("GitHub could not complete the download. Your current ClipCord installation is unchanged.");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             Log.Error("The update installer could not be staged.", exception);
+            if (_closingWithoutWait || IsDisposed) return;
             ShowFailure("ClipCord could not save the update. Your current installation is unchanged.");
         }
         catch (Exception exception)
         {
             Log.Error("The update could not be prepared.", exception);
+            if (_closingWithoutWait || IsDisposed) return;
             ShowFailure("ClipCord could not prepare the update. Your current installation is unchanged.");
         }
         finally
@@ -214,6 +236,12 @@ internal sealed class UpdateDownloadDialog : Form
     private void HandleFormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
         if (_allowClose || !_attemptRunning) return;
+        if (eventArgs.CloseReason != CloseReason.UserClosing)
+        {
+            _closingWithoutWait = true;
+            _attemptCancellation?.Cancel();
+            return;
+        }
         eventArgs.Cancel = true;
         RequestCancel();
     }
@@ -230,9 +258,19 @@ internal sealed class UpdateDownloadDialog : Form
     {
         if (disposing)
         {
-            _attemptCancellation?.Cancel();
-            _attemptCancellation?.Dispose();
-            _ownedApplicationIcon?.Dispose();
+            var cancellation = Interlocked.Exchange(ref _attemptCancellation, null);
+            if (cancellation is not null)
+            {
+                try
+                {
+                    cancellation.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                cancellation.Dispose();
+            }
+            Interlocked.Exchange(ref _ownedApplicationIcon, null)?.Dispose();
         }
         base.Dispose(disposing);
     }

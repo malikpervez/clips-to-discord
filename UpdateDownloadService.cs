@@ -275,7 +275,14 @@ internal sealed class UpdateDownloadService : IUpdateDownloadService
         var pattern = GitHubUpdateChecker.InstallerFileName + ".*.download";
         foreach (var path in Directory.EnumerateFiles(versionDirectory, pattern, SearchOption.TopDirectoryOnly))
         {
-            File.Delete(path);
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Log.Error("A stale partial update could not be removed; a new unique download will be used.", exception);
+            }
         }
     }
 

@@ -12,8 +12,18 @@ internal static class UpdateInstallerLauncher
 {
     public static void Launch(UpdateLaunchRequest request)
     {
-        VerifyInstaller(request, UpdateDownloadService.DefaultDownloadRoot);
-        if (Process.Start(CreateStartInfo(request, UpdateDownloadService.DefaultDownloadRoot)) is null)
+        Launch(request, UpdateDownloadService.DefaultDownloadRoot, Process.Start);
+    }
+
+    internal static void Launch(
+        UpdateLaunchRequest request,
+        string allowedRoot,
+        Func<ProcessStartInfo, Process?> startProcess)
+    {
+        var installerPath = ValidateInstallerPath(request.InstallerPath, allowedRoot, request.Version);
+        using var stream = OpenInstallerForVerification(installerPath);
+        VerifyInstallerHash(request, stream);
+        if (startProcess(CreateStartInfo(request, allowedRoot)) is null)
         {
             throw new InvalidOperationException("Windows did not start the verified update installer.");
         }
@@ -42,6 +52,20 @@ internal static class UpdateInstallerLauncher
             throw new FileNotFoundException("The verified update installer was not found.", installerPath);
         }
 
+        using var stream = OpenInstallerForVerification(installerPath);
+        VerifyInstallerHash(request, stream);
+    }
+
+    private static FileStream OpenInstallerForVerification(string installerPath) => new(
+        installerPath,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.Read,
+        bufferSize: 128 * 1024,
+        FileOptions.SequentialScan);
+
+    private static void VerifyInstallerHash(UpdateLaunchRequest request, Stream stream)
+    {
         byte[] expectedHash;
         try
         {
@@ -56,7 +80,6 @@ internal static class UpdateInstallerLauncher
             throw new InvalidDataException("The update installer digest was invalid.");
         }
 
-        using var stream = new FileStream(installerPath, FileMode.Open, FileAccess.Read, FileShare.Read);
         var actualHash = SHA256.HashData(stream);
         if (!CryptographicOperations.FixedTimeEquals(actualHash, expectedHash))
         {

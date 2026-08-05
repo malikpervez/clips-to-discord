@@ -74,13 +74,50 @@ Type: files; Name: "{userdesktop}\Clips to Discord.lnk"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "ClipsToDiscord"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ClipsToDiscord"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Check: StartupValueExists
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Flags: nowait; Check: IsInAppUpdate
+Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Flags: nowait skipifnotsilent; Check: IsInAppUpdate
 
 [Code]
+var
+  InstallationSucceeded: Boolean;
+
 function IsInAppUpdate: Boolean;
 begin
   Result := CompareText(ExpandConstant('{param:clipcordrestart|0}'), '1') = 0;
+end;
+
+function StartupValueExists: Boolean;
+begin
+  Result := RegValueExists(
+    HKCU,
+    'Software\Microsoft\Windows\CurrentVersion\Run',
+    'ClipsToDiscord');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssDone then
+    InstallationSucceeded := True;
+end;
+
+procedure DeinitializeSetup;
+var
+  ResultCode: Integer;
+  ApplicationPath: String;
+begin
+  ApplicationPath := ExpandConstant('{app}\{#MyAppExeName}');
+  if IsInAppUpdate and (not InstallationSucceeded) and FileExists(ApplicationPath) then
+  begin
+    if not Exec(
+      ApplicationPath,
+      '',
+      ExpandConstant('{app}'),
+      SW_SHOWNORMAL,
+      ewNoWait,
+      ResultCode) then
+      Log('ClipCord could not be reopened after an unsuccessful in-app update.');
+  end;
 end;

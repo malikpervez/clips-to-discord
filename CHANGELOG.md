@@ -7,6 +7,7 @@ All notable user-facing changes are documented here.
 - Added an in-app update download with visible progress, cancellation, retry, and automatic restart after a successful install.
 - Verified the exact official GitHub release URL, allowed asset redirect, declared file length, and SHA-256 digest before staging an installer under the current user's local application data.
 - Reverify and confine the staged installer immediately before launch, release the single-instance mutex before setup starts, and leave the current installation untouched when download or verification fails.
+- Kept cancellation authoritative even when a network response completes at the same moment, allowed Windows shutdown to proceed, and reopened the existing app if a launched setup later fails.
 
 ## 1.4.1 — 2026-08-05
 

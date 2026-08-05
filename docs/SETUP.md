@@ -75,7 +75,7 @@ Exit the app from its notification-area menu and run the newer `ClipCord-Setup.e
 
 The app checks the official `malikpervez/clips-to-discord` GitHub Releases API no more than once every 24 hours. Stable checks ignore drafts and prereleases and offer only a newer release containing the expected installer plus a verifiable SHA-256 digest or checksum entry. Use **Check for updates** in Settings to check immediately.
 
-When an update is available, **View changes** opens the verified official GitHub release page. **Install update** downloads the exact release installer inside ClipCord with visible progress and a cancel option. ClipCord validates the release URL, download host, file length, and SHA-256 digest before it closes. It then verifies the staged file again, runs the per-user installer, and reopens automatically. Nothing is downloaded or installed until you choose **Install update**.
+When an update is available, **View changes** opens the verified official GitHub release page. **Install update** downloads the exact release installer inside ClipCord with visible progress and a cancel option. ClipCord validates the release URL, download host, file length, and SHA-256 digest before it closes. It then verifies the staged file again while holding it read-only through process launch, runs the per-user installer, and reopens automatically. If setup reports a failure after launching, it attempts to reopen the existing ClipCord installation instead. Nothing is downloaded or installed until you choose **Install update**.
 
 If a download is interrupted or fails verification, its partial file is deleted and the installed version keeps running. **Skip this version** suppresses that exact version during automatic checks; **Remind me later** waits 24 hours. A later stable version is not hidden by either choice.
 
@@ -83,7 +83,7 @@ Branches, pull requests, Actions artifacts, tags without GitHub releases, drafts
 
 The installer deliberately refuses an update while the application mutex is active. The in-app updater releases that mutex before setup starts and passes a dedicated restart request. Ordinary unattended setup does not relaunch the app; interactive setup still offers to launch it when finished.
 
-Portable users who choose **Install update** transition to the normal per-user installation under `%LOCALAPPDATA%\Programs\ClipsToDiscord`; settings and upload history are shared, and the old extracted portable folder can then be removed. To remain portable, use **View changes**, exit ClipCord, replace all extracted application files together, and reopen `ClipsToDiscord.exe`.
+Portable users who choose **Install update** transition to the normal per-user installation under `%LOCALAPPDATA%\Programs\ClipsToDiscord`; settings and upload history are shared, an existing **Start with Windows** entry is redirected to the installed copy, and the old extracted portable folder can then be removed. To remain portable, use **View changes**, exit ClipCord, replace all extracted application files together, and reopen `ClipsToDiscord.exe`.
 
 ## Uninstalling
 
