@@ -667,6 +667,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             Application.DoEvents();
             AssertControlsFit(form);
             AssertSettingsCardsOpenWithoutScrolling(form);
+            AssertSettingsTextFieldsAligned(form);
             AssertCriticalTextFits(form);
             AssertAccessibility(form);
             AssertOpaqueCustomControlsPaintEveryPixel(form);
@@ -907,6 +908,22 @@ static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
         .Single(control => control.AutoScroll);
     Assert(!cards.VerticalScroll.Visible && cards.AutoScrollPosition.Y == 0,
         $"Settings must open with every card visible without scrolling; viewport={cards.ClientSize}, display={cards.DisplayRectangle}.");
+}
+
+static void AssertSettingsTextFieldsAligned(SettingsForm form)
+{
+    var fields = EnumerateControls(form)
+        .OfType<TextBox>()
+        .Where(control => control.AccessibleName is "Clips folder" or "Uploader name" or "Discord webhook URL")
+        .OrderBy(control => control.AccessibleName, StringComparer.Ordinal)
+        .ToArray();
+    Assert(fields.Length == 3, "The three primary Settings text fields must remain discoverable.");
+    var screenBounds = fields
+        .Select(control => new Rectangle(control.PointToScreen(Point.Empty), control.Size))
+        .ToArray();
+    Assert(screenBounds.Select(bounds => bounds.Left).Distinct().Count() == 1 &&
+           screenBounds.Select(bounds => bounds.Height).Distinct().Count() == 1,
+        $"Clip source and Discord destination fields must share one left edge and height: {string.Join(", ", screenBounds)}.");
 }
 
 static void AssertSettingsRoundTrip(AppSettings original)
