@@ -67,7 +67,7 @@ internal sealed class UpdateDownloadDialog : Form
             Text = "The installer will be verified before it is allowed to run.",
             AutoSize = true,
             MaximumSize = new Size(534, 0),
-            Dock = DockStyle.Top,
+            Anchor = AnchorStyles.Left | AnchorStyles.Top,
             ForeColor = SystemColors.GrayText,
             Margin = Padding.Empty
         };
@@ -98,7 +98,7 @@ internal sealed class UpdateDownloadDialog : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.Controls.Add(title, 0, 0);
         layout.Controls.Add(_statusLabel, 0, 1);
@@ -143,7 +143,8 @@ internal sealed class UpdateDownloadDialog : Form
                 _attemptCancellation.Token);
             if (_userCancellationRequested ||
                 _applicationCancellation.IsCancellationRequested ||
-                _closingWithoutWait)
+                _closingWithoutWait ||
+                IsDisposed)
             {
                 if (!_closingWithoutWait && !IsDisposed)
                 {

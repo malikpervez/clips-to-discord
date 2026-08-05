@@ -109,7 +109,10 @@ var
   ApplicationPath: String;
 begin
   ApplicationPath := ExpandConstant('{app}\{#MyAppExeName}');
-  if IsInAppUpdate and (not InstallationSucceeded) and FileExists(ApplicationPath) then
+  if IsInAppUpdate and
+     (not InstallationSucceeded) and
+     (not CheckForMutexes('Local\ClipsToDiscord_Application')) and
+     FileExists(ApplicationPath) then
   begin
     if not Exec(
       ApplicationPath,

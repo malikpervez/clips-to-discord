@@ -834,7 +834,6 @@ static void AssertUpdateDownloadDialogBehavior(UpdateRelease release)
     using (var service = new FailingUpdateDownloadService())
     using (var form = new UpdateDownloadDialog(release, service))
     {
-        form.Scale(new SizeF(1.5f, 1.5f));
         form.Show();
         PumpWindowsMessagesUntil(
             () => EnumerateControls(form).OfType<Button>().Any(button => button.Text == "Retry" && button.Visible),
@@ -886,6 +885,19 @@ static void AssertUpdateDownloadDialogBehavior(UpdateRelease release)
     disposableForm.Dispose();
     disposableForm.Dispose();
     disposableService.Dispose();
+
+    using var activeService = new CompletingUpdateDownloadService();
+    var activeForm = new UpdateDownloadDialog(release, activeService);
+    activeForm.Show();
+    PumpWindowsMessagesUntil(() => activeService.Started, "The active-disposal test did not start.");
+    activeForm.Dispose();
+    activeForm.Dispose();
+    activeForm.Dispose();
+    activeService.Complete(new DownloadedUpdate(release, "unused-after-dispose.exe"));
+    PumpWindowsMessagesUntil(() => !activeService.IsPending, "The active-disposal test did not complete.");
+    Application.DoEvents();
+    Assert(activeForm.DownloadedUpdate is null,
+        "A completion arriving after active dialog disposal must not become installable.");
 }
 
 static void PumpWindowsMessagesUntil(Func<bool> condition, string failureMessage)

@@ -219,9 +219,13 @@ try { Start-Sleep -Seconds 120 } finally { `$mutex.Dispose() }
             '/NORESTART',
             '/CLOSEAPPLICATIONS',
             '/CLIPCORDRESTART=1') `
-        -Wait `
         -PassThru `
         -WindowStyle Hidden
+    if (-not $inAppUpdateProcess.WaitForExit(120000)) {
+        Stop-Process -Id $inAppUpdateProcess.Id -Force
+        $inAppUpdateProcess.WaitForExit()
+        throw 'In-app update simulation exceeded its two-minute deadline.'
+    }
     if ($inAppUpdateProcess.ExitCode -ne 0) {
         throw "In-app update simulation exited with code $($inAppUpdateProcess.ExitCode)."
     }

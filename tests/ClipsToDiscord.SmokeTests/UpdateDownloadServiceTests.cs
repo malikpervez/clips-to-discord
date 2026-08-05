@@ -255,6 +255,34 @@ internal static class UpdateDownloadServiceTests
         AssertThrows<InvalidDataException>(
             () => UpdateInstallerLauncher.VerifyInstaller(request, root),
             "The installer must be rehashed immediately before launch.");
+
+        var executableSource = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "where.exe");
+        File.Copy(executableSource, installerPath, overwrite: true);
+        var executableHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(installerPath)))
+            .ToLowerInvariant();
+        var executableRequest = request with { InstallerSha256 = executableHash };
+        Process? launchedProcess = null;
+        UpdateInstallerLauncher.Launch(executableRequest, root, launchInfo =>
+        {
+            launchInfo.WindowStyle = ProcessWindowStyle.Hidden;
+            launchedProcess = Process.Start(launchInfo);
+            return launchedProcess;
+        });
+        var verifiedProcess = launchedProcess ?? throw new InvalidOperationException(
+            "Windows must start an executable while the verification handle remains open for reading.");
+        try
+        {
+            Assert(verifiedProcess.WaitForExit(5000),
+                "The harmless verification-lock launch did not exit within five seconds.");
+        }
+        finally
+        {
+            if (!verifiedProcess.HasExited) verifiedProcess.Kill(entireProcessTree: true);
+            verifiedProcess.Dispose();
+        }
+
         var outsidePath = Path.Combine(Path.GetDirectoryName(root)!, GitHubUpdateChecker.InstallerFileName);
         var outside = request with { InstallerPath = outsidePath };
         AssertThrows<InvalidDataException>(
@@ -267,17 +295,34 @@ internal static class UpdateDownloadServiceTests
         var bytes = RandomNumberGenerator.GetBytes(1024);
         var release = CreateRelease(bytes);
         var versionRoot = Path.Combine(root, "v" + release.Version);
-        Directory.CreateDirectory(versionRoot);
-        var actualPath = Path.Combine(root, "actual-installer.exe");
+        var actualRoot = Path.Combine(root, "actual-version-directory");
+        Directory.CreateDirectory(actualRoot);
         var linkedPath = Path.Combine(versionRoot, GitHubUpdateChecker.InstallerFileName);
-        File.WriteAllBytes(actualPath, bytes);
-        try
+        File.WriteAllBytes(Path.Combine(actualRoot, GitHubUpdateChecker.InstallerFileName), bytes);
+        var junctionInfo = new ProcessStartInfo("cmd.exe")
         {
-            File.CreateSymbolicLink(linkedPath, actualPath);
-        }
-        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        junctionInfo.ArgumentList.Add("/d");
+        junctionInfo.ArgumentList.Add("/c");
+        junctionInfo.ArgumentList.Add("mklink");
+        junctionInfo.ArgumentList.Add("/J");
+        junctionInfo.ArgumentList.Add(versionRoot);
+        junctionInfo.ArgumentList.Add(actualRoot);
+        using (var junctionProcess = Process.Start(junctionInfo) ??
+               throw new InvalidOperationException("Windows did not start the junction test helper."))
         {
-            return;
+            Assert(junctionProcess.WaitForExit(5000),
+                "The junction test helper exceeded its five-second deadline.");
+            if (junctionProcess.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    "The mandatory junction test could not be prepared: " +
+                    junctionProcess.StandardError.ReadToEnd());
+            }
         }
 
         try
@@ -289,7 +334,7 @@ internal static class UpdateDownloadServiceTests
         }
         finally
         {
-            File.Delete(linkedPath);
+            Directory.Delete(versionRoot);
         }
     }
 
