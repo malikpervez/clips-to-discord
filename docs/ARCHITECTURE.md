@@ -12,9 +12,12 @@ flowchart LR
     E -- "No" --> F["Back off and observe again"]
     F --> D
     E -- "Yes" --> G["Compute SHA-256"]
-    G --> H["Bounded upload queue"]
-    H --> I1["Upload worker 1"]
-    H --> I2["Upload worker 2"]
+    G --> H["Bounded clip queue"]
+    H --> R{"Discord uploads enabled?"}
+    R -- "No" --> S["Flush local-only hash and pending move"]
+    S --> T["Move original into local-only/game folder"]
+    R -- "Yes" --> I1["Upload worker 1"]
+    R -- "Yes" --> I2["Upload worker 2"]
     I1 --> J{"Discord accepts size?"}
     I2 --> J
     J -- "No" --> K["Compress locally to progressive targets"]
@@ -26,9 +29,9 @@ flowchart LR
 ## Components
 
 - `TrayApplicationContext` owns the notification-area UI, settings dialog, startup registration, and controller lifecycle.
-- `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes, debounces brief absences, and observes each worker before restart or shutdown.
+- `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes, debounces brief absences, and exposes an awaitable stop that Settings and tray reconfiguration must complete before starting a replacement worker.
 - `FileReadinessTracker` requires stable metadata across multiple observations and exponentially backs off unreadable files.
-- `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two upload consumers.
+- `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two clip consumers that either upload or archive locally according to the persisted setting.
 - `DiscordWebhookClient` sends multipart attachments with uploader/game attribution, disabled mentions, separate connection and total deadlines, and progressively smaller compression retries.
 - `FfmpegCompressor` performs local two-pass H.264/AAC compression to a requested target.
 - `SettingsStore` encrypts the webhook with DPAPI and performs staged legacy migration.
@@ -49,12 +52,14 @@ flowchart LR
 - SHA-256 identity survives file, folder, and timestamp renames at the cost of one full local read per new clip.
 - Two workers isolate the queue from one slow request; each HTTP upload has a five-minute deadline and connection establishment has a 15-second deadline.
 - Confirmed upload state is flushed to disk before any archive move.
+- Local-only state and its pending destination are also flushed before moving, independently of uploaded state.
 - Move destinations never overwrite existing files.
-- Archive-folder resolution reuses case-insensitive `uploaded` and game-name matches, creates lowercase `uploaded` only when none exists, and uses `Uncategorized` when no supported filename timestamp exposes a game name.
-- Safe baselines hash legacy root-level archives and one-level game subfolders, including normal iCloud placeholder folders, while refusing to traverse symbolic links and junctions.
+- Archive-folder resolution reuses case-insensitive `uploaded`, `local-only`, and game-name matches, creates lowercase canonical names only when none exists, and uses `Uncategorized` when no supported filename timestamp exposes a game name.
+- Safe baselines hash legacy root-level archives and one-level game subfolders under both destinations, including normal iCloud placeholder folders, while refusing to traverse symbolic links and junctions.
 - Upload failures retry after five minutes.
 - A named mutex prevents multiple tray-app instances.
 - Three consecutive two-second Discord-absence polls are required before watcher cancellation; a brief updater relaunch therefore does not churn the worker.
+- Settings and tray mode changes disable concurrent reconfiguration and await complete shutdown of the old controller before creating the new one, so two workers cannot save independent stale state snapshots.
 - Controller disposal waits at most ten seconds on the UI thread, while any slower worker cleanup remains observed in the background.
 - Every runtime access to mutable watch-state collections is serialized through one gate shared by the scanner and both upload workers.
 - Version 1.1+ copies compatible settings from the former Moments to Discord data directory without deleting the original files.

@@ -8,6 +8,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _applicationIcon;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _statusItem;
+    private readonly ToolStripMenuItem _uploadToDiscordItem;
     private readonly System.Windows.Forms.Timer _updateTimer;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly UpdateCoordinator _updateCoordinator;
@@ -18,6 +19,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _automaticUpdateCheckScheduled;
     private bool _updateDialogOpen;
     private bool _shutdownScheduled;
+    private bool _reconfigurationInProgress;
 
     internal UpdateLaunchRequest? PendingUpdateLaunch { get; private set; }
 
@@ -41,12 +43,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
         var configureItem = new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings());
         var openFolderItem = new ToolStripMenuItem("Open clips folder", null, (_, _) => OpenClipsFolder());
-        var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitThread());
+        _uploadToDiscordItem = new ToolStripMenuItem("Upload new clips to Discord")
+        {
+            CheckOnClick = true,
+            Checked = _settings.UploadToDiscord,
+            Enabled = _settings.IsValid
+        };
+        _uploadToDiscordItem.Click += (_, _) => ToggleUploadModeFromTray();
+        var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => RequestExit());
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(configureItem);
         menu.Items.Add(openFolderItem);
+        menu.Items.Add(_uploadToDiscordItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
 
@@ -61,7 +71,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         if (_settings.IsValid)
         {
-            ApplySettings(_settings);
+            StartController(_settings);
         }
         else
         {
@@ -76,7 +86,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ShowSettings(exitIfCancelled: true);
     }
 
-    private void ShowSettings(bool exitIfCancelled = false)
+    private async void ShowSettings(bool exitIfCancelled = false)
     {
         if (_settingsOpen) return;
         _settingsOpen = true;
@@ -91,13 +101,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 form.SavedSettings is not null &&
                 !_shutdownScheduled)
             {
-                SettingsStore.Save(form.SavedSettings);
-                _settings = form.SavedSettings;
-                ApplySettings(_settings);
+                await PersistAndApplySettingsAsync(form.SavedSettings);
+                if (_shutdownScheduled) return;
                 _trayIcon.ShowBalloonTip(
                     2500,
                     "ClipCord",
-                    "Settings saved. The clip watcher follows Discord automatically.",
+                    _settings.UploadToDiscord
+                        ? "Settings saved. New clips will upload to Discord."
+                        : "Settings saved. Local-only mode will keep new clips on this PC.",
                     ToolTipIcon.Info);
             }
             else if (exitIfCancelled && !_settings.IsValid)
@@ -116,13 +127,127 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void ApplySettings(AppSettings settings)
+    private async Task PersistAndApplySettingsAsync(AppSettings updated)
     {
-        _controller?.Dispose();
+        if (_reconfigurationInProgress)
+        {
+            throw new InvalidOperationException("ClipCord is already applying another settings change.");
+        }
+
+        var previous = _settings;
+        var persisted = false;
+        _reconfigurationInProgress = true;
+        _uploadToDiscordItem.Enabled = false;
+        try
+        {
+            SettingsStore.Save(updated);
+            persisted = true;
+            await ApplySettingsAsync(updated);
+            _settings = updated;
+        }
+        catch
+        {
+            if (persisted)
+            {
+                try
+                {
+                    SettingsStore.Save(previous);
+                    await ApplySettingsAsync(previous);
+                    _settings = previous;
+                }
+                catch (Exception recoveryException)
+                {
+                    Log.Error("Could not restore the previous settings after a reconfiguration failure.", recoveryException);
+                }
+            }
+            throw;
+        }
+        finally
+        {
+            _reconfigurationInProgress = false;
+            if (!_shutdownScheduled)
+            {
+                _uploadToDiscordItem.Checked = _settings.UploadToDiscord;
+                _uploadToDiscordItem.Enabled = _settings.IsValid;
+            }
+        }
+    }
+
+    private async Task ApplySettingsAsync(AppSettings settings)
+    {
+        var previousController = _controller;
+        _controller = null;
+        if (previousController is not null)
+        {
+            SetStatus("Applying settings — stopping current watcher");
+            await previousController.StopAsync();
+        }
+
+        if (_shutdownScheduled) return;
+        StartController(settings);
+    }
+
+    private void RequestExit()
+    {
+        _shutdownScheduled = true;
+        ExitThread();
+    }
+
+    private void StartController(AppSettings settings)
+    {
         StartupManager.Apply(settings.StartWithWindows);
-        UploadedFolder.GetOrCreate(settings.ClipsFolder);
+        if (settings.UploadToDiscord)
+        {
+            UploadedFolder.GetOrCreate(settings.ClipsFolder);
+        }
+        else
+        {
+            UploadedFolder.GetOrCreateLocalOnly(settings.ClipsFolder);
+        }
+        _uploadToDiscordItem.Checked = settings.UploadToDiscord;
+        _uploadToDiscordItem.Enabled = settings.IsValid;
         _controller = new DiscordAwareController(settings, SetStatus);
         StartUpdateChecks();
+    }
+
+    private async void ToggleUploadModeFromTray()
+    {
+        var previousSettings = _settings;
+        var updated = previousSettings with { UploadToDiscord = _uploadToDiscordItem.Checked };
+        if (!updated.IsValid)
+        {
+            _uploadToDiscordItem.Checked = previousSettings.UploadToDiscord;
+            MessageBox.Show(
+                "Open Settings and enter a valid Discord webhook before enabling uploads.",
+                "Discord setup required",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            ShowSettings();
+            return;
+        }
+
+        try
+        {
+            await PersistAndApplySettingsAsync(updated);
+            if (_shutdownScheduled) return;
+            _trayIcon.ShowBalloonTip(
+                2500,
+                "ClipCord",
+                updated.UploadToDiscord
+                    ? "Discord uploads enabled. New clips will be sent automatically."
+                    : "Local-only mode enabled. New clips will not be sent to Discord.",
+                ToolTipIcon.Info);
+        }
+        catch (Exception exception)
+        {
+            _uploadToDiscordItem.Checked = _settings.UploadToDiscord;
+            Log.Error("Could not change the clip upload mode.", exception);
+            MessageBox.Show(
+                "ClipCord could not save the upload-mode setting.",
+                "Could not change upload mode",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
     }
 
     private void StartUpdateChecks()
@@ -330,6 +455,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        _shutdownScheduled = true;
         Application.Idle -= CheckForUpdatesOnIdle;
         _updateTimer.Stop();
         _updateTimer.Dispose();

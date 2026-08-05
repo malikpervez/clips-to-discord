@@ -6,6 +6,7 @@ namespace ClipsToDiscord;
 public static class UploadedFolder
 {
     private const string FolderName = "uploaded";
+    private const string LocalOnlyFolderName = "local-only";
     private const string UncategorizedFolderName = "Uncategorized";
     private const int MaximumGameFolderLength = 80;
     private static readonly HashSet<char> InvalidFolderCharacters = [.. Path.GetInvalidFileNameChars()];
@@ -36,6 +37,18 @@ public static class UploadedFolder
         var uploadedFolder = GetOrCreate(clipsFolder);
         return GetOrCreateCaseInsensitiveChild(uploadedFolder, GetGameFolderName(clipFileName));
     }
+
+    public static string GetOrCreateLocalOnly(string clipsFolder) =>
+        GetOrCreateCaseInsensitiveChild(clipsFolder, LocalOnlyFolderName);
+
+    public static string GetOrCreateLocalOnlyForClip(string clipsFolder, string clipFileName)
+    {
+        var localOnlyFolder = GetOrCreateLocalOnly(clipsFolder);
+        return GetOrCreateCaseInsensitiveChild(localOnlyFolder, GetGameFolderName(clipFileName));
+    }
+
+    internal static string? FindExistingLocalOnly(string clipsFolder) =>
+        FindCaseInsensitiveChild(clipsFolder, LocalOnlyFolderName);
 
     public static string GetGameFolderName(string clipFileName)
     {
@@ -75,6 +88,12 @@ public static class UploadedFolder
 
     private static string GetOrCreateCaseInsensitiveChild(string parentFolder, string requestedName)
     {
+        var existing = FindCaseInsensitiveChild(parentFolder, requestedName);
+        return existing ?? Directory.CreateDirectory(Path.Combine(parentFolder, requestedName)).FullName;
+    }
+
+    private static string? FindCaseInsensitiveChild(string parentFolder, string requestedName)
+    {
         string? caseInsensitiveMatch = null;
         foreach (var directory in Directory.EnumerateDirectories(parentFolder, "*", SearchOption.TopDirectoryOnly))
         {
@@ -105,7 +124,7 @@ public static class UploadedFolder
             return caseInsensitiveMatch;
         }
 
-        return Directory.CreateDirectory(Path.Combine(parentFolder, requestedName)).FullName;
+        return null;
     }
 
     private static string SanitizeGameFolderName(string? gameName)

@@ -5,7 +5,7 @@
 - Windows 10 or Windows 11 on a 64-bit PC
 - A clipping, recording, replay-buffer, or export tool that saves finished `.mp4` files into a folder
 - Discord desktop installed
-- Permission to create or manage a webhook in the destination Discord server
+- Permission to create or manage a webhook in the destination Discord server, unless every new clip will remain local-only
 
 The release is self-contained. Friends do not need ChatGPT, PowerShell, .NET, or a separate FFmpeg installation.
 
@@ -27,11 +27,13 @@ The release is not code-signed. Windows SmartScreen may display an unrecognized-
 
 Open the settings for your clipping or recording tool and find its save, export, recordings, highlights, or replay folder. If the location is unclear, create a short test clip and use File Explorer to find the resulting `.mp4`.
 
-Select the folder that directly receives new MP4 files. Do not select the `uploaded` subfolder that ClipCord creates.
+Select the folder that directly receives new MP4 files. Do not select the `uploaded` or `local-only` subfolder that ClipCord creates.
 
 The app watches only the top level of the selected directory. It does not scan nested folders, and it ignores formats other than `.mp4`.
 
 ## 3. Create the Discord webhook
+
+This section is optional if **Upload new clips to Discord** will be turned off. Local-only mode does not require or contact a webhook.
 
 1. In Discord, open the destination server's **Server Settings**.
 2. Open **Integrations**, then **Webhooks**.
@@ -48,8 +50,9 @@ Treat the webhook URL like a password. Anyone who has it can post through that w
 
 1. Leave **Start with Windows** selected if the app should be available after each sign-in.
 2. Set the compression target. New settings default to 95 MB to leave headroom beneath a 100 MB upload limit. If the destination only accepts the standard 10 MiB limit, set this to 9 MB to avoid unnecessary larger compression attempts. Updating the app preserves an existing saved value.
-3. Select **Save**.
-4. The app moves to the Windows notification area.
+3. Leave **Upload new clips to Discord** on for automatic posting, or turn it off to move new clips into `local-only\<game name>` without a Discord request.
+4. Select **Save**.
+5. The app moves to the Windows notification area.
 
 The first scan records existing clips as a baseline and does not upload them. After setup:
 
@@ -58,10 +61,11 @@ The first scan records existing clips as a baseline and does not upload them. Af
 - Two upload workers process the queue independently.
 - Discord receives visible text and an attachment description such as `Malik uploaded a clip from Battlefield™-6.` Mentions remain disabled for uploader-provided text.
 - Discord confirms the upload → the original moves into a case-insensitive `uploaded\<game name>` folder inferred from its timestamped filename. Unrecognized names use `uploaded\Uncategorized`.
+- In local-only mode → no upload is attempted and the original moves into the corresponding case-insensitive `local-only\<game name>` folder.
 - Discord closes → the clip watcher stops.
 - Discord reopens → watching resumes automatically.
 
-Right-click the notification-area icon to view status, reopen settings, open the clips folder, or exit.
+Right-click the notification-area icon to view status, toggle Discord uploads, reopen settings, open the clips folder, or exit. Clips already moved into `local-only` are not uploaded when the toggle is turned back on.
 
 Discord documents a default 10 MiB per-file limit, with potentially higher limits depending on the user or server. See Discord's official [Uploading Files reference](https://docs.discord.com/developers/reference#uploading-files). If Discord still rejects a compressed result, the app automatically tries progressively smaller targets.
 

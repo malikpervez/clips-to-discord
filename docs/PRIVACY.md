@@ -2,7 +2,7 @@
 
 ## Data flow
 
-ClipCord runs locally. It scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS.
+ClipCord runs locally. When Discord uploads are enabled, it scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS. In local-only mode, clip processing makes no Discord request.
 
 The app has no analytics, advertising, account system, telemetry service, or project-operated server.
 
@@ -13,6 +13,7 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
 - The chosen clips-folder path
 - The uploader name shown with clips in Discord
 - The start-with-Windows preference
+- Whether new clips should upload to Discord or remain local-only
 - The Discord webhook URL encrypted with Windows DPAPI for the current user
 - Path/length/timestamp keys used only to preserve the initial do-not-upload baseline
 - SHA-256 hashes of clip contents used for stable duplicate detection
@@ -36,6 +37,7 @@ SHA-256 hashing and FFmpeg compression are performed locally. Clip content and h
 - Existing clips are ignored during the initial baseline.
 - New top-level `.mp4` clips are read after the source application finishes writing them.
 - Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
+- In local-only mode, newly detected originals move into local `local-only\<game name>` subfolders without being sent to Discord.
 - Temporary compressed files are deleted after the upload attempt.
 - Partial or failed update downloads are deleted; a completed staged installer may be reused after re-verification.
 - Duplicate destination names receive a unique suffix and are never overwritten.

@@ -74,9 +74,24 @@ internal sealed class SettingsForm : Form
         AccessibleName = "Compression target in megabytes"
     };
     private readonly ToggleSwitch _startWithWindows = new() { Text = "Start with Windows" };
+    private readonly ToggleSwitch _uploadToDiscord = new()
+    {
+        Name = "UploadToDiscordToggle",
+        Text = "Upload new clips to Discord",
+        AccessibleName = "Upload new clips to Discord"
+    };
+    private readonly Label _uploadModeHelper = CreateHelper(string.Empty);
+    private readonly Label _privacySummaryLabel = new()
+    {
+        Name = "PrivacySummaryLabel",
+        Dock = DockStyle.Fill,
+        ForeColor = ClipCordTheme.ShellMutedText,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Font = ClipCordTheme.InterfaceFont(9f)
+    };
     private readonly OutlineButton _browseButton = CreateSecondaryButton("Browse", 112);
     private readonly OutlineButton _testButton = CreateSecondaryButton("Test webhook", 130);
-    private readonly OutlineButton _checkUpdatesButton = CreateSecondaryButton("Check for updates", 154);
+    private readonly OutlineButton _checkUpdatesButton = CreateSecondaryButton("Check for updates", 166);
     private readonly GradientButton _saveButton = new()
     {
         Text = "Save changes",
@@ -140,6 +155,10 @@ internal sealed class SettingsForm : Form
         _compressionTarget.Items.AddRange(["5 MB", "10 MB", "25 MB", "50 MB", "75 MB", "95 MB", "100 MB"]);
         _compressionTarget.Text = $"{Math.Clamp(settings.CompressionTargetMb, 1, 100)} MB";
         _startWithWindows.Checked = settings.StartWithWindows;
+        _uploadToDiscord.Checked = settings.UploadToDiscord;
+        _uploadModeHelper.Name = "UploadModeHelperLabel";
+        _uploadToDiscord.CheckedChanged += (_, _) => UpdateUploadModeText();
+        UpdateUploadModeText();
 
         _browseButton.Click += BrowseClicked;
         _testButton.Click += TestClicked;
@@ -207,7 +226,7 @@ internal sealed class SettingsForm : Form
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
@@ -532,17 +551,19 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(CreateFieldHost(_uploaderNameText), 1, 1);
         layout.Controls.Add(CreateInlineFieldLabel("Webhook URL"), 0, 3);
         layout.Controls.Add(CreateFieldRow(CreateFieldHost(_webhookText), _testButton), 1, 3);
-        layout.Controls.Add(CreateHelper("Encrypted for your Windows account."), 1, 4);
+        layout.Controls.Add(CreateHelper("Encrypted for this Windows user."), 1, 4);
         return CreateCard(BrandGlyph.Destination, "Discord destination settings", layout, new Padding(0, 0, 0, 12));
     }
 
     private Control BuildUploadCard()
     {
-        var layout = CreateCardContent(3);
+        var layout = CreateCardContent(5);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -573,11 +594,17 @@ internal sealed class SettingsForm : Form
         compression.Controls.Add(compressionHost);
         layout.Controls.Add(compression, 0, 1);
         layout.SetColumnSpan(compression, 2);
+        _uploadToDiscord.Margin = new Padding(0, 4, 0, 0);
+        layout.Controls.Add(_uploadToDiscord, 0, 2);
+        layout.SetColumnSpan(_uploadToDiscord, 2);
+        _uploadModeHelper.Margin = new Padding(0, 0, 0, 2);
+        layout.Controls.Add(_uploadModeHelper, 0, 3);
+        layout.SetColumnSpan(_uploadModeHelper, 2);
         _checkUpdatesButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
         _checkUpdatesButton.Margin = new Padding(0, 2, 0, 0);
-        layout.Controls.Add(_checkUpdatesButton, 1, 2);
+        layout.Controls.Add(_checkUpdatesButton, 1, 4);
         _startWithWindows.Margin = new Padding(0, 2, 0, 0);
-        layout.Controls.Add(_startWithWindows, 0, 2);
+        layout.Controls.Add(_startWithWindows, 0, 4);
         return CreateCard(BrandGlyph.Sliders, "Upload preferences", layout, Padding.Empty);
     }
 
@@ -662,14 +689,7 @@ internal sealed class SettingsForm : Form
         messages.Controls.Add(shield, 0, 0);
         messages.SetRowSpan(shield, 2);
         messages.Controls.Add(_statusLabel, 1, 0);
-        messages.Controls.Add(new Label
-        {
-            Text = "Your clips go directly to Discord.",
-            Dock = DockStyle.Fill,
-            ForeColor = ClipCordTheme.ShellMutedText,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = ClipCordTheme.InterfaceFont(9f)
-        }, 1, 1);
+        messages.Controls.Add(_privacySummaryLabel, 1, 1);
 
         var actions = new FlowLayoutPanel
         {
@@ -890,6 +910,8 @@ internal sealed class SettingsForm : Form
                            value.Contains("paused", StringComparison.OrdinalIgnoreCase) => "Paused",
             var value when value.Contains("error", StringComparison.OrdinalIgnoreCase) ||
                            value.Contains("failed", StringComparison.OrdinalIgnoreCase) => "Needs attention",
+            var value when value.Contains("local-only", StringComparison.OrdinalIgnoreCase) ||
+                           value.Contains("saved locally", StringComparison.OrdinalIgnoreCase) => "Local only",
             var value when value.Contains("archive", StringComparison.OrdinalIgnoreCase) ||
                            value.Contains("move", StringComparison.OrdinalIgnoreCase) => "Archiving",
             var value when value.Contains("upload", StringComparison.OrdinalIgnoreCase) => "Uploading",
@@ -924,7 +946,11 @@ internal sealed class SettingsForm : Form
 
     private async void TestClicked(object? sender, EventArgs eventArgs)
     {
-        if (!TryValidate(out _)) return;
+        if (!WebhookValidation.IsDiscordWebhook(_webhookText.Text.Trim()))
+        {
+            MessageBox.Show(this, "Enter a valid HTTPS Discord webhook URL.", "Invalid webhook", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
         SetBusy(true, "Testing webhook…");
         try
@@ -1022,9 +1048,10 @@ internal sealed class SettingsForm : Form
             _webhookText.Text.Trim(),
             _startWithWindows.Checked,
             compressionTargetMb,
-            AppSettings.NormalizeUploaderName(_uploaderNameText.Text));
+            AppSettings.NormalizeUploaderName(_uploaderNameText.Text),
+            _uploadToDiscord.Checked);
 
-        if (string.IsNullOrWhiteSpace(_uploaderNameText.Text))
+        if (_uploadToDiscord.Checked && string.IsNullOrWhiteSpace(_uploaderNameText.Text))
         {
             MessageBox.Show(this, "Enter the name Discord should show with uploaded clips.", "Invalid uploader name", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
@@ -1036,13 +1063,32 @@ internal sealed class SettingsForm : Form
             return false;
         }
 
-        if (!WebhookValidation.IsDiscordWebhook(settings.WebhookUrl))
+        if (_uploadToDiscord.Checked && !WebhookValidation.IsDiscordWebhook(settings.WebhookUrl))
         {
             MessageBox.Show(this, "Enter a valid HTTPS Discord webhook URL.", "Invalid webhook", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
 
         return true;
+    }
+
+    private void UpdateUploadModeText()
+    {
+        if (_uploadToDiscord.Checked)
+        {
+            _uploadModeHelper.Text = "New clips upload to Discord and move to uploaded.";
+            _privacySummaryLabel.Text = "Your clips go directly to Discord.";
+            _toolTip.SetToolTip(
+                _uploadToDiscord,
+                "New clips are sent to Discord and then organized under uploaded by game.");
+            return;
+        }
+
+        _uploadModeHelper.Text = "No Discord request; new clips move to local-only.";
+        _privacySummaryLabel.Text = "Local-only mode keeps new clips on this PC.";
+        _toolTip.SetToolTip(
+            _uploadToDiscord,
+            "New clips are not sent to Discord and are organized under local-only by game.");
     }
 
     internal static bool TryParseCompressionTarget(string? text, out int value)
@@ -1068,6 +1114,7 @@ internal sealed class SettingsForm : Form
         _browseButton.Enabled = !busy;
         _testButton.Enabled = !busy;
         _checkUpdatesButton.Enabled = !busy && _checkForUpdatesAsync is not null;
+        _uploadToDiscord.Enabled = !busy;
         _saveButton.Enabled = !busy;
         _cancelButton.Enabled = !busy;
         _minimizeButton.Enabled = !busy;

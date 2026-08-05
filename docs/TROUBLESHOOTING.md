@@ -12,10 +12,11 @@ Check these in order:
 
 1. Discord desktop is open. The watcher intentionally pauses while Discord is closed.
 2. The tray status says it is watching for clips.
-3. The selected directory is the folder containing the new `.mp4`, not the `uploaded` folder.
-4. The clip is a top-level `.mp4`. Nested directories and other formats are ignored.
-5. The recording tool has finished writing the file. The app requires the last write to be at least twenty seconds old, matching length and timestamp observations across ten seconds, and a read handle that denies concurrent writers before queueing it.
-6. The webhook still exists and points to the intended channel.
+3. **Upload new clips to Discord** is enabled. If the tray says **Local only**, the clip is intentionally moved under `local-only` without a Discord request.
+4. The selected directory is the folder containing the new `.mp4`, not the `uploaded` or `local-only` folder.
+5. The clip is a top-level `.mp4`. Nested directories and other formats are ignored.
+6. The recording tool has finished writing the file. The app requires the last write to be at least twenty seconds old, matching length and timestamp observations across ten seconds, and a read handle that denies concurrent writers before queueing it.
+7. The webhook still exists and points to the intended channel.
 
 Clips already present during the first scan are recorded as a safe baseline and are not uploaded automatically.
 
@@ -32,6 +33,10 @@ If building from source without FFmpeg, normal-size clips still work, but oversi
 After Discord accepts the upload, the app records it before moving the original. This prevents a move failure from posting the same clip twice. The app retries pending moves into `uploaded\<game name>`. Check that the Windows account can create and move files in the selected clips directory.
 
 Folder matching is case-insensitive: `uploaded`, `Uploaded`, and `UPLOADED` are treated as the same archive folder, and differently-cased versions of one game reuse the existing game folder. When no archive exists, the app creates lowercase `uploaded` automatically. SteelSeries `Game__YYYY-MM-DD__HH-MM-SS`, common dotted timestamps, and compact timestamps are recognized; other filenames go into `Uncategorized`.
+
+## A clip was intentionally kept local
+
+When **Upload new clips to Discord** is off, ClipCord makes no webhook request. After the normal readiness checks, it moves each new clip into `local-only\<game name>` and shows **Local only** in the status area. Turning uploads back on does not scan or upload anything already inside `local-only`; post those files manually if desired.
 
 ## Multiple people share one webhook
 

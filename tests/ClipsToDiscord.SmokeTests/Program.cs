@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Windows.Forms;
 using ClipsToDiscord;
@@ -31,6 +32,51 @@ try
     Assert(
         Path.GetFileName(createdFolder).Equals("uploaded", StringComparison.Ordinal),
         "A newly created archive folder must use the canonical lowercase name.");
+
+    var localOnlyCaseRoot = Path.Combine(temporaryRoot, "local-only-case");
+    Directory.CreateDirectory(localOnlyCaseRoot);
+    var capitalizedLocalOnly = Directory.CreateDirectory(Path.Combine(localOnlyCaseRoot, "Local-Only")).FullName;
+    var resolvedLocalOnly = UploadedFolder.GetOrCreateLocalOnly(localOnlyCaseRoot);
+    Assert(
+        resolvedLocalOnly.Equals(capitalizedLocalOnly, StringComparison.Ordinal),
+        "Local-only archive resolution must reuse an existing differently-cased folder.");
+    Assert(
+        Directory.EnumerateDirectories(localOnlyCaseRoot).Count() == 1,
+        "Resolving Local-Only must not create a second folder.");
+
+    var missingLocalOnlyRoot = Path.Combine(temporaryRoot, "missing-local-only");
+    Directory.CreateDirectory(missingLocalOnlyRoot);
+    var createdLocalOnlyFolder = UploadedFolder.GetOrCreateLocalOnly(missingLocalOnlyRoot);
+    Assert(
+        Path.GetFileName(createdLocalOnlyFolder).Equals("local-only", StringComparison.Ordinal),
+        "A newly created local-only folder must use the canonical lowercase name.");
+
+    var reparseArchiveRoot = Path.Combine(temporaryRoot, "local-only-reparse-root");
+    var reparseTarget = Path.Combine(temporaryRoot, "local-only-reparse-target");
+    var reparseLocalOnly = Path.Combine(reparseArchiveRoot, "local-only");
+    Directory.CreateDirectory(reparseArchiveRoot);
+    Directory.CreateDirectory(reparseTarget);
+    var reparsePayload = Path.Combine(reparseTarget, "must-remain.txt");
+    await File.WriteAllTextAsync(reparsePayload, "preserve target");
+    CreateDirectoryJunction(reparseLocalOnly, reparseTarget);
+    try
+    {
+        var rejected = false;
+        try
+        {
+            UploadedFolder.GetOrCreateLocalOnly(reparseArchiveRoot);
+        }
+        catch (IOException)
+        {
+            rejected = true;
+        }
+        Assert(rejected, "A local-only archive root must reject symbolic links and junctions.");
+    }
+    finally
+    {
+        Directory.Delete(reparseLocalOnly);
+    }
+    Assert(File.Exists(reparsePayload), "Removing the test junction must not remove its target contents.");
 
     Assert(
         UploadedFolder.GetGameFolderName("Battlefield™-6__2026-08-03__13-43-46.mp4") == "Battlefield™-6",
@@ -77,6 +123,19 @@ try
     Assert(archivedClips.Contains(rootArchiveClip), "Archived baseline enumeration must retain legacy root clips.");
     Assert(archivedClips.Contains(nestedArchiveClip), "Archived baseline enumeration must include game subfolders.");
 
+    var gameLocalOnlyFolder = Directory.CreateDirectory(Path.Combine(gameArchiveRoot, "Local-Only")).FullName;
+    var existingLocalOnlyGameFolder = Directory.CreateDirectory(Path.Combine(gameLocalOnlyFolder, "Battlefield™-6")).FullName;
+    var resolvedLocalOnlyGameFolder = UploadedFolder.GetOrCreateLocalOnlyForClip(
+        gameArchiveRoot,
+        "battlefield™-6__2026-08-03__13-43-46.mp4");
+    Assert(
+        resolvedLocalOnlyGameFolder.Equals(existingLocalOnlyGameFolder, StringComparison.Ordinal),
+        "Local-only game folders must be reused case-insensitively.");
+    var localOnlyRootClip = Path.Combine(gameLocalOnlyFolder, "local-root.mp4");
+    var localOnlyNestedClip = Path.Combine(existingLocalOnlyGameFolder, "local-nested.mp4");
+    await File.WriteAllBytesAsync(localOnlyRootClip, [34, 55, 89]);
+    await File.WriteAllBytesAsync(localOnlyNestedClip, [144, 233, 121]);
+
     var gameBaselineStateDirectory = Path.Combine(temporaryRoot, "game-baseline-state");
     Directory.CreateDirectory(gameBaselineStateDirectory);
     var gameBaselineStore = new WatchStateStore(
@@ -89,6 +148,39 @@ try
     Assert(
         gameBaselineState.UploadedContentHashes.Count == 2,
         "Safe baseline state must mark root-level and game-subfolder archives as uploaded.");
+    Assert(
+        gameBaselineState.LocalOnlyContentHashes.Count == 2,
+        "Safe baseline state must recognize root-level and game-subfolder local-only clips.");
+    Assert(
+        gameBaselineState.LocalOnlyContentHashes.All(hash => !gameBaselineState.UploadedContentHashes.Contains(hash)),
+        "Local-only baseline clips must never be classified as uploaded.");
+
+    var v2UpgradeStateDirectory = Path.Combine(temporaryRoot, "v2-local-only-upgrade");
+    Directory.CreateDirectory(v2UpgradeStateDirectory);
+    var v2UpgradeStore = new WatchStateStore(
+        Path.Combine(v2UpgradeStateDirectory, "state.json"),
+        Path.Combine(v2UpgradeStateDirectory, ".safe-baseline-required"));
+    v2UpgradeStore.Save(new WatchState { Version = 2, ClipsFolder = gameArchiveRoot });
+    var upgradedV2State = await v2UpgradeStore.LoadOrInitializeAsync(
+        gameArchiveRoot,
+        _ => { },
+        CancellationToken.None);
+    Assert(
+        upgradedV2State.Version == 3 && upgradedV2State.LocalOnlyContentHashes.Count == 2,
+        "A v2 state upgrade must baseline existing local-only archives without treating them as uploads.");
+
+    var localOnlySettings = new AppSettings(
+        gameArchiveRoot,
+        string.Empty,
+        true,
+        AppSettings.DefaultCompressionTargetMb,
+        AppSettings.DefaultUploaderName,
+        false);
+    Assert(localOnlySettings.IsValid, "Local-only mode must not require a Discord webhook.");
+    Assert(
+        !(localOnlySettings with { UploadToDiscord = true }).IsValid,
+        "Enabling Discord uploads must still require a valid webhook.");
+    Assert(AppSettings.Empty.UploadToDiscord, "New installations must default to Discord uploads enabled.");
 
     Assert(
         AppSettings.NormalizeUploaderName("  Malik   Pervez  ") == "Malik Pervez",
@@ -148,7 +240,8 @@ try
         "https://discord.com/api/" + "webhooks/123456/test-token",
         true,
         AppSettings.DefaultCompressionTargetMb,
-        "Malik"));
+        "Malik",
+        true));
 
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
     var recoveryClips = Path.Combine(recoveryRoot, "clips");
@@ -156,7 +249,9 @@ try
     Directory.CreateDirectory(recoveryClips);
     Directory.CreateDirectory(recoveryStateDirectory);
     var pendingMovePath = Path.Combine(recoveryClips, "uploaded-but-not-moved.mp4");
+    var pendingLocalOnlyMovePath = Path.Combine(recoveryClips, "local-only-but-not-moved.mp4");
     await File.WriteAllBytesAsync(pendingMovePath, new byte[] { 9, 8, 7, 6 });
+    await File.WriteAllBytesAsync(pendingLocalOnlyMovePath, new byte[] { 6, 7, 8, 9 });
     var recoveryStatePath = Path.Combine(recoveryStateDirectory, "state.json");
     var recoveryMarkerPath = Path.Combine(recoveryStateDirectory, ".safe-baseline-required");
     var recoveryStore = new WatchStateStore(recoveryStatePath, recoveryMarkerPath);
@@ -164,7 +259,8 @@ try
     {
         Version = 2,
         ClipsFolder = recoveryClips,
-        PendingMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pendingMovePath }
+        PendingMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pendingMovePath },
+        PendingLocalOnlyMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pendingLocalOnlyMovePath }
     });
     await File.WriteAllTextAsync(recoveryMarkerPath, DateTime.UtcNow.ToString("O"));
     var recoveredState = await recoveryStore.LoadOrInitializeAsync(
@@ -175,7 +271,10 @@ try
         recoveredState.PendingMoves.Contains(pendingMovePath),
         "A forced safe-baseline rebuild must preserve readable pending moves.");
     Assert(
-        recoveredState.KnownContentHashes.Count == 1,
+        recoveredState.PendingLocalOnlyMoves.Contains(pendingLocalOnlyMovePath),
+        "A forced safe-baseline rebuild must preserve readable local-only pending moves.");
+    Assert(
+        recoveredState.KnownContentHashes.Count == 2,
         "A forced safe-baseline rebuild must hash existing clips.");
     Assert(!File.Exists(recoveryMarkerPath), "The recovery marker must clear after the baseline is durably saved.");
 
@@ -356,6 +455,44 @@ try
         Volatile.Read(ref watcherCancellations) == 2,
         "Controller disposal must cancel and await the active watcher.");
 
+    var cleanupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var delayedWatcherStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    async Task DelayedCleanupWatcher(
+        AppSettings ignoredSettings,
+        Action<string> ignoredStatus,
+        CancellationToken cancellationToken)
+    {
+        delayedWatcherStarted.TrySetResult();
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            cleanupStarted.TrySetResult();
+            await releaseCleanup.Task;
+            throw;
+        }
+    }
+
+    var delayedCleanupController = new DiscordAwareController(
+        AppSettings.Empty,
+        _ => { },
+        () => true,
+        DelayedCleanupWatcher,
+        controllerOptions);
+    await delayedWatcherStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    var stopTask = delayedCleanupController.StopAsync();
+    await cleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    Assert(!stopTask.IsCompleted,
+        "Awaitable controller shutdown must not finish while the old watcher is still cleaning up.");
+    releaseCleanup.TrySetResult();
+    await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+    delayedCleanupController.Dispose();
+
+    await AssertLocalOnlyWorkerAsync(temporaryRoot);
+
     await UpdateCheckerTests.RunAsync(temporaryRoot);
     await UpdateDownloadServiceTests.RunAsync(temporaryRoot);
 
@@ -371,6 +508,32 @@ static void Assert(bool condition, string message)
     if (!condition) throw new InvalidOperationException(message);
 }
 
+static void CreateDirectoryJunction(string linkPath, string targetPath)
+{
+    var startInfo = new ProcessStartInfo("cmd.exe")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
+    startInfo.ArgumentList.Add("/d");
+    startInfo.ArgumentList.Add("/c");
+    startInfo.ArgumentList.Add("mklink");
+    startInfo.ArgumentList.Add("/J");
+    startInfo.ArgumentList.Add(linkPath);
+    startInfo.ArgumentList.Add(targetPath);
+    using var process = Process.Start(startInfo)
+        ?? throw new InvalidOperationException("Windows did not start the junction test helper.");
+    Assert(process.WaitForExit(5000), "The junction test helper exceeded its five-second deadline.");
+    if (process.ExitCode != 0)
+    {
+        throw new InvalidOperationException(
+            "The mandatory local-only junction test could not be prepared: " +
+            process.StandardError.ReadToEnd());
+    }
+}
+
 static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string failureMessage)
 {
     var deadline = DateTime.UtcNow.Add(timeout);
@@ -379,6 +542,111 @@ static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string 
         if (DateTime.UtcNow >= deadline) throw new InvalidOperationException(failureMessage);
         await Task.Delay(TimeSpan.FromMilliseconds(10));
     }
+}
+
+static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
+{
+    var root = Path.Combine(temporaryRoot, "local-only-worker");
+    var clipsFolder = Path.Combine(root, "clips");
+    var stateFolder = Path.Combine(root, "state");
+    Directory.CreateDirectory(clipsFolder);
+    Directory.CreateDirectory(stateFolder);
+    var store = new WatchStateStore(
+        Path.Combine(stateFolder, "state.json"),
+        Path.Combine(stateFolder, ".safe-baseline-required"));
+    await store.LoadOrInitializeAsync(clipsFolder, _ => { }, CancellationToken.None);
+
+    const string clipName = "Battlefield__2026-08-05__12-00-00.mp4";
+    var sourcePath = Path.Combine(clipsFolder, clipName);
+    await File.WriteAllBytesAsync(sourcePath, [1, 3, 3, 7]);
+    File.SetLastWriteTimeUtc(sourcePath, DateTime.UtcNow.AddMinutes(-1));
+    var expectedDestination = Path.Combine(clipsFolder, "local-only", "Battlefield", clipName);
+    var statuses = new ConcurrentQueue<string>();
+    var settings = new AppSettings(
+        clipsFolder,
+        string.Empty,
+        false,
+        AppSettings.DefaultCompressionTargetMb,
+        AppSettings.DefaultUploaderName,
+        false);
+    using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+    var worker = new UploaderWorker(
+        settings,
+        statuses.Enqueue,
+        store,
+        () => throw new InvalidOperationException(
+            "Local-only mode must not construct a Discord webhook client."));
+    var workerTask = worker.RunAsync(cancellation.Token);
+    try
+    {
+        await WaitUntilAsync(
+            () => File.Exists(expectedDestination),
+            TimeSpan.FromSeconds(16),
+            "Local-only mode did not archive a ready clip without a webhook.");
+    }
+    finally
+    {
+        cancellation.Cancel();
+        try
+        {
+            await workerTask;
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+    }
+
+    Assert(!File.Exists(sourcePath), "A local-only clip must leave the watched folder after it is archived.");
+    Assert(
+        statuses.Any(status => status.Contains("local-only", StringComparison.OrdinalIgnoreCase)),
+        "Local-only processing must publish an explicit watcher status.");
+    var state = await store.LoadOrInitializeAsync(clipsFolder, _ => { }, CancellationToken.None);
+    Assert(state.LocalOnlyContentHashes.Count == 1,
+        "A local-only clip must receive a persisted local-only content identity.");
+    Assert(state.UploadedContentHashes.Count == 0,
+        "A local-only clip must never be marked as uploaded.");
+    Assert(state.PendingLocalOnlyMoves.Count == 0,
+        "A completed local-only archive move must clear its durable pending entry.");
+
+    const string pendingClipName = "Apex Legends__2026-08-05__12-30-00.mp4";
+    var pendingSourcePath = Path.Combine(clipsFolder, pendingClipName);
+    await File.WriteAllBytesAsync(pendingSourcePath, [2, 4, 6, 8]);
+    var pendingHash = await ContentIdentity.ComputeSha256Async(pendingSourcePath, CancellationToken.None);
+    state.KnownContentHashes.Add(pendingHash);
+    state.LocalOnlyContentHashes.Add(pendingHash);
+    state.PendingLocalOnlyMoves.Add(pendingSourcePath);
+    store.Save(state);
+
+    var uploadsEnabledSettings = settings with
+    {
+        WebhookUrl = "https://discord.com/api/webhooks/123456/test-token",
+        UploadToDiscord = true
+    };
+    var recoveredDestination = Path.Combine(clipsFolder, "local-only", "Apex Legends", pendingClipName);
+    using var recoveryCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    var recoveryWorker = new UploaderWorker(uploadsEnabledSettings, _ => { }, store);
+    var recoveryTask = recoveryWorker.RunAsync(recoveryCancellation.Token);
+    try
+    {
+        await WaitUntilAsync(
+            () => File.Exists(recoveredDestination),
+            TimeSpan.FromSeconds(10),
+            "A persisted local-only move changed destination after Discord uploads were enabled.");
+    }
+    finally
+    {
+        recoveryCancellation.Cancel();
+        try
+        {
+            await recoveryTask;
+        }
+        catch (OperationCanceledException) when (recoveryCancellation.IsCancellationRequested)
+        {
+        }
+    }
+    Assert(
+        !File.Exists(Path.Combine(clipsFolder, "uploaded", "Apex Legends", pendingClipName)),
+        "A recovered local-only move must never be redirected into the uploaded archive.");
 }
 
 static void AssertSettingsFormLayout(AppSettings settings)
@@ -391,7 +659,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             using var form = new SettingsForm(
                 settings,
                 checkForUpdatesAsync: _ => Task.CompletedTask,
-                watcherStatusProvider: () => "Discord open — watching for clips");
+                watcherStatusProvider: () => "Discord open — local-only mode");
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
@@ -453,6 +721,23 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .Single(checkBox => checkBox.Text == "Start with Windows");
             Assert(startupCheckbox.Width > 0 && startupCheckbox.Height > 0,
                 "The Start with Windows checkbox must occupy visible layout space.");
+            var uploadToggle = EnumerateControls(form)
+                .OfType<CheckBox>()
+                .Single(checkBox => checkBox.Name == "UploadToDiscordToggle");
+            Assert(uploadToggle.Checked && uploadToggle.Width > 0 && uploadToggle.Height > 0,
+                "The Discord upload toggle must reflect the saved setting and remain visible.");
+            uploadToggle.Checked = false;
+            Application.DoEvents();
+            var uploadModeHelper = EnumerateControls(form)
+                .OfType<Label>()
+                .Single(label => label.Name == "UploadModeHelperLabel");
+            var privacySummary = EnumerateControls(form)
+                .OfType<Label>()
+                .Single(label => label.Name == "PrivacySummaryLabel");
+            Assert(uploadModeHelper.Text.Contains("No Discord request", StringComparison.Ordinal) &&
+                   privacySummary.Text.Contains("Local-only mode", StringComparison.Ordinal),
+                "Turning uploads off must immediately explain the local-only behavior.");
+            AssertControlsFit(form);
             var activityItem = EnumerateControls(form)
                 .Single(control => control.Name == "ActivityNavItem");
             Assert(activityItem.Tag as string == SettingsForm.ActivityComingSoonText &&
@@ -464,8 +749,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .Single(label => label.Name == "ActivityNavLabel");
             Assert(!activityLabel.Enabled,
                 "The Activity navigation label must remain visibly unavailable.");
-            Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Watching"),
-                "The branded header must present a concise live watcher status.");
+            Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Local only"),
+                "The branded header must present the complete local-only watcher status.");
             var headerLogo = EnumerateControls(form)
                 .OfType<ClipCordLogoControl>()
                 .Single(control => control.Name == "HeaderLogo");
@@ -628,6 +913,9 @@ static void AssertSettingsRoundTrip(AppSettings original)
     ((ComboBox)controls.Single(control => control.AccessibleName == "Compression target in megabytes")).Text = "37 MB";
     var startup = controls.OfType<CheckBox>().Single(control => control.Text == "Start with Windows");
     startup.Checked = !original.StartWithWindows;
+    var uploadToDiscord = controls.OfType<CheckBox>()
+        .Single(control => control.Name == "UploadToDiscordToggle");
+    uploadToDiscord.Checked = !original.UploadToDiscord;
     controls.OfType<Button>().Single(control => control.Text == "Save changes").PerformClick();
 
     Assert(form.SavedSettings is not null &&
@@ -635,7 +923,8 @@ static void AssertSettingsRoundTrip(AppSettings original)
            form.SavedSettings.WebhookUrl == changedWebhook &&
            form.SavedSettings.UploaderName == "Round Trip User" &&
            form.SavedSettings.StartWithWindows == !original.StartWithWindows &&
-           form.SavedSettings.CompressionTargetMb == 37,
+           form.SavedSettings.CompressionTargetMb == 37 &&
+           form.SavedSettings.UploadToDiscord == !original.UploadToDiscord,
         "Every settings value must survive the branded form save round trip.");
 }
 
@@ -650,6 +939,8 @@ static void AssertCriticalTextFits(Form form)
         "Webhook URL",
         "Upload preferences",
         "Compression target",
+        "Upload new clips to Discord",
+        "Local only",
         "Start with Windows",
         "Save changes",
         "Cancel"
@@ -661,11 +952,13 @@ static void AssertCriticalTextFits(Form form)
             $"Text '{control.Text}' does not fit {control.GetType().Name}: measured={measured}, client={control.ClientSize}.");
     }
 
-    var toggle = EnumerateControls(form).OfType<ToggleSwitch>().Single();
-    var toggleText = TextRenderer.MeasureText(toggle.Text, toggle.Font, Size.Empty, TextFormatFlags.SingleLine);
-    Assert(toggleText.Width <= toggle.GetTextBounds().Width + 4 &&
-           toggleText.Height <= toggle.GetTextBounds().Height + 4,
-        $"Toggle text does not fit its painted text area: measured={toggleText}, paintBounds={toggle.GetTextBounds()}.");
+    foreach (var toggle in EnumerateControls(form).OfType<ToggleSwitch>())
+    {
+        var toggleText = TextRenderer.MeasureText(toggle.Text, toggle.Font, Size.Empty, TextFormatFlags.SingleLine);
+        Assert(toggleText.Width <= toggle.GetTextBounds().Width + 4 &&
+               toggleText.Height <= toggle.GetTextBounds().Height + 4,
+            $"Toggle text '{toggle.Text}' does not fit its painted text area: measured={toggleText}, paintBounds={toggle.GetTextBounds()}.");
+    }
 
     foreach (var layout in EnumerateControls(form).OfType<TableLayoutPanel>())
     {

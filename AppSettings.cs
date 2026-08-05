@@ -10,7 +10,8 @@ internal sealed record AppSettings(
     string WebhookUrl,
     bool StartWithWindows,
     int CompressionTargetMb,
-    string UploaderName)
+    string UploaderName,
+    bool UploadToDiscord)
 {
     public const int DefaultCompressionTargetMb = 95;
     public const int MaximumUploaderNameLength = 80;
@@ -20,14 +21,16 @@ internal sealed record AppSettings(
         string.Empty,
         true,
         DefaultCompressionTargetMb,
-        DefaultUploaderName);
+        DefaultUploaderName,
+        true);
 
     public bool IsValid =>
         Directory.Exists(ClipsFolder) &&
-        WebhookValidation.IsDiscordWebhook(WebhookUrl) &&
+        (!UploadToDiscord || WebhookValidation.IsDiscordWebhook(WebhookUrl)) &&
         CompressionTargetMb is >= 1 and <= 100 &&
-        !string.IsNullOrWhiteSpace(UploaderName) &&
-        UploaderName.Length <= MaximumUploaderNameLength;
+        (!UploadToDiscord ||
+         (!string.IsNullOrWhiteSpace(UploaderName) &&
+          UploaderName.Length <= MaximumUploaderNameLength));
 
     public static string NormalizeUploaderName(string? value)
     {
@@ -85,7 +88,8 @@ internal static class SettingsStore
                 webhookUrl,
                 stored.StartWithWindows,
                 NormalizeCompressionTarget(stored.CompressionTargetMb),
-                AppSettings.NormalizeUploaderName(stored.UploaderName));
+                AppSettings.NormalizeUploaderName(stored.UploaderName),
+                stored.UploadToDiscord);
         }
         catch (Exception exception)
         {
@@ -164,7 +168,8 @@ internal static class SettingsStore
             ProtectedWebhook = Convert.ToBase64String(encrypted),
             StartWithWindows = settings.StartWithWindows,
             CompressionTargetMb = settings.CompressionTargetMb,
-            UploaderName = AppSettings.NormalizeUploaderName(settings.UploaderName)
+            UploaderName = AppSettings.NormalizeUploaderName(settings.UploaderName),
+            UploadToDiscord = settings.UploadToDiscord
         };
 
         var temporaryPath = SettingsPath + ".tmp";
@@ -179,6 +184,7 @@ internal static class SettingsStore
         public bool StartWithWindows { get; set; } = true;
         public int CompressionTargetMb { get; set; } = AppSettings.DefaultCompressionTargetMb;
         public string? UploaderName { get; set; } = AppSettings.DefaultUploaderName;
+        public bool UploadToDiscord { get; set; } = true;
     }
 
     private static int NormalizeCompressionTarget(int value) =>

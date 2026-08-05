@@ -3,10 +3,14 @@ using System.Threading.Channels;
 
 namespace ClipsToDiscord;
 
-internal sealed class UploaderWorker(AppSettings settings, Action<string> reportStatus)
+internal sealed class UploaderWorker(
+    AppSettings settings,
+    Action<string> reportStatus,
+    WatchStateStore? stateStore = null,
+    Func<DiscordWebhookClient>? discordClientFactory = null)
 {
     private const int UploadWorkerCount = 2;
-    private readonly WatchStateStore _stateStore = new();
+    private readonly WatchStateStore _stateStore = stateStore ?? new WatchStateStore();
     private readonly FileReadinessTracker _readiness = new();
     // After initialization, every read and write of WatchState's mutable collections
     // is performed while this gate is held by the scanner or an upload worker.
@@ -23,7 +27,9 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
             settings.ClipsFolder,
             reportStatus,
             cancellationToken);
-        using var discord = new DiscordWebhookClient();
+        using var discord = settings.UploadToDiscord
+            ? (discordClientFactory ?? (() => new DiscordWebhookClient()))()
+            : null;
         var queue = Channel.CreateBounded<QueuedClip>(new BoundedChannelOptions(50)
         {
             SingleWriter = true,
@@ -34,8 +40,10 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
             .Select(_ => ConsumeQueueAsync(queue.Reader, state, discord, cancellationToken))
             .ToArray();
 
-        Log.Info($"Clip watcher started for {settings.ClipsFolder} with {UploadWorkerCount} upload workers.");
-        reportStatus("Discord open — watching for clips");
+        Log.Info($"Clip watcher started for {settings.ClipsFolder} with {UploadWorkerCount} clip workers in {(settings.UploadToDiscord ? "Discord upload" : "local-only")} mode.");
+        reportStatus(settings.UploadToDiscord
+            ? "Discord open — watching for clips"
+            : "Discord open — local-only mode");
 
         try
         {
@@ -85,7 +93,9 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
             await _stateGate.WaitAsync(cancellationToken);
             try
             {
-                if (state.IgnoredFileKeys.Contains(fileKey) || state.PendingMoves.Contains(clip.FullName))
+                if (state.IgnoredFileKeys.Contains(fileKey) ||
+                    state.PendingMoves.Contains(clip.FullName) ||
+                    state.PendingLocalOnlyMoves.Contains(clip.FullName))
                 {
                     return;
                 }
@@ -140,7 +150,7 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
     private async Task ConsumeQueueAsync(
         ChannelReader<QueuedClip> reader,
         WatchState state,
-        DiscordWebhookClient discord,
+        DiscordWebhookClient? discord,
         CancellationToken cancellationToken)
     {
         await foreach (var clip in reader.ReadAllAsync(cancellationToken))
@@ -160,10 +170,13 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
     private async Task ProcessQueuedClipAsync(
         QueuedClip clip,
         WatchState state,
-        DiscordWebhookClient discord,
+        DiscordWebhookClient? discord,
         CancellationToken cancellationToken)
     {
-        var durableSuccess = false;
+        var destination = settings.UploadToDiscord
+            ? ArchiveDestination.Uploaded
+            : ArchiveDestination.LocalOnly;
+        var durableDisposition = false;
         try
         {
             if (!File.Exists(clip.FilePath)) return;
@@ -180,7 +193,8 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
             bool previouslyUploaded;
             try
             {
-                if (state.PendingMoves.Contains(clip.FilePath)) return;
+                if (state.PendingMoves.Contains(clip.FilePath) ||
+                    state.PendingLocalOnlyMoves.Contains(clip.FilePath)) return;
                 alreadyKnown = state.KnownContentHashes.Contains(clip.ContentHash);
                 previouslyUploaded = state.UploadedContentHashes.Contains(clip.ContentHash);
             }
@@ -189,7 +203,12 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
                 _stateGate.Release();
             }
 
-            if (alreadyKnown && !previouslyUploaded)
+            // Initial top-level baseline files are filtered by IgnoredFileKeys before they
+            // reach the queue. In local-only mode, any path that does reach this point is a
+            // newly observed file and is deliberately organized locally even if its bytes
+            // duplicate a known clip. Upload mode remains conservative and leaves known,
+            // never-uploaded content in place.
+            if (settings.UploadToDiscord && alreadyKnown && !previouslyUploaded)
             {
                 await _stateGate.WaitAsync(cancellationToken);
                 try
@@ -205,33 +224,50 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
                 return;
             }
 
-            if (!alreadyKnown)
+            if (settings.UploadToDiscord && !alreadyKnown)
             {
                 reportStatus($"Uploading {clip.FileName}");
                 Log.Info($"Uploading new clip: {clip.FileName} ({clip.Length / 1024d / 1024d:F1} MB).");
-                await discord.UploadWithCompressionAsync(
+                await (discord ?? throw new InvalidOperationException("The Discord client is unavailable in upload mode."))
+                    .UploadWithCompressionAsync(
                     settings.WebhookUrl,
                     clip.FilePath,
                     settings.CompressionTargetMb,
                     settings.UploaderName,
                     cancellationToken);
             }
-            else
+            else if (settings.UploadToDiscord)
             {
                 Log.Info($"Content duplicate detected; archiving without another upload: {clip.FileName}.");
             }
+            else
+            {
+                reportStatus($"Saving {clip.FileName} locally");
+                Log.Info($"Local-only mode selected; archiving without a Discord request: {clip.FileName}.");
+            }
 
-            // This is intentionally the first operation after Discord confirms success.
-            // The content hash and pending move are flushed to disk before any move attempt.
+            // For uploads, this is intentionally the first operation after Discord confirms
+            // success. For both destinations, the content hash and intended move are flushed
+            // to disk before any move attempt so a restart cannot change the routing decision.
             await _stateGate.WaitAsync(cancellationToken);
             try
             {
                 state.KnownContentHashes.Add(clip.ContentHash);
-                state.UploadedContentHashes.Add(clip.ContentHash);
-                state.PendingMoves.Add(clip.FilePath);
+                if (destination == ArchiveDestination.Uploaded)
+                {
+                    state.UploadedContentHashes.Add(clip.ContentHash);
+                    state.PendingMoves.Add(clip.FilePath);
+                    state.PendingLocalOnlyMoves.Remove(clip.FilePath);
+                }
+                else
+                {
+                    state.LocalOnlyContentHashes.Add(clip.ContentHash);
+                    state.PendingLocalOnlyMoves.Add(clip.FilePath);
+                    state.PendingMoves.Remove(clip.FilePath);
+                }
                 state.IgnoredFileKeys.Remove(clip.FileKey);
                 _stateStore.Save(state);
-                durableSuccess = true;
+                durableDisposition = true;
             }
             finally
             {
@@ -239,9 +275,17 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
             }
 
             _retryAfter.TryRemove(clip.ContentHash, out _);
-            await TryMoveAndClearPendingAsync(clip.FilePath, state, cancellationToken);
-            Log.Info($"Upload complete and clip archived: {clip.FileName}");
-            reportStatus("Upload complete — watching for clips");
+            await TryMoveAndClearPendingAsync(clip.FilePath, state, destination, cancellationToken);
+            if (destination == ArchiveDestination.Uploaded)
+            {
+                Log.Info($"Upload complete and clip archived: {clip.FileName}");
+                reportStatus("Upload complete — watching for clips");
+            }
+            else
+            {
+                Log.Info($"Clip saved to the local-only archive: {clip.FileName}");
+                reportStatus("Saved locally — local-only mode");
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -249,43 +293,83 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
         }
         catch (Exception exception)
         {
-            if (durableSuccess)
+            if (durableDisposition)
             {
-                Log.Error($"Clip was uploaded but could not be archived yet: {clip.FileName}. The move will be retried.", exception);
-                reportStatus($"Uploaded {clip.FileName} — archive move pending");
+                if (destination == ArchiveDestination.Uploaded)
+                {
+                    Log.Error($"Clip was uploaded but could not be archived yet: {clip.FileName}. The move will be retried.", exception);
+                    reportStatus($"Uploaded {clip.FileName} — archive move pending");
+                }
+                else
+                {
+                    Log.Error($"Clip was marked local-only but could not be archived yet: {clip.FileName}. The move will be retried.", exception);
+                    reportStatus($"Local-only move pending — {clip.FileName}");
+                }
             }
             else
             {
-                _retryAfter[clip.ContentHash] = DateTime.UtcNow.AddMinutes(5);
-                Log.Error($"Upload failed for {clip.FileName}; retrying in 5 minutes.", exception);
-                reportStatus($"Upload failed — retrying {clip.FileName} later");
+                var retryDelay = settings.UploadToDiscord ? TimeSpan.FromMinutes(5) : TimeSpan.FromMinutes(1);
+                _retryAfter[clip.ContentHash] = DateTime.UtcNow.Add(retryDelay);
+                if (settings.UploadToDiscord)
+                {
+                    Log.Error($"Upload failed for {clip.FileName}; retrying in 5 minutes.", exception);
+                    reportStatus($"Upload failed — retrying {clip.FileName} later");
+                }
+                else
+                {
+                    Log.Error($"Could not prepare local-only clip {clip.FileName}; retrying in 1 minute.", exception);
+                    reportStatus($"Local-only save failed — retrying {clip.FileName}");
+                }
             }
         }
     }
 
     private async Task ProcessPendingMovesAsync(WatchState state, CancellationToken cancellationToken)
     {
-        string[] pending;
+        string[] pendingUploads;
+        string[] pendingLocalOnly;
         await _stateGate.WaitAsync(cancellationToken);
         try
         {
-            pending = state.PendingMoves.ToArray();
+            pendingUploads = state.PendingMoves.ToArray();
+            pendingLocalOnly = state.PendingLocalOnlyMoves.ToArray();
         }
         finally
         {
             _stateGate.Release();
         }
 
-        foreach (var path in pending)
+        foreach (var path in pendingUploads)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                await TryMoveAndClearPendingAsync(path, state, cancellationToken);
+                await TryMoveAndClearPendingAsync(
+                    path,
+                    state,
+                    ArchiveDestination.Uploaded,
+                    cancellationToken);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 Log.Error($"Could not move uploaded clip {Path.GetFileName(path)}; it will be retried.", exception);
+            }
+        }
+
+        foreach (var path in pendingLocalOnly)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await TryMoveAndClearPendingAsync(
+                    path,
+                    state,
+                    ArchiveDestination.LocalOnly,
+                    cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Log.Error($"Could not move local-only clip {Path.GetFileName(path)}; it will be retried.", exception);
             }
         }
     }
@@ -293,6 +377,7 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
     private async Task TryMoveAndClearPendingAsync(
         string sourcePath,
         WatchState state,
+        ArchiveDestination destination,
         CancellationToken cancellationToken)
     {
         if (!_activeMoves.TryAdd(sourcePath, 0)) return;
@@ -300,13 +385,20 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
         {
             if (File.Exists(sourcePath))
             {
-                await MovePendingClipAsync(sourcePath, cancellationToken);
+                await MovePendingClipAsync(sourcePath, destination, cancellationToken);
             }
 
             await _stateGate.WaitAsync(cancellationToken);
             try
             {
-                state.PendingMoves.Remove(sourcePath);
+                if (destination == ArchiveDestination.Uploaded)
+                {
+                    state.PendingMoves.Remove(sourcePath);
+                }
+                else
+                {
+                    state.PendingLocalOnlyMoves.Remove(sourcePath);
+                }
                 _stateStore.Save(state);
             }
             finally
@@ -320,11 +412,16 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
         }
     }
 
-    private static async Task MovePendingClipAsync(string sourcePath, CancellationToken cancellationToken)
+    private static async Task MovePendingClipAsync(
+        string sourcePath,
+        ArchiveDestination destination,
+        CancellationToken cancellationToken)
     {
         var clipsFolder = Path.GetDirectoryName(sourcePath)
             ?? throw new InvalidOperationException("The clip folder could not be determined.");
-        var archiveFolder = UploadedFolder.GetOrCreateForClip(clipsFolder, Path.GetFileName(sourcePath));
+        var archiveFolder = destination == ArchiveDestination.Uploaded
+            ? UploadedFolder.GetOrCreateForClip(clipsFolder, Path.GetFileName(sourcePath))
+            : UploadedFolder.GetOrCreateLocalOnlyForClip(clipsFolder, Path.GetFileName(sourcePath));
         var destinationPath = UniqueDestination(archiveFolder, Path.GetFileName(sourcePath));
         Exception? lastError = null;
 
@@ -346,7 +443,7 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
             }
         }
 
-        throw new IOException($"Could not move the uploaded clip to {archiveFolder}.", lastError);
+        throw new IOException($"Could not move the clip to {archiveFolder}.", lastError);
     }
 
     private static string UniqueDestination(string folder, string fileName)
@@ -387,4 +484,10 @@ internal sealed class UploaderWorker(AppSettings settings, Action<string> report
         string FileKey,
         string ContentHash,
         long Length);
+
+    private enum ArchiveDestination
+    {
+        Uploaded,
+        LocalOnly
+    }
 }
