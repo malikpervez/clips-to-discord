@@ -4,6 +4,11 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- Added a persistent **Upload new clips to Discord** toggle in Settings and the tray menu.
+- Added local-only mode, which makes no Discord upload request and organizes newly detected clips under case-insensitive `local-only\<game name>` folders.
+- Persist local-only content hashes and pending moves separately from confirmed uploads so restarts preserve the original routing decision and never turn withheld clips into uploads.
+- Allow local-only setup without a webhook while continuing to require a valid Discord webhook before uploads can be enabled.
+
 ## 1.5.0 — 2026-08-05
 
 - Added an in-app update download with visible progress, cancellation, retry, and automatic restart after a successful install.

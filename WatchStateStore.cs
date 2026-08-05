@@ -6,7 +6,8 @@ namespace ClipsToDiscord;
 
 internal sealed class WatchStateStore
 {
-    private const int CurrentVersion = 2;
+    private const int CurrentVersion = 3;
+    private const int MinimumCompatibleVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _statePath;
     private readonly string _safeBaselineMarkerPath;
@@ -43,11 +44,17 @@ internal sealed class WatchStateStore
             Log.Error("Could not read uploader state; creating a safe baseline.", exception);
         }
 
-        if (!forceSafeBaseline && saved is not null && saved.Version >= CurrentVersion)
+        if (!forceSafeBaseline && saved is not null && saved.Version >= MinimumCompatibleVersion)
         {
+            var needsLocalOnlyBaseline = saved.Version < CurrentVersion;
             Normalize(saved);
             if (saved.ClipsFolder.Equals(clipsFolder, StringComparison.OrdinalIgnoreCase))
             {
+                if (needsLocalOnlyBaseline)
+                {
+                    await AddLocalOnlyBaselineAsync(saved, clipsFolder, cancellationToken);
+                    Save(saved);
+                }
                 return saved;
             }
 
@@ -66,7 +73,8 @@ internal sealed class WatchStateStore
         {
             Version = CurrentVersion,
             ClipsFolder = clipsFolder,
-            PendingMoves = saved?.PendingMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            PendingMoves = saved?.PendingMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            PendingLocalOnlyMoves = saved?.PendingLocalOnlyMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         };
         Normalize(state);
         await AddSafeBaselineAsync(state, clipsFolder, cancellationToken);
@@ -143,6 +151,33 @@ internal sealed class WatchStateStore
                 Log.Error($"Could not hash archived baseline clip {Path.GetFileName(path)}.", exception);
             }
         }
+
+        await AddLocalOnlyBaselineAsync(state, clipsFolder, cancellationToken);
+    }
+
+    private static async Task AddLocalOnlyBaselineAsync(
+        WatchState state,
+        string clipsFolder,
+        CancellationToken cancellationToken)
+    {
+        var localOnlyFolder = UploadedFolder.FindExistingLocalOnly(clipsFolder);
+        if (localOnlyFolder is null) return;
+
+        foreach (var path in UploadedFolder.EnumerateArchivedClips(localOnlyFolder)
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var contentHash = await ContentIdentity.ComputeSha256Async(path, cancellationToken);
+                state.KnownContentHashes.Add(contentHash);
+                state.LocalOnlyContentHashes.Add(contentHash);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                Log.Error($"Could not hash local-only baseline clip {Path.GetFileName(path)}.", exception);
+            }
+        }
     }
 
     private static void Normalize(WatchState state)
@@ -158,8 +193,14 @@ internal sealed class WatchStateStore
         state.UploadedContentHashes = new HashSet<string>(
             state.UploadedContentHashes ?? [],
             StringComparer.OrdinalIgnoreCase);
+        state.LocalOnlyContentHashes = new HashSet<string>(
+            state.LocalOnlyContentHashes ?? [],
+            StringComparer.OrdinalIgnoreCase);
         state.PendingMoves = new HashSet<string>(
             state.PendingMoves ?? [],
+            StringComparer.OrdinalIgnoreCase);
+        state.PendingLocalOnlyMoves = new HashSet<string>(
+            state.PendingLocalOnlyMoves ?? [],
             StringComparer.OrdinalIgnoreCase);
         state.KnownSignatures = null;
     }
@@ -176,8 +217,10 @@ internal sealed class WatchState
     public string ClipsFolder { get; set; } = string.Empty;
     public HashSet<string> KnownContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> UploadedContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> LocalOnlyContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> IgnoredFileKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> PendingMoves { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> PendingLocalOnlyMoves { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public HashSet<string>? KnownSignatures { get; set; }

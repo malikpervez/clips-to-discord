@@ -8,6 +8,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _applicationIcon;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _statusItem;
+    private readonly ToolStripMenuItem _uploadToDiscordItem;
     private readonly System.Windows.Forms.Timer _updateTimer;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly UpdateCoordinator _updateCoordinator;
@@ -41,12 +42,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
         var configureItem = new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings());
         var openFolderItem = new ToolStripMenuItem("Open clips folder", null, (_, _) => OpenClipsFolder());
+        _uploadToDiscordItem = new ToolStripMenuItem("Upload new clips to Discord")
+        {
+            CheckOnClick = true,
+            Checked = _settings.UploadToDiscord,
+            Enabled = _settings.IsValid
+        };
+        _uploadToDiscordItem.Click += (_, _) => ToggleUploadModeFromTray();
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitThread());
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(configureItem);
         menu.Items.Add(openFolderItem);
+        menu.Items.Add(_uploadToDiscordItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
 
@@ -97,7 +106,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 _trayIcon.ShowBalloonTip(
                     2500,
                     "ClipCord",
-                    "Settings saved. The clip watcher follows Discord automatically.",
+                    _settings.UploadToDiscord
+                        ? "Settings saved. New clips will upload to Discord."
+                        : "Settings saved. Local-only mode will keep new clips on this PC.",
                     ToolTipIcon.Info);
             }
             else if (exitIfCancelled && !_settings.IsValid)
@@ -120,9 +131,68 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _controller?.Dispose();
         StartupManager.Apply(settings.StartWithWindows);
-        UploadedFolder.GetOrCreate(settings.ClipsFolder);
+        if (settings.UploadToDiscord)
+        {
+            UploadedFolder.GetOrCreate(settings.ClipsFolder);
+        }
+        else
+        {
+            UploadedFolder.GetOrCreateLocalOnly(settings.ClipsFolder);
+        }
+        _uploadToDiscordItem.Checked = settings.UploadToDiscord;
+        _uploadToDiscordItem.Enabled = settings.IsValid;
         _controller = new DiscordAwareController(settings, SetStatus);
         StartUpdateChecks();
+    }
+
+    private void ToggleUploadModeFromTray()
+    {
+        var previousSettings = _settings;
+        var updated = previousSettings with { UploadToDiscord = _uploadToDiscordItem.Checked };
+        if (!updated.IsValid)
+        {
+            _uploadToDiscordItem.Checked = previousSettings.UploadToDiscord;
+            MessageBox.Show(
+                "Open Settings and enter a valid Discord webhook before enabling uploads.",
+                "Discord setup required",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            ShowSettings();
+            return;
+        }
+
+        try
+        {
+            SettingsStore.Save(updated);
+            ApplySettings(updated);
+            _settings = updated;
+            _trayIcon.ShowBalloonTip(
+                2500,
+                "ClipCord",
+                updated.UploadToDiscord
+                    ? "Discord uploads enabled. New clips will be sent automatically."
+                    : "Local-only mode enabled. New clips will not be sent to Discord.",
+                ToolTipIcon.Info);
+        }
+        catch (Exception exception)
+        {
+            _uploadToDiscordItem.Checked = previousSettings.UploadToDiscord;
+            try
+            {
+                SettingsStore.Save(previousSettings);
+                ApplySettings(previousSettings);
+            }
+            catch (Exception recoveryException)
+            {
+                Log.Error("Could not restore the previous clip upload mode after a mode-change failure.", recoveryException);
+            }
+            Log.Error("Could not change the clip upload mode.", exception);
+            MessageBox.Show(
+                "ClipCord could not save the upload-mode setting.",
+                "Could not change upload mode",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
     }
 
     private void StartUpdateChecks()
