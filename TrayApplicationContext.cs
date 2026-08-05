@@ -19,6 +19,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _automaticUpdateCheckScheduled;
     private bool _updateDialogOpen;
     private bool _shutdownScheduled;
+    private bool _reconfigurationInProgress;
 
     internal UpdateLaunchRequest? PendingUpdateLaunch { get; private set; }
 
@@ -49,7 +50,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Enabled = _settings.IsValid
         };
         _uploadToDiscordItem.Click += (_, _) => ToggleUploadModeFromTray();
-        var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitThread());
+        var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => RequestExit());
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -70,7 +71,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         if (_settings.IsValid)
         {
-            ApplySettings(_settings);
+            StartController(_settings);
         }
         else
         {
@@ -85,7 +86,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ShowSettings(exitIfCancelled: true);
     }
 
-    private void ShowSettings(bool exitIfCancelled = false)
+    private async void ShowSettings(bool exitIfCancelled = false)
     {
         if (_settingsOpen) return;
         _settingsOpen = true;
@@ -100,9 +101,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 form.SavedSettings is not null &&
                 !_shutdownScheduled)
             {
-                SettingsStore.Save(form.SavedSettings);
-                _settings = form.SavedSettings;
-                ApplySettings(_settings);
+                await PersistAndApplySettingsAsync(form.SavedSettings);
+                if (_shutdownScheduled) return;
                 _trayIcon.ShowBalloonTip(
                     2500,
                     "ClipCord",
@@ -127,9 +127,74 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private void ApplySettings(AppSettings settings)
+    private async Task PersistAndApplySettingsAsync(AppSettings updated)
     {
-        _controller?.Dispose();
+        if (_reconfigurationInProgress)
+        {
+            throw new InvalidOperationException("ClipCord is already applying another settings change.");
+        }
+
+        var previous = _settings;
+        var persisted = false;
+        _reconfigurationInProgress = true;
+        _uploadToDiscordItem.Enabled = false;
+        try
+        {
+            SettingsStore.Save(updated);
+            persisted = true;
+            await ApplySettingsAsync(updated);
+            _settings = updated;
+        }
+        catch
+        {
+            if (persisted)
+            {
+                try
+                {
+                    SettingsStore.Save(previous);
+                    await ApplySettingsAsync(previous);
+                    _settings = previous;
+                }
+                catch (Exception recoveryException)
+                {
+                    Log.Error("Could not restore the previous settings after a reconfiguration failure.", recoveryException);
+                }
+            }
+            throw;
+        }
+        finally
+        {
+            _reconfigurationInProgress = false;
+            if (!_shutdownScheduled)
+            {
+                _uploadToDiscordItem.Checked = _settings.UploadToDiscord;
+                _uploadToDiscordItem.Enabled = _settings.IsValid;
+            }
+        }
+    }
+
+    private async Task ApplySettingsAsync(AppSettings settings)
+    {
+        var previousController = _controller;
+        _controller = null;
+        if (previousController is not null)
+        {
+            SetStatus("Applying settings — stopping current watcher");
+            await previousController.StopAsync();
+        }
+
+        if (_shutdownScheduled) return;
+        StartController(settings);
+    }
+
+    private void RequestExit()
+    {
+        _shutdownScheduled = true;
+        ExitThread();
+    }
+
+    private void StartController(AppSettings settings)
+    {
         StartupManager.Apply(settings.StartWithWindows);
         if (settings.UploadToDiscord)
         {
@@ -145,7 +210,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         StartUpdateChecks();
     }
 
-    private void ToggleUploadModeFromTray()
+    private async void ToggleUploadModeFromTray()
     {
         var previousSettings = _settings;
         var updated = previousSettings with { UploadToDiscord = _uploadToDiscordItem.Checked };
@@ -163,9 +228,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         try
         {
-            SettingsStore.Save(updated);
-            ApplySettings(updated);
-            _settings = updated;
+            await PersistAndApplySettingsAsync(updated);
+            if (_shutdownScheduled) return;
             _trayIcon.ShowBalloonTip(
                 2500,
                 "ClipCord",
@@ -176,16 +240,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         catch (Exception exception)
         {
-            _uploadToDiscordItem.Checked = previousSettings.UploadToDiscord;
-            try
-            {
-                SettingsStore.Save(previousSettings);
-                ApplySettings(previousSettings);
-            }
-            catch (Exception recoveryException)
-            {
-                Log.Error("Could not restore the previous clip upload mode after a mode-change failure.", recoveryException);
-            }
+            _uploadToDiscordItem.Checked = _settings.UploadToDiscord;
             Log.Error("Could not change the clip upload mode.", exception);
             MessageBox.Show(
                 "ClipCord could not save the upload-mode setting.",
@@ -400,6 +455,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        _shutdownScheduled = true;
         Application.Idle -= CheckForUpdatesOnIdle;
         _updateTimer.Stop();
         _updateTimer.Dispose();

@@ -217,6 +217,9 @@ internal sealed class WatchState
     public string ClipsFolder { get; set; } = string.Empty;
     public HashSet<string> KnownContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> UploadedContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    // This subset records why known content must remain local. KnownContentHashes is the
+    // enforcement guard; this separate set preserves the routing history for migration,
+    // recovery, diagnostics, and future activity UI without ever implying an upload.
     public HashSet<string> LocalOnlyContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> IgnoredFileKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> PendingMoves { get; set; } = new(StringComparer.OrdinalIgnoreCase);

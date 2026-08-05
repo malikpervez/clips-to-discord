@@ -8,6 +8,8 @@ All notable user-facing changes are documented here.
 - Added local-only mode, which makes no Discord upload request and organizes newly detected clips under case-insensitive `local-only\<game name>` folders.
 - Persist local-only content hashes and pending moves separately from confirmed uploads so restarts preserve the original routing decision and never turn withheld clips into uploads.
 - Allow local-only setup without a webhook while continuing to require a valid Discord webhook before uploads can be enabled.
+- Wait for the existing watcher to finish cancellation and cleanup before a Settings or tray-mode change starts its replacement, preventing overlapping workers from overwriting each other's state.
+- Keep the full **Local only** status and neighboring Settings text visible at 150% Windows display scaling.
 
 ## 1.5.0 — 2026-08-05
 

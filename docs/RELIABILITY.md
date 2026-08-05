@@ -20,6 +20,8 @@ Failed uploads retain the existing five-minute retry delay. Cancellation caused 
 
 Discord must be absent for three consecutive two-second polls before the worker is cancelled. The controller records that exit reason instead of polling again, so a quick updater relaunch cannot strand it awaiting a still-running worker. Each linked cancellation source remains alive until its worker task has been observed. Application exit waits up to ten seconds on the UI thread; if cleanup takes longer, it remains observed in the background rather than hanging the tray application.
 
+Settings changes and tray upload-mode changes use a stricter handoff than application exit: the app disables another reconfiguration, cancels the current controller, awaits its complete watcher cleanup without the exit timeout, and only then constructs the replacement. This prevents independent workers from saving stale copies of the same watch state. If applying the new configuration fails, ClipCord attempts to restore both the previous persisted settings and controller before reporting the error.
+
 The scanner and both clip consumers share mutable watch state. Every runtime collection read, mutation, enumeration, and save is serialized through the same semaphore. Baseline construction happens before the consumers start.
 
 ## Successful-upload ordering

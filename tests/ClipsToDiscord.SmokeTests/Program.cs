@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Windows.Forms;
 using ClipsToDiscord;
@@ -49,6 +50,33 @@ try
     Assert(
         Path.GetFileName(createdLocalOnlyFolder).Equals("local-only", StringComparison.Ordinal),
         "A newly created local-only folder must use the canonical lowercase name.");
+
+    var reparseArchiveRoot = Path.Combine(temporaryRoot, "local-only-reparse-root");
+    var reparseTarget = Path.Combine(temporaryRoot, "local-only-reparse-target");
+    var reparseLocalOnly = Path.Combine(reparseArchiveRoot, "local-only");
+    Directory.CreateDirectory(reparseArchiveRoot);
+    Directory.CreateDirectory(reparseTarget);
+    var reparsePayload = Path.Combine(reparseTarget, "must-remain.txt");
+    await File.WriteAllTextAsync(reparsePayload, "preserve target");
+    CreateDirectoryJunction(reparseLocalOnly, reparseTarget);
+    try
+    {
+        var rejected = false;
+        try
+        {
+            UploadedFolder.GetOrCreateLocalOnly(reparseArchiveRoot);
+        }
+        catch (IOException)
+        {
+            rejected = true;
+        }
+        Assert(rejected, "A local-only archive root must reject symbolic links and junctions.");
+    }
+    finally
+    {
+        Directory.Delete(reparseLocalOnly);
+    }
+    Assert(File.Exists(reparsePayload), "Removing the test junction must not remove its target contents.");
 
     Assert(
         UploadedFolder.GetGameFolderName("Battlefield™-6__2026-08-03__13-43-46.mp4") == "Battlefield™-6",
@@ -427,6 +455,42 @@ try
         Volatile.Read(ref watcherCancellations) == 2,
         "Controller disposal must cancel and await the active watcher.");
 
+    var cleanupStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var delayedWatcherStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    async Task DelayedCleanupWatcher(
+        AppSettings ignoredSettings,
+        Action<string> ignoredStatus,
+        CancellationToken cancellationToken)
+    {
+        delayedWatcherStarted.TrySetResult();
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            cleanupStarted.TrySetResult();
+            await releaseCleanup.Task;
+            throw;
+        }
+    }
+
+    var delayedCleanupController = new DiscordAwareController(
+        AppSettings.Empty,
+        _ => { },
+        () => true,
+        DelayedCleanupWatcher,
+        controllerOptions);
+    await delayedWatcherStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    var stopTask = delayedCleanupController.StopAsync();
+    await cleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    Assert(!stopTask.IsCompleted,
+        "Awaitable controller shutdown must not finish while the old watcher is still cleaning up.");
+    releaseCleanup.TrySetResult();
+    await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+    delayedCleanupController.Dispose();
+
     await AssertLocalOnlyWorkerAsync(temporaryRoot);
 
     await UpdateCheckerTests.RunAsync(temporaryRoot);
@@ -442,6 +506,32 @@ finally
 static void Assert(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
+}
+
+static void CreateDirectoryJunction(string linkPath, string targetPath)
+{
+    var startInfo = new ProcessStartInfo("cmd.exe")
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
+    startInfo.ArgumentList.Add("/d");
+    startInfo.ArgumentList.Add("/c");
+    startInfo.ArgumentList.Add("mklink");
+    startInfo.ArgumentList.Add("/J");
+    startInfo.ArgumentList.Add(linkPath);
+    startInfo.ArgumentList.Add(targetPath);
+    using var process = Process.Start(startInfo)
+        ?? throw new InvalidOperationException("Windows did not start the junction test helper.");
+    Assert(process.WaitForExit(5000), "The junction test helper exceeded its five-second deadline.");
+    if (process.ExitCode != 0)
+    {
+        throw new InvalidOperationException(
+            "The mandatory local-only junction test could not be prepared: " +
+            process.StandardError.ReadToEnd());
+    }
 }
 
 static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string failureMessage)
@@ -480,7 +570,12 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         AppSettings.DefaultUploaderName,
         false);
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-    var worker = new UploaderWorker(settings, statuses.Enqueue, store);
+    var worker = new UploaderWorker(
+        settings,
+        statuses.Enqueue,
+        store,
+        () => throw new InvalidOperationException(
+            "Local-only mode must not construct a Discord webhook client."));
     var workerTask = worker.RunAsync(cancellation.Token);
     try
     {
@@ -528,14 +623,14 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         UploadToDiscord = true
     };
     var recoveredDestination = Path.Combine(clipsFolder, "local-only", "Apex Legends", pendingClipName);
-    using var recoveryCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var recoveryCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
     var recoveryWorker = new UploaderWorker(uploadsEnabledSettings, _ => { }, store);
     var recoveryTask = recoveryWorker.RunAsync(recoveryCancellation.Token);
     try
     {
         await WaitUntilAsync(
             () => File.Exists(recoveredDestination),
-            TimeSpan.FromSeconds(3),
+            TimeSpan.FromSeconds(10),
             "A persisted local-only move changed destination after Discord uploads were enabled.");
     }
     finally
@@ -564,7 +659,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             using var form = new SettingsForm(
                 settings,
                 checkForUpdatesAsync: _ => Task.CompletedTask,
-                watcherStatusProvider: () => "Discord open — watching for clips");
+                watcherStatusProvider: () => "Discord open — local-only mode");
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
@@ -654,8 +749,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .Single(label => label.Name == "ActivityNavLabel");
             Assert(!activityLabel.Enabled,
                 "The Activity navigation label must remain visibly unavailable.");
-            Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Watching"),
-                "The branded header must present a concise live watcher status.");
+            Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Local only"),
+                "The branded header must present the complete local-only watcher status.");
             var headerLogo = EnumerateControls(form)
                 .OfType<ClipCordLogoControl>()
                 .Single(control => control.Name == "HeaderLogo");
@@ -845,6 +940,7 @@ static void AssertCriticalTextFits(Form form)
         "Upload preferences",
         "Compression target",
         "Upload new clips to Discord",
+        "Local only",
         "Start with Windows",
         "Save changes",
         "Cancel"

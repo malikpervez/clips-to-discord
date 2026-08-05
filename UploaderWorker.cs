@@ -6,7 +6,8 @@ namespace ClipsToDiscord;
 internal sealed class UploaderWorker(
     AppSettings settings,
     Action<string> reportStatus,
-    WatchStateStore? stateStore = null)
+    WatchStateStore? stateStore = null,
+    Func<DiscordWebhookClient>? discordClientFactory = null)
 {
     private const int UploadWorkerCount = 2;
     private readonly WatchStateStore _stateStore = stateStore ?? new WatchStateStore();
@@ -26,7 +27,9 @@ internal sealed class UploaderWorker(
             settings.ClipsFolder,
             reportStatus,
             cancellationToken);
-        using var discord = settings.UploadToDiscord ? new DiscordWebhookClient() : null;
+        using var discord = settings.UploadToDiscord
+            ? (discordClientFactory ?? (() => new DiscordWebhookClient()))()
+            : null;
         var queue = Channel.CreateBounded<QueuedClip>(new BoundedChannelOptions(50)
         {
             SingleWriter = true,
@@ -200,6 +203,11 @@ internal sealed class UploaderWorker(
                 _stateGate.Release();
             }
 
+            // Initial top-level baseline files are filtered by IgnoredFileKeys before they
+            // reach the queue. In local-only mode, any path that does reach this point is a
+            // newly observed file and is deliberately organized locally even if its bytes
+            // duplicate a known clip. Upload mode remains conservative and leaves known,
+            // never-uploaded content in place.
             if (settings.UploadToDiscord && alreadyKnown && !previouslyUploaded)
             {
                 await _stateGate.WaitAsync(cancellationToken);

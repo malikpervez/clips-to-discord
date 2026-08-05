@@ -8,6 +8,7 @@ internal sealed class DiscordAwareController : IDisposable
     private readonly DiscordControllerOptions _options;
     private readonly Task _loop;
     private int _disposeStarted;
+    private int _cleanupStarted;
 
     public DiscordAwareController(AppSettings settings, Action<string> reportStatus)
         : this(
@@ -161,6 +162,31 @@ internal sealed class DiscordAwareController : IDisposable
             TaskScheduler.Default);
     }
 
+    internal async Task StopAsync()
+    {
+        if (Interlocked.Exchange(ref _disposeStarted, 1) == 0)
+        {
+            _shutdown.Cancel();
+        }
+
+        try
+        {
+            await _loop.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected controller shutdown.
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Discord controller stopped with an error during reconfiguration.", exception);
+        }
+        finally
+        {
+            DisposeTokenOnce();
+        }
+    }
+
     private void ObserveLoopAndDisposeToken()
     {
         try
@@ -176,6 +202,14 @@ internal sealed class DiscordAwareController : IDisposable
             Log.Error("Discord controller stopped with an error during shutdown.", exception);
         }
         finally
+        {
+            DisposeTokenOnce();
+        }
+    }
+
+    private void DisposeTokenOnce()
+    {
+        if (Interlocked.Exchange(ref _cleanupStarted, 1) == 0)
         {
             _shutdown.Dispose();
         }

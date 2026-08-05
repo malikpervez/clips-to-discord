@@ -91,7 +91,7 @@ internal sealed class SettingsForm : Form
     };
     private readonly OutlineButton _browseButton = CreateSecondaryButton("Browse", 112);
     private readonly OutlineButton _testButton = CreateSecondaryButton("Test webhook", 130);
-    private readonly OutlineButton _checkUpdatesButton = CreateSecondaryButton("Check for updates", 154);
+    private readonly OutlineButton _checkUpdatesButton = CreateSecondaryButton("Check for updates", 166);
     private readonly GradientButton _saveButton = new()
     {
         Text = "Save changes",
@@ -226,7 +226,7 @@ internal sealed class SettingsForm : Form
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
@@ -551,7 +551,7 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(CreateFieldHost(_uploaderNameText), 1, 1);
         layout.Controls.Add(CreateInlineFieldLabel("Webhook URL"), 0, 3);
         layout.Controls.Add(CreateFieldRow(CreateFieldHost(_webhookText), _testButton), 1, 3);
-        layout.Controls.Add(CreateHelper("Encrypted for your Windows account."), 1, 4);
+        layout.Controls.Add(CreateHelper("Encrypted for this Windows user."), 1, 4);
         return CreateCard(BrandGlyph.Destination, "Discord destination settings", layout, new Padding(0, 0, 0, 12));
     }
 
