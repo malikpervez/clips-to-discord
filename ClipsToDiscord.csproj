@@ -21,5 +21,6 @@
 
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
+    <EmbeddedResource Include="assets\app-icon.png" LogicalName="ClipsToDiscord.Assets.AppIcon.png" />
   </ItemGroup>
 </Project>
