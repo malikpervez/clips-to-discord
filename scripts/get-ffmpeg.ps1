@@ -68,11 +68,28 @@ if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
 else {
     $partialPath = "$archivePath.$([Guid]::NewGuid().ToString('N')).download"
     try {
-        Invoke-WebRequest `
-            -Uri $downloadUrl `
-            -OutFile $partialPath `
-            -MaximumRedirection 5 `
-            -UseBasicParsing
+        $maximumAttempts = 4
+        for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+            try {
+                Invoke-WebRequest `
+                    -Uri $downloadUrl `
+                    -OutFile $partialPath `
+                    -MaximumRedirection 5 `
+                    -UseBasicParsing
+                break
+            }
+            catch {
+                if ($attempt -eq $maximumAttempts) {
+                    throw
+                }
+                if (Test-Path -LiteralPath $partialPath) {
+                    Remove-Item -LiteralPath $partialPath -Force
+                }
+                $delaySeconds = 10 * [Math]::Pow(2, $attempt - 1)
+                Write-Warning "FFmpeg download attempt $attempt of $maximumAttempts failed. Retrying in $delaySeconds seconds."
+                Start-Sleep -Seconds $delaySeconds
+            }
+        }
         Assert-FileHash -Path $partialPath -ExpectedSha256 $expectedArchiveSha256 -Label 'Downloaded FFmpeg archive'
         Move-Item -LiteralPath $partialPath -Destination $archivePath
     }
