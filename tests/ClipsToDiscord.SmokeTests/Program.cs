@@ -666,6 +666,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.Show();
             Application.DoEvents();
             AssertControlsFit(form);
+            AssertSettingsCardsOpenWithoutScrolling(form);
             AssertCriticalTextFits(form);
             AssertAccessibility(form);
             AssertOpaqueCustomControlsPaintEveryPixel(form);
@@ -897,6 +898,15 @@ static void AssertControlsFit(Form form)
                 $"Control {control.GetType().Name} '{control.Name}' ('{control.Text}') is clipped at {bounds} inside {form.ClientSize}; parent={control.Parent?.GetType().Name} '{control.Parent?.Name}' bounds={control.Parent?.Bounds}.");
         }
     }
+}
+
+static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
+{
+    var cards = EnumerateControls(form)
+        .OfType<ScrollableControl>()
+        .Single(control => control.AutoScroll);
+    Assert(!cards.VerticalScroll.Visible && cards.AutoScrollPosition.Y == 0,
+        $"Settings must open with every card visible without scrolling; viewport={cards.ClientSize}, display={cards.DisplayRectangle}.");
 }
 
 static void AssertSettingsRoundTrip(AppSettings original)

@@ -141,7 +141,7 @@ internal sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.None;
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(1080, 780);
+        ClientSize = new Size(1080, 820);
         MinimumSize = new Size(900, 650);
         BackColor = ClipCordTheme.Header;
         Padding = new Padding(ResizeGrip);
