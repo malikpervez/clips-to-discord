@@ -14,7 +14,7 @@ Official references:
 
 1. Open **Server Settings → Integrations → Webhooks**.
 2. Create a new webhook.
-3. Give it a recognizable name such as `Clips to Discord`.
+3. Give it a recognizable name such as `ClipCord`.
 4. Select the text channel that should receive clips.
 5. Copy the webhook URL and paste it directly into the app.
 

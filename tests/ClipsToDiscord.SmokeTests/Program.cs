@@ -372,6 +372,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
         {
             using var form = new SettingsForm(settings, checkForUpdatesAsync: _ => Task.CompletedTask);
             form.CreateControl();
+            Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
             form.Size = form.MinimumSize;
             form.PerformLayout();
@@ -392,6 +393,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             using var updateDialog = new UpdateAvailableDialog(
                 UpdateCheckerTests.CreateRelease(new StableVersion(2, 0, 0)));
             updateDialog.CreateControl();
+            Assert(updateDialog.Text == "ClipCord — Update available",
+                "The update window must use the ClipCord brand.");
             AssertControlsFit(updateDialog);
             var updateActions = EnumerateControls(updateDialog)
                 .OfType<Button>()

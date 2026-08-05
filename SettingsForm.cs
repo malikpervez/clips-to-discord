@@ -33,7 +33,7 @@ internal sealed class SettingsForm : Form
         Icon? applicationIcon = null,
         Func<IWin32Window, Task>? checkForUpdatesAsync = null)
     {
-        Text = "Clips to Discord — Settings";
+        Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
         _checkForUpdatesAsync = checkForUpdatesAsync;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;

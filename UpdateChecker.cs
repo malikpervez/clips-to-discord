@@ -89,7 +89,7 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
 {
     internal const string Owner = "malikpervez";
     internal const string Repository = "clips-to-discord";
-    internal const string InstallerFileName = "ClipsToDiscord-Setup.exe";
+    internal const string InstallerFileName = "ClipCord-Setup.exe";
     internal const string ChecksumsFileName = "SHA256SUMS.txt";
     internal static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(12);
     internal static readonly Uri LatestReleaseApiUri = new(
@@ -309,7 +309,7 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
     private static HttpRequestMessage CreateRequest(Uri uri, bool acceptJson)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.UserAgent.ParseAdd("ClipsToDiscord-UpdateChecker");
+        request.Headers.UserAgent.ParseAdd("ClipCord-UpdateChecker");
         if (acceptJson)
         {
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
@@ -420,7 +420,7 @@ internal sealed partial class GitHubUpdateChecker : IUpdateChecker
     [GeneratedRegex(@"^sha256:(?<hash>[a-f0-9]{64})\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Sha256DigestPattern();
 
-    [GeneratedRegex(@"^\uFEFF?(?<hash>[a-f0-9]{64})[ \t]+\*?ClipsToDiscord-Setup\.exe[ \t]*\r?$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^\uFEFF?(?<hash>[a-f0-9]{64})[ \t]+\*?ClipCord-Setup\.exe[ \t]*\r?$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex InstallerChecksumPattern();
 
     private sealed class GitHubReleaseDto

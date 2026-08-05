@@ -5,18 +5,18 @@ using ClipsToDiscord;
 
 internal static class UpdateCheckerTests
 {
-    private static readonly StableVersion InstalledVersion = new(1, 3, 6);
+    private static readonly StableVersion InstalledVersion = new(1, 3, 7);
     private const string ValidDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     public static async Task RunAsync(string temporaryRoot)
     {
-        Assert(StableVersion.TryParse("v1.3.6", out var parsedVersion) && parsedVersion == InstalledVersion,
+        Assert(StableVersion.TryParse("v1.3.7", out var parsedVersion) && parsedVersion == InstalledVersion,
             "Stable versions must accept the repository's v-prefixed release tags.");
-        Assert(!StableVersion.TryParse("v1.3.6-beta.1", out _),
+        Assert(!StableVersion.TryParse("v1.3.7-beta.1", out _),
             "Prerelease suffixes must not parse as stable versions.");
-        Assert(!StableVersion.TryParse("v01.3.6", out _),
+        Assert(!StableVersion.TryParse("v01.3.7", out _),
             "Non-canonical leading zeroes must be rejected.");
-        Assert(StableVersion.FromAssemblyVersion(new Version(1, 3, 6, 0)) == InstalledVersion,
+        Assert(StableVersion.FromAssemblyVersion(new Version(1, 3, 7, 0)) == InstalledVersion,
             "Assembly versions must compare using their major, minor, and build components.");
 
         var observedUris = new List<Uri>();
@@ -47,9 +47,9 @@ internal static class UpdateCheckerTests
             "Draft releases must be ignored.");
         await AssertStatusAsync(BuildReleaseJson(prerelease: true), UpdateCheckStatus.UpToDate,
             "Prereleases must be ignored in stable mode.");
-        await AssertStatusAsync(BuildReleaseJson(tag: "v1.3.6"), UpdateCheckStatus.UpToDate,
+        await AssertStatusAsync(BuildReleaseJson(tag: "v1.3.7"), UpdateCheckStatus.UpToDate,
             "The installed release must not be offered again.");
-        await AssertStatusAsync(BuildReleaseJson(tag: "v1.3.5"), UpdateCheckStatus.UpToDate,
+        await AssertStatusAsync(BuildReleaseJson(tag: "v1.3.6"), UpdateCheckStatus.UpToDate,
             "An older release must never be offered as a downgrade.");
         await AssertStatusAsync(BuildReleaseJson(tag: "v2.0.0-beta.1"), UpdateCheckStatus.InvalidRelease,
             "A prerelease-shaped tag with a false prerelease flag must still be rejected.");
@@ -72,11 +72,11 @@ internal static class UpdateCheckerTests
         await AssertStatusAsync(BuildReleaseJson(digest: "sha256:not-a-hash"), UpdateCheckStatus.InvalidRelease,
             "An installer without a digest or checksum fallback must be rejected.");
         await AssertStatusAsync(
-            BuildReleaseJson(installerUrl: "https://example.com/ClipsToDiscord-Setup.exe"),
+            BuildReleaseJson(installerUrl: "https://example.com/ClipCord-Setup.exe"),
             UpdateCheckStatus.InvalidRelease,
             "An installer URL outside the official repository must be rejected.");
         await AssertStatusAsync(
-            BuildReleaseJson(installerUrl: "http://github.com/malikpervez/clips-to-discord/releases/download/v2.0.0/ClipsToDiscord-Setup.exe"),
+            BuildReleaseJson(installerUrl: "http://github.com/malikpervez/clips-to-discord/releases/download/v2.0.0/ClipCord-Setup.exe"),
             UpdateCheckStatus.InvalidRelease,
             "A non-HTTPS installer URL must be rejected.");
 
@@ -85,7 +85,7 @@ internal static class UpdateCheckerTests
         using (var checker = CreateChecker(
                    checksumJson,
                    _ => checksumRequests++,
-                   $"{ValidDigest.ToUpperInvariant()}  ClipsToDiscord-Setup.exe\r\n"))
+                   $"{ValidDigest.ToUpperInvariant()}  ClipCord-Setup.exe\r\n"))
         {
             var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
             Assert(result.Status == UpdateCheckStatus.UpdateAvailable &&
@@ -96,7 +96,7 @@ internal static class UpdateCheckerTests
 
         using (var checker = CreateChecker(
                    checksumJson,
-                   checksumContent: $"\uFEFF{ValidDigest}  ClipsToDiscord-Setup.exe\r\n"))
+                   checksumContent: $"\uFEFF{ValidDigest}  ClipCord-Setup.exe\r\n"))
         {
             var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
             Assert(result.Status == UpdateCheckStatus.UpdateAvailable &&
@@ -107,7 +107,7 @@ internal static class UpdateCheckerTests
         using (var checker = CreateChecker(
                    checksumJson,
                    checksumContent:
-                       $"{ValidDigest}  ClipsToDiscord-Setup.exe\r\n{new string('f', 64)}  ClipsToDiscord-Setup.exe\r\n"))
+                       $"{ValidDigest}  ClipCord-Setup.exe\r\n{new string('f', 64)}  ClipCord-Setup.exe\r\n"))
         {
             var result = await checker.CheckAsync(InstalledVersion, CancellationToken.None);
             Assert(result.Status == UpdateCheckStatus.InvalidRelease,
@@ -199,7 +199,7 @@ internal static class UpdateCheckerTests
                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                    {
                        Content = new StringContent(
-                           $"{ValidDigest}  ClipsToDiscord-Setup.exe\r\n",
+                           $"{ValidDigest}  ClipCord-Setup.exe\r\n",
                            Encoding.UTF8,
                            "text/plain")
                    });
@@ -491,13 +491,13 @@ internal static class UpdateCheckerTests
     {
         htmlUrl ??= $"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}";
         installerUrl ??=
-            $"https://github.com/malikpervez/clips-to-discord/releases/download/{tag}/ClipsToDiscord-Setup.exe";
+            $"https://github.com/malikpervez/clips-to-discord/releases/download/{tag}/ClipCord-Setup.exe";
         var assets = new List<Dictionary<string, object?>>();
         if (includeInstaller)
         {
             var installer = new Dictionary<string, object?>
             {
-                ["name"] = "ClipsToDiscord-Setup.exe",
+                ["name"] = "ClipCord-Setup.exe",
                 ["state"] = "uploaded",
                 ["size"] = 123456,
                 ["digest"] = digest,
@@ -538,7 +538,7 @@ internal static class UpdateCheckerTests
             version,
             tag,
             new Uri($"https://github.com/malikpervez/clips-to-discord/releases/tag/{tag}"),
-            new Uri($"https://github.com/malikpervez/clips-to-discord/releases/download/{tag}/ClipsToDiscord-Setup.exe"),
+            new Uri($"https://github.com/malikpervez/clips-to-discord/releases/download/{tag}/ClipCord-Setup.exe"),
             ValidDigest);
     }
 

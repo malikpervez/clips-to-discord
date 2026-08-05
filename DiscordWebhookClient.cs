@@ -32,7 +32,7 @@ internal sealed class DiscordWebhookClient : IDisposable
     {
         var payload = JsonSerializer.Serialize(new
         {
-            content = $"**Clips to Discord connected.** Future clips from {DiscordClipMessage.EscapeMarkdown(AppSettings.NormalizeUploaderName(uploaderName))} will appear here automatically.",
+            content = $"**ClipCord connected.** Future clips from {DiscordClipMessage.EscapeMarkdown(AppSettings.NormalizeUploaderName(uploaderName))} will appear here automatically.",
             allowed_mentions = new { parse = Array.Empty<string>() }
         });
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");

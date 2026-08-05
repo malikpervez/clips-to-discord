@@ -47,7 +47,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _trayIcon = new NotifyIcon
         {
             Icon = _applicationIcon,
-            Text = "Clips to Discord",
+            Text = "ClipCord",
             ContextMenuStrip = menu,
             Visible = true
         };
@@ -87,7 +87,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 ApplySettings(_settings);
                 _trayIcon.ShowBalloonTip(
                     2500,
-                    "Clips to Discord",
+                    "ClipCord",
                     "Settings saved. The clip watcher follows Discord automatically.",
                     ToolTipIcon.Info);
             }

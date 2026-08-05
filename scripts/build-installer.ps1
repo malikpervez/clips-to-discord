@@ -21,7 +21,7 @@ if (($applicationIconItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -n
 }
 
 if (-not $PackageDirectory) {
-    $PackageDirectory = Join-Path $artifactsDirectory 'ClipsToDiscord-win-x64'
+    $PackageDirectory = Join-Path $artifactsDirectory 'ClipCord-win-x64'
 }
 if (-not $OutputDirectory) {
     $OutputDirectory = $artifactsDirectory
@@ -86,7 +86,7 @@ if ($RequireFfmpeg -and -not $hasFfmpeg) {
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
 $resolvedPackage = $PackageDirectory
 $resolvedOutput = [IO.Path]::GetFullPath($OutputDirectory)
-$setupPath = Join-Path $resolvedOutput 'ClipsToDiscord-Setup.exe'
+$setupPath = Join-Path $resolvedOutput 'ClipCord-Setup.exe'
 if (Test-Path -LiteralPath $setupPath) {
     Remove-Item -LiteralPath $setupPath -Force
 }

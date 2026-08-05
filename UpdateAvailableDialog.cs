@@ -16,7 +16,7 @@ internal sealed class UpdateAvailableDialog : Form
 
     public UpdateAvailableDialog(UpdateRelease release, Icon? applicationIcon = null)
     {
-        Text = "Clips to Discord — Update available";
+        Text = "ClipCord — Update available";
         _ownedApplicationIcon = applicationIcon;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
         StartPosition = FormStartPosition.CenterParent;
@@ -29,7 +29,7 @@ internal sealed class UpdateAvailableDialog : Form
 
         var title = new Label
         {
-            Text = $"Clips to Discord {release.Version} is available",
+            Text = $"ClipCord {release.Version} is available",
             AutoSize = true,
             Font = new Font(Font, FontStyle.Bold),
             Margin = new Padding(0, 0, 0, 10)

@@ -1,6 +1,6 @@
 # Architecture
 
-Clips to Discord is a self-contained .NET 8 Windows Forms tray application. It is independent of the software that creates the clip; the input contract is a completed top-level `.mp4` file in the configured folder.
+ClipCord is a self-contained .NET 8 Windows Forms tray application. It is independent of the software that creates the clip; the input contract is a completed top-level `.mp4` file in the configured folder.
 
 ```mermaid
 flowchart LR
@@ -64,4 +64,4 @@ See [RELIABILITY.md](RELIABILITY.md) for the exact-once limitation and migration
 
 `scripts/get-ffmpeg.ps1` downloads one pinned, versioned FFmpeg archive and validates the archive, executable, and license SHA-256 values. `scripts/package.ps1` publishes a single-file, self-contained `win-x64` executable and bundles FFmpeg only together with its license. `scripts/build-installer.ps1` accepts exactly `ClipsToDiscord.exe`, `README.txt`, and the FFmpeg/license pair for releases; directories, reparse points, settings, state, logs, and every other item fail the build. The Inno script names those four sources explicitly rather than using a recursive wildcard. After all installer tests pass on `main`, CI uploads the exact installer, portable ZIP, and checksum manifest as a release-candidate artifact.
 
-The installer targets `%LOCALAPPDATA%\Programs\ClipsToDiscord`; the ZIP remains the portable option. `scripts/get-inno-setup.ps1` pins the official installer SHA-256, uses a temporary download, and validates a deterministic SHA-256 identity over all 132 compiler-tree files before every cached use and after extraction. Build outputs and third-party binaries are excluded from Git.
+The installer retains the existing AppId and targets `%LOCALAPPDATA%\Programs\ClipsToDiscord` so ClipCord upgrades the earlier Clips to Discord installation in place. The executable, application-data path, startup value, and mutex also retain their internal names to avoid duplicate installations, lost state, or simultaneous old/new processes. The ZIP remains the portable option. `scripts/get-inno-setup.ps1` pins the official installer SHA-256, uses a temporary download, and validates a deterministic SHA-256 identity over all 132 compiler-tree files before every cached use and after extraction. Build outputs and third-party binaries are excluded from Git.

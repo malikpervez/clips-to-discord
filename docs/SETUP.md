@@ -12,14 +12,14 @@ The release is self-contained. Friends do not need ChatGPT, PowerShell, .NET, or
 ## 1. Install the app
 
 1. Open the repository's [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
-2. Download `ClipsToDiscord-Setup.exe`.
+2. Download `ClipCord-Setup.exe`.
 3. Run the installer normally from Downloads, Desktop, or any other location. Do not choose **Run as administrator**.
 4. Select **Install**. Administrator permission is not required.
-5. Leave **Launch Clips to Discord** selected when setup completes.
+5. Leave **Launch ClipCord** selected when setup completes.
 
 The installer copies the application to `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates a Start Menu shortcut and an Add/Remove Programs entry, and optionally creates a desktop shortcut. Running it as another administrator account would install into that account's profile instead of yours. The downloaded setup file can be deleted after installation.
 
-The portable `ClipsToDiscord-win-x64.zip` remains available. Portable users must extract every file together and keep the extracted folder in place while **Start with Windows** is enabled.
+The portable `ClipCord-win-x64.zip` remains available. Portable users must extract every file together and keep the extracted folder in place while **Start with Windows** is enabled.
 
 The release is not code-signed. Windows SmartScreen may display an unrecognized-app warning. Verify that the download came from this repository's Releases page before choosing **More info → Run anyway**.
 
@@ -27,7 +27,7 @@ The release is not code-signed. Windows SmartScreen may display an unrecognized-
 
 Open the settings for your clipping or recording tool and find its save, export, recordings, highlights, or replay folder. If the location is unclear, create a short test clip and use File Explorer to find the resulting `.mp4`.
 
-Select the folder that directly receives new MP4 files. Do not select the `uploaded` subfolder that Clips to Discord creates.
+Select the folder that directly receives new MP4 files. Do not select the `uploaded` subfolder that ClipCord creates.
 
 The app watches only the top level of the selected directory. It does not scan nested folders, and it ignores formats other than `.mp4`.
 
@@ -36,7 +36,7 @@ The app watches only the top level of the selected directory. It does not scan n
 1. In Discord, open the destination server's **Server Settings**.
 2. Open **Integrations**, then **Webhooks**.
 3. Create a webhook, choose the channel that should receive clips, and copy its URL.
-4. Paste the URL into Clips to Discord.
+4. Paste the URL into ClipCord.
 5. Enter the uploader name that should appear with your clips. When friends share one webhook, each person should enter their own Discord display name.
 6. Select **Test webhook** and confirm the test message appears in the channel with the expected name.
 
@@ -67,11 +67,11 @@ Discord documents a default 10 MiB per-file limit, with potentially higher limit
 
 ## Updating from version 1.0
 
-Exit the old app from its notification-area menu, download the current `ClipsToDiscord-Setup.exe`, and run it. The installed app copies compatible settings and upload state from `%LOCALAPPDATA%\MomentsToDiscord` into `%LOCALAPPDATA%\ClipsToDiscord` when the new location is empty.
+Exit the old app from its notification-area menu, download the current `ClipCord-Setup.exe`, and run it. The installed app copies compatible settings and upload state from `%LOCALAPPDATA%\MomentsToDiscord` into `%LOCALAPPDATA%\ClipsToDiscord` when the new location is empty.
 
 ## Updating later releases
 
-Exit the app from its notification-area menu and run the newer `ClipsToDiscord-Setup.exe`. It upgrades the existing per-user installation in place. Saved settings and upload state remain under `%LOCALAPPDATA%\ClipsToDiscord`.
+Exit the app from its notification-area menu and run the newer `ClipCord-Setup.exe`. It upgrades the existing per-user installation in place, including installations previously named Clips to Discord. Saved settings and upload state remain under `%LOCALAPPDATA%\ClipsToDiscord`.
 
 The app checks the official `malikpervez/clips-to-discord` GitHub Releases API no more than once every 24 hours. Stable checks ignore drafts and prereleases and offer only a newer release containing the expected installer plus a verifiable SHA-256 digest or checksum entry. Use **Check for updates** in Settings to check immediately.
 
@@ -85,6 +85,6 @@ Portable users can exit the app, replace the extracted application files, and re
 
 ## Uninstalling
 
-Open **Settings → Apps → Installed apps**, find **Clips to Discord**, and select **Uninstall**. The uninstaller removes the application, its shortcuts, and its **Start with Windows** entry.
+Open **Settings → Apps → Installed apps**, find **ClipCord**, and select **Uninstall**. The uninstaller removes the application, its shortcuts, and its **Start with Windows** entry.
 
-Settings, logs, and upload history remain in `%LOCALAPPDATA%\ClipsToDiscord` so reinstalling does not lose the duplicate-upload protections. Delete that data directory manually only if you also want to reset the app completely.
+Settings, logs, and upload history remain in `%LOCALAPPDATA%\ClipsToDiscord` for compatibility with previous versions, so reinstalling does not lose the duplicate-upload protections. Delete that data directory manually only if you also want to reset the app completely.

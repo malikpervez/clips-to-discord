@@ -1,6 +1,6 @@
-# Clips to Discord
+# ClipCord
 
-<p align="center"><img src="assets/app-icon.png" alt="Clips to Discord lightning and film icon" width="112"></p>
+<p align="center"><img src="assets/app-icon.png" alt="ClipCord lightning and film icon" width="112"></p>
 
 [![Build and test](https://github.com/malikpervez/clips-to-discord/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/malikpervez/clips-to-discord/actions/workflows/build-and-test.yml)
 
@@ -27,11 +27,11 @@ A Windows tray app that uploads new MP4 clips from any chosen folder to a Discor
 - Can start automatically when the user signs into Windows.
 - Uses one recognizable icon across the system tray, executable, shortcuts, and installer.
 
-The app is not affiliated with Discord or any recording-software vendor.
+ClipCord is not affiliated with Discord or any recording-software vendor.
 
 ## Quick setup (recommended installer)
 
-1. Download `ClipsToDiscord-Setup.exe` from the [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
+1. Download `ClipCord-Setup.exe` from the [latest release](https://github.com/malikpervez/clips-to-discord/releases/latest).
 2. Run the installer normally from Downloads, Desktop, or anywhere else. Do not use **Run as administrator**.
 3. The installer places the app under `%LOCALAPPDATA%\Programs\ClipsToDiscord`, creates Start Menu and uninstall entries, and launches the installed copy.
 4. Select the folder where your clipping or recording tool saves finished MP4 clips.
@@ -48,7 +48,7 @@ See the [complete setup guide](docs/SETUP.md) for folder-selection and webhook i
 
 ### Portable ZIP
 
-`ClipsToDiscord-win-x64.zip` remains available for users who prefer a portable copy. Extract all files together and keep that folder in place if **Start with Windows** is enabled.
+`ClipCord-win-x64.zip` remains available for users who prefer a portable copy. Extract all files together and keep that folder in place if **Start with Windows** is enabled.
 
 ## Documentation
 
@@ -114,7 +114,7 @@ Settings, state, and logs are stored in:
 %LOCALAPPDATA%\ClipsToDiscord
 ```
 
-Version 1.1 automatically copies compatible settings and state from the legacy `%LOCALAPPDATA%\MomentsToDiscord` folder when needed.
+ClipCord intentionally retains this internal directory so upgrades preserve settings, encrypted webhooks, and duplicate-upload history. Version 1.1 automatically copies compatible settings and state from the older `%LOCALAPPDATA%\MomentsToDiscord` folder when needed.
 
 The Windows startup entry is stored under the current user's standard `Run` registry key.
 

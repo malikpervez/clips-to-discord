@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for helping improve Clips to Discord.
+        Thanks for helping improve ClipCord.
 
         **Never paste a real Discord webhook URL.** Redact webhook IDs, tokens, Windows usernames, personal paths, and private clip names.
   - type: input

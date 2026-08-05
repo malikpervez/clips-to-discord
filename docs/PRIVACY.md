@@ -2,13 +2,13 @@
 
 ## Data flow
 
-Clips to Discord runs locally. It scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS.
+ClipCord runs locally. It scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS.
 
 The app has no analytics, advertising, account system, telemetry service, or project-operated server.
 
 ## Local data
 
-The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`:
+The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining the pre-ClipCord path so upgrades preserve settings and upload history:
 
 - The chosen clips-folder path
 - The uploader name shown with clips in Discord

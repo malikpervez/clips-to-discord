@@ -63,8 +63,8 @@ jobs:
         shell: powershell
         run: |
           .\scripts\test-icons.ps1 `
-            -ApplicationPath .\artifacts\ClipsToDiscord-win-x64\ClipsToDiscord.exe `
-            -InstallerPath .\artifacts\ClipsToDiscord-Setup.exe `
+            -ApplicationPath .\artifacts\ClipCord-win-x64\ClipsToDiscord.exe `
+            -InstallerPath .\artifacts\ClipCord-Setup.exe `
             -IconPath .\assets\ClipsToDiscord.ico
 
       - name: Reject tampered compiler cache
@@ -120,7 +120,7 @@ jobs:
       - name: Reject unexpected package files
         shell: powershell
         run: |
-          $unexpectedFile = '.\artifacts\ClipsToDiscord-win-x64\settings.json'
+          $unexpectedFile = '.\artifacts\ClipCord-win-x64\settings.json'
           Set-Content -LiteralPath $unexpectedFile -Value '{"mustNotShip":true}'
           $rejected = $false
           try {
@@ -144,18 +144,24 @@ jobs:
         shell: powershell
         run: |
           .\scripts\test-installer.ps1 `
-            -InstallerPath .\artifacts\ClipsToDiscord-Setup.exe `
+            -InstallerPath .\artifacts\ClipCord-Setup.exe `
             -PreviousInstallerPath .\artifacts\previous-installer\ClipsToDiscord-Setup.exe `
-            -ExpectedVersion 1.3.6 `
+            -ExpectedVersion 1.3.7 `
             -PreviousVersion 1.3.5
+
+      - name: Create legacy updater alias
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: powershell
+        run: Copy-Item -LiteralPath '.\artifacts\ClipCord-Setup.exe' -Destination '.\artifacts\ClipsToDiscord-Setup.exe'
 
       - name: Prepare release checksums
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: powershell
         run: |
           $lines = @(
+            'ClipCord-Setup.exe',
             'ClipsToDiscord-Setup.exe',
-            'ClipsToDiscord-win-x64.zip'
+            'ClipCord-win-x64.zip'
           ) | ForEach-Object {
             $hash = (Get-FileHash -LiteralPath (Join-Path '.\artifacts' $_) -Algorithm SHA256).Hash
             "$hash  $_"
@@ -166,10 +172,11 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: ClipsToDiscord-release-${{ github.sha }}
+          name: ClipCord-release-${{ github.sha }}
           path: |
+            artifacts/ClipCord-Setup.exe
             artifacts/ClipsToDiscord-Setup.exe
-            artifacts/ClipsToDiscord-win-x64.zip
+            artifacts/ClipCord-win-x64.zip
             artifacts/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

@@ -7,7 +7,10 @@
     <Nullable>enable</Nullable>
     <AssemblyName>ClipsToDiscord</AssemblyName>
     <RootNamespace>ClipsToDiscord</RootNamespace>
-    <Version>1.3.6</Version>
+    <Product>ClipCord</Product>
+    <AssemblyTitle>ClipCord</AssemblyTitle>
+    <Description>Automatically relay completed gaming clips to Discord.</Description>
+    <Version>1.3.7</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>assets\ClipsToDiscord.ico</ApplicationIcon>
   </PropertyGroup>

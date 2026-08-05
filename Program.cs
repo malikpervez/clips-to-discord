@@ -9,8 +9,8 @@ internal static class Program
         if (!createdNew)
         {
             MessageBox.Show(
-                "Clips to Discord is already running in the notification area.",
-                "Clips to Discord",
+                "ClipCord is already running in the notification area.",
+                "ClipCord",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
             return;
