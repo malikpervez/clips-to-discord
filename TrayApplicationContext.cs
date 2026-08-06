@@ -13,6 +13,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly UpdateCoordinator _updateCoordinator;
     private readonly IUpdateDownloadService _updateDownloadService;
+    private readonly ActivityHistoryStore _activityHistory;
     private AppSettings _settings;
     private DiscordAwareController? _controller;
     private bool _settingsOpen;
@@ -20,6 +21,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _updateDialogOpen;
     private bool _shutdownScheduled;
     private bool _reconfigurationInProgress;
+    private SettingsForm? _settingsForm;
 
     internal UpdateLaunchRequest? PendingUpdateLaunch { get; private set; }
 
@@ -28,6 +30,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _applicationIcon = LoadApplicationIcon();
         _settings = SettingsStore.Load();
+        _activityHistory = new ActivityHistoryStore();
         var assemblyVersion = typeof(TrayApplicationContext).Assembly.GetName().Version ?? new Version(0, 0, 0);
         _updateCoordinator = new UpdateCoordinator(
             GitHubUpdateChecker.Create(),
@@ -42,6 +45,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
         var configureItem = new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings());
+        var activityItem = new ToolStripMenuItem("Activity…", null, (_, _) => ShowSettings(initialPage: SettingsPage.Activity));
         var openFolderItem = new ToolStripMenuItem("Open clips folder", null, (_, _) => OpenClipsFolder());
         _uploadToDiscordItem = new ToolStripMenuItem("Upload new clips to Discord")
         {
@@ -55,6 +59,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(configureItem);
+        menu.Items.Add(activityItem);
         menu.Items.Add(openFolderItem);
         menu.Items.Add(_uploadToDiscordItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -86,9 +91,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ShowSettings(exitIfCancelled: true);
     }
 
-    private async void ShowSettings(bool exitIfCancelled = false)
+    private async void ShowSettings(
+        bool exitIfCancelled = false,
+        SettingsPage initialPage = SettingsPage.Settings)
     {
-        if (_settingsOpen) return;
+        if (_settingsOpen)
+        {
+            if (_settingsForm is { IsDisposed: false, Disposing: false } existingForm)
+            {
+                existingForm.ShowPage(initialPage);
+                existingForm.Activate();
+                if (existingForm.WindowState == FormWindowState.Minimized)
+                {
+                    existingForm.WindowState = FormWindowState.Normal;
+                }
+            }
+            return;
+        }
         _settingsOpen = true;
         try
         {
@@ -96,7 +115,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 _settings,
                 (Icon)_applicationIcon.Clone(),
                 CheckForUpdatesManuallyAsync,
-                () => _statusItem.Text ?? "Starting…");
+                () => _statusItem.Text ?? "Starting…",
+                _activityHistory,
+                initialPage);
+            _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
                 form.SavedSettings is not null &&
                 !_shutdownScheduled)
@@ -123,6 +145,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         finally
         {
+            _settingsForm = null;
             _settingsOpen = false;
         }
     }
@@ -206,7 +229,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         _uploadToDiscordItem.Checked = settings.UploadToDiscord;
         _uploadToDiscordItem.Enabled = settings.IsValid;
-        _controller = new DiscordAwareController(settings, SetStatus);
+        _controller = new DiscordAwareController(settings, SetStatus, _activityHistory);
         StartUpdateChecks();
     }
 
@@ -463,6 +486,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _controller?.Dispose();
         _updateCoordinator.Dispose();
         _updateDownloadService.Dispose();
+        _activityHistory.Dispose();
         _lifetimeCancellation.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();

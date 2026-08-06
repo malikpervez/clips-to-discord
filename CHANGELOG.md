@@ -4,6 +4,9 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- Activate the branded Activity page and add a tray shortcut for live, bounded clip history without coupling the window to the uploader lifecycle.
+- Persist up to 100 recent clips with atomic writes, including parsed game, lifecycle state, attempts, concise redacted errors, local route, and available file location.
+- Show actual before/after compression sizes, reduction percentage, target ceiling, and encoder bitrate in Activity while retaining the detailed diagnostic log entry.
 - Skip compression targets that cannot sustain the minimum video bitrate for a clip's duration, avoiding repeated two-pass encodes that can never meet Discord's size limit.
 - Stop automatic retries for an unachievable long clip until settings change or the app restarts, and report that the upload needs attention.
 - Disable webhook redirects, tighten accepted Discord webhook URLs, bound response bodies, and keep request deadlines active through streamed response reads.

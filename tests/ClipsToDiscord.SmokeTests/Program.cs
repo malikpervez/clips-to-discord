@@ -235,6 +235,7 @@ try
     Assert(ReferenceEquals(ClipCordTheme.InterfaceFont(10f), ClipCordTheme.InterfaceFont(10f)),
         "ClipCord fonts must be cached instead of allocating GDI font handles for every control.");
 
+    AssertActivityHistory(Path.Combine(temporaryRoot, "activity-history"));
     AssertSettingsFormLayout(new AppSettings(
         gameArchiveRoot,
         "https://discord.com/api/" + "webhooks/123456/test-token",
@@ -644,12 +645,14 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         AppSettings.DefaultUploaderName,
         false);
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+    using var activityHistory = new ActivityHistoryStore(string.Empty);
     var worker = new UploaderWorker(
         settings,
         statuses.Enqueue,
         store,
         () => throw new InvalidOperationException(
-            "Local-only mode must not construct a Discord webhook client."));
+            "Local-only mode must not construct a Discord webhook client."),
+        activityHistory);
     var workerTask = worker.RunAsync(cancellation.Token);
     try
     {
@@ -681,6 +684,12 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         "A local-only clip must never be marked as uploaded.");
     Assert(state.PendingLocalOnlyMoves.Count == 0,
         "A completed local-only archive move must clear its durable pending entry.");
+    var activity = activityHistory.GetSnapshot().Entries.Single(entry => entry.FileName == clipName);
+    Assert(activity.State == ClipActivityState.Archived &&
+           activity.Route == ClipActivityRoute.LocalOnly &&
+           activity.AttemptCount == 1 &&
+           activity.CurrentPath == expectedDestination,
+        "Local-only processing must publish its final route and archive location to Activity.");
 
     const string pendingClipName = "Apex Legends__2026-08-05__12-30-00.mp4";
     var pendingSourcePath = Path.Combine(clipsFolder, pendingClipName);
@@ -723,6 +732,99 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         "A recovered local-only move must never be redirected into the uploaded archive.");
 }
 
+static void AssertActivityHistory(string root)
+{
+    Directory.CreateDirectory(root);
+    var historyPath = Path.Combine(root, "activity.json");
+    var sourcePath = Path.Combine(root, "Battlefield™-6__2026-08-06__14-37-13.mp4");
+    using (var store = new ActivityHistoryStore(historyPath))
+    {
+        using var subscription = store.Subscribe(new SynchronizationContext(), _ => { });
+        Assert(store.SubscriptionCount == 1, "Activity subscribers must be tracked while attached.");
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Discovered, OriginalBytes: 183_955_215));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Waiting, Detail: "Waiting for a stable file."));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Hashing));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Queued));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Uploading, IncrementAttempt: true));
+        store.Transition(new ClipActivityUpdate(
+            sourcePath,
+            ClipActivityState.Compressing,
+            CompressedBytes: 26_214_400,
+            CompressionTargetMb: 95,
+            VideoKbps: 6000,
+            AudioKbps: 96));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Completed, Route: ClipActivityRoute.Uploaded));
+        var archivedPath = Path.Combine(root, "uploaded", "Battlefield™-6", Path.GetFileName(sourcePath));
+        store.Transition(new ClipActivityUpdate(
+            sourcePath,
+            ClipActivityState.Archived,
+            CurrentPath: archivedPath,
+            Route: ClipActivityRoute.Uploaded,
+            Detail: "Discord upload and local archive completed."));
+
+        var entry = store.GetSnapshot().Entries.Single();
+        Assert(entry.State == ClipActivityState.Archived &&
+               entry.AttemptCount == 1 &&
+               entry.GameName == "Battlefield™-6" &&
+               entry.OriginalBytes == 183_955_215 &&
+               entry.CompressedBytes == 26_214_400 &&
+               entry.VideoKbps == 6000,
+            "Activity transitions must preserve identity, attempts, parsed game, and compression metrics.");
+        Assert(ActivityView.BuildDetail(entry).Contains("175.4 MB -> 25.0 MB (85.7% smaller)", StringComparison.Ordinal),
+            "Activity details must expose the actual before/after compression result.");
+
+        subscription.Dispose();
+        Assert(store.SubscriptionCount == 0, "Closing an Activity subscriber must detach it exactly once.");
+    }
+
+    using (var reloaded = new ActivityHistoryStore(historyPath))
+    {
+        Assert(reloaded.GetSnapshot().Entries is [var persisted] &&
+               persisted.State == ClipActivityState.Archived &&
+               persisted.AttemptCount == 1,
+            "Bounded Activity history must survive restart.");
+
+        Parallel.For(0, 140, index =>
+        {
+            reloaded.Transition(new ClipActivityUpdate(
+                Path.Combine(root, $"Concurrent Game__2026-08-06__14-37-{index % 60:00}-{index}.mp4"),
+                ClipActivityState.Discovered,
+                OriginalBytes: index + 1));
+        });
+        var snapshot = reloaded.GetSnapshot();
+        Assert(snapshot.Entries.Count == ActivityHistoryStore.MaximumEntries &&
+               snapshot.Entries.Select(entry => entry.Id).Distinct().Count() == ActivityHistoryStore.MaximumEntries,
+            "Concurrent workers must retain a bounded set of distinct Activity entries.");
+
+        var secretPath = Path.Combine(root, "secret.mp4");
+        reloaded.Transition(new ClipActivityUpdate(
+            secretPath,
+            ClipActivityState.Failed,
+            Error: $"Could not move {secretPath}; rejected https://discord.com/api/webhooks/123456/never-persist-this-token"));
+        var redactedError = reloaded.GetSnapshot().Entries.Single(entry => entry.SourcePath == secretPath).Error;
+        Assert(redactedError is not null && !redactedError.Contains(root, StringComparison.OrdinalIgnoreCase),
+            "Concise Activity errors must not repeat full local clip paths in the UI.");
+        var persistedJson = File.ReadAllText(historyPath);
+        Assert(!persistedJson.Contains("never-persist-this-token", StringComparison.Ordinal) &&
+               persistedJson.Contains("[REDACTED DISCORD WEBHOOK]", StringComparison.Ordinal),
+            "Activity persistence must redact webhook credentials before writing to disk.");
+        Assert(!File.Exists(historyPath + ".tmp"), "Atomic Activity writes must not leave a temporary file behind.");
+    }
+
+    foreach (var state in Enum.GetValues<ClipActivityState>())
+    {
+        var presentation = ActivityView.GetPresentation(new ClipActivityEntry
+        {
+            Id = Guid.NewGuid(),
+            FileName = "clip.mp4",
+            SourcePath = sourcePath,
+            State = state
+        });
+        Assert(!string.IsNullOrWhiteSpace(presentation.Label),
+            $"Activity state {state} must have a deterministic UI label.");
+    }
+}
+
 static void AssertSettingsFormLayout(AppSettings settings)
 {
     Exception? failure = null;
@@ -730,10 +832,24 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
+            using var activityHistory = new ActivityHistoryStore(string.Empty);
+            var longActivityName = new string('B', 180) + "__2026-08-06__14-37-13.mp4";
+            var activityPath = Path.Combine(settings.ClipsFolder, longActivityName);
+            activityHistory.Transition(new ClipActivityUpdate(
+                activityPath,
+                ClipActivityState.Compressing,
+                OriginalBytes: 183_955_215,
+                CompressedBytes: 26_214_400,
+                CompressionTargetMb: 95,
+                VideoKbps: 6000,
+                AudioKbps: 96,
+                IncrementAttempt: true,
+                Detail: "Compression complete; preparing the Discord upload."));
             using var form = new SettingsForm(
                 settings,
                 checkForUpdatesAsync: _ => Task.CompletedTask,
-                watcherStatusProvider: () => "Discord open — local-only mode");
+                watcherStatusProvider: () => "Discord open — local-only mode",
+                activityHistory: activityHistory);
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
@@ -792,7 +908,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .OfType<Button>()
                 .Select(button => button.Text)
                 .ToHashSet(StringComparer.Ordinal);
-            Assert(buttonTexts.SetEquals(["Browse", "Test webhook", "Check for updates", "Save changes", "Cancel"]),
+            Assert(new[] { "Browse", "Test webhook", "Check for updates", "Save changes", "Cancel" }
+                    .All(buttonTexts.Contains),
                 "The settings form must keep all action buttons available.");
             var startupCheckbox = EnumerateControls(form)
                 .OfType<CheckBox>()
@@ -818,15 +935,25 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertControlsFit(form);
             var activityItem = EnumerateControls(form)
                 .Single(control => control.Name == "ActivityNavItem");
-            Assert(activityItem.Tag as string == SettingsForm.ActivityComingSoonText &&
-                   activityItem.AccessibleDescription == SettingsForm.ActivityComingSoonText &&
-                   activityItem.AccessibilityObject.State.HasFlag(AccessibleStates.Unavailable),
-                "The disabled Activity navigation must explain that it belongs to a future release.");
-            var activityLabel = EnumerateControls(activityItem)
-                .OfType<Label>()
-                .Single(label => label.Name == "ActivityNavLabel");
-            Assert(!activityLabel.Enabled,
-                "The Activity navigation label must remain visibly unavailable.");
+            Assert(!activityItem.AccessibilityObject.State.HasFlag(AccessibleStates.Unavailable) &&
+                   activityItem.TabStop,
+                "Activity navigation must be available to pointer and keyboard users.");
+            form.Show();
+            form.ShowPage(SettingsPage.Activity);
+            Application.DoEvents();
+            Assert(form.Text == "ClipCord — Activity", "Activity navigation must activate the branded Activity page.");
+            Assert(EnumerateControls(form).Single(control => control.Name == "ActivityView").Visible,
+                "The Activity page must be visible after navigation.");
+            Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 1,
+                "The Activity page must render the current bounded history.");
+            Assert(EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenUploadedFolderButton") &&
+                   EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenLogsButton") &&
+                   EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenFileLocationButton"),
+                "Activity must expose uploaded-folder, log, and per-clip location actions.");
+            AssertControlsFit(form);
+            AssertCriticalTextFits(form);
+            form.ShowPage(SettingsPage.Settings);
+            Application.DoEvents();
             Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Local only"),
                 "The branded header must present the complete local-only watcher status.");
             var headerLogo = EnumerateControls(form)
@@ -889,6 +1016,9 @@ static void AssertSettingsFormLayout(AppSettings settings)
 
             AssertSettingsRoundTrip(settings);
             AssertManualCheckCloseProtection(settings);
+            form.Dispose();
+            Assert(activityHistory.SubscriptionCount == 0,
+                "Closing the Settings/Activity window must detach its live-history subscription.");
         }
         catch (Exception exception)
         {
@@ -981,7 +1111,7 @@ static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
 {
     var cards = EnumerateControls(form)
         .OfType<ScrollableControl>()
-        .Single(control => control.AutoScroll);
+        .Single(control => control.Name == "SettingsCards");
     cards.PerformLayout();
     Assert(!cards.VerticalScroll.Visible && cards.AutoScrollPosition.Y == 0,
         $"Settings must open with every card visible without scrolling; viewport={cards.ClientSize}, display={cards.DisplayRectangle}.");
@@ -991,7 +1121,7 @@ static void AssertSettingsCardsScrollOnlyWhenScreenConstrained(SettingsForm form
 {
     var cards = EnumerateControls(form)
         .OfType<ScrollableControl>()
-        .Single(control => control.AutoScroll);
+        .Single(control => control.Name == "SettingsCards");
     if (!cards.VerticalScroll.Visible) return;
     Assert(form.Height < designedOpeningSize.Height,
         $"Settings may scroll only when the screen reduced its designed opening height; designed={designedOpeningSize}, actual={form.Size}.");
@@ -1057,7 +1187,12 @@ static void AssertCriticalTextFits(Form form)
         "Local only",
         "Start with Windows",
         "Save changes",
-        "Cancel"
+        "Cancel",
+        "Recent activity",
+        "Open uploaded folder",
+        "Open logs",
+        "Show in folder",
+        "Close"
     };
     foreach (var control in EnumerateControls(form).Where(control => control.Visible && criticalText.Contains(control.Text)))
     {

@@ -57,7 +57,8 @@ internal sealed class DiscordWebhookClient : IDisposable
         string filePath,
         int compressionTargetMb,
         string uploaderName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<CompressionProgress>? reportCompression = null)
     {
         var message = DiscordClipMessage.BuildContent(uploaderName, Path.GetFileName(filePath));
         var description = DiscordClipMessage.BuildDescription(uploaderName, Path.GetFileName(filePath));
@@ -94,6 +95,13 @@ internal sealed class DiscordWebhookClient : IDisposable
             DiscordUploadException lastSizeException = exception;
             foreach (var targetMb in achievableTargets)
             {
+                CompressionTargetPlanner.TryCreateBitrates(duration, targetMb, out var bitrates);
+                reportCompression?.Invoke(new CompressionProgress(
+                    targetMb,
+                    bitrates.VideoKbps,
+                    bitrates.AudioKbps,
+                    new FileInfo(filePath).Length,
+                    null));
                 Log.Info($"Compressing oversized clip {Path.GetFileName(filePath)} to a {targetMb} MB target.");
                 var compressedPath = await FfmpegCompressor.CompressAsync(
                     filePath,
@@ -105,13 +113,18 @@ internal sealed class DiscordWebhookClient : IDisposable
                 {
                     var originalBytes = new FileInfo(filePath).Length;
                     var compressedBytes = new FileInfo(compressedPath).Length;
-                    CompressionTargetPlanner.TryCreateBitrates(duration, targetMb, out var bitrates);
                     Log.Info(BuildCompressionLogMessage(
                         Path.GetFileName(filePath),
                         originalBytes,
                         compressedBytes,
                         targetMb,
                         bitrates));
+                    reportCompression?.Invoke(new CompressionProgress(
+                        targetMb,
+                        bitrates.VideoKbps,
+                        bitrates.AudioKbps,
+                        originalBytes,
+                        compressedBytes));
 
                     await UploadOnceAsync(
                         webhookUrl,
@@ -311,6 +324,13 @@ internal sealed class DiscordWebhookClient : IDisposable
         bool IsSuccessStatusCode,
         string ResponseText);
 }
+
+internal readonly record struct CompressionProgress(
+    int TargetMb,
+    int VideoKbps,
+    int AudioKbps,
+    long OriginalBytes,
+    long? CompressedBytes);
 
 internal sealed class DiscordUploadException(string message, bool isTooLarge) : Exception(message)
 {

@@ -32,6 +32,12 @@ Local-only decisions use a separate persisted hash set and pending-move queue. T
 
 There is still an irreducible interval between Discord accepting the HTTP request and the local durable write. Incoming Discord webhooks do not offer an idempotency key. Eliminating duplicates completely would require choosing at-most-once behavior, which could silently lose a clip if the app died before Discord accepted it. The app keeps at-least-once delivery and narrows the interval to the immediate durable state write.
 
+## Activity history
+
+Scanner and worker lifecycle updates enter one thread-safe local store. The store coalesces identical states, retains the 100 most recently updated clips, redacts webhook-shaped text, and atomically replaces `activity.json` after a material transition. Corrupt or unsupported history starts empty and never affects upload state or duplicate protection.
+
+The Activity window receives immutable snapshots through the Windows Forms synchronization context. Posting is non-blocking for worker threads, replaced controls are disposed during refresh, and closing the window removes its subscription. Activity persistence is informational: a write failure is logged but cannot fail an upload, change its route, or alter the persist-before-move guarantee.
+
 ## Compression fallback
 
 The configured target is 1–100 MB and defaults to 95 MB for new settings. Existing saved values are preserved. After a size rejection, FFmpeg probes the original clip once and ClipCord calculates which progressively smaller targets can still allocate at least 180 kbps to video after audio. Impossible targets are skipped before encoding. If Discord rejects every achievable result, the clip remains in place with a needs-attention status instead of repeatedly running equivalent two-pass encodes in the background.

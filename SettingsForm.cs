@@ -4,9 +4,14 @@ using System.Text.RegularExpressions;
 
 namespace ClipsToDiscord;
 
+internal enum SettingsPage
+{
+    Settings,
+    Activity
+}
+
 internal sealed class SettingsForm : Form
 {
-    internal const string ActivityComingSoonText = "Coming in a future release.";
     private static readonly Regex CompressionTargetPattern = new(
         @"^\s*(?<value>\d{1,3})\s*(?:MB)?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -118,6 +123,12 @@ internal sealed class SettingsForm : Form
         Font = ClipCordTheme.InterfaceFont(9.5f)
     };
     private readonly Func<IWin32Window, Task>? _checkForUpdatesAsync;
+    private readonly ActivityHistoryStore _activityHistory;
+    private readonly bool _ownsActivityHistory;
+    private RoundedPanel? _settingsNavigationItem;
+    private RoundedPanel? _activityNavigationItem;
+    private Control? _settingsPage;
+    private ActivityView? _activityPage;
     private bool _busy;
     private string? _lastWatcherFullStatus;
     private Size _lastWindowRegionSize = Size.Empty;
@@ -129,12 +140,16 @@ internal sealed class SettingsForm : Form
         AppSettings settings,
         Icon? applicationIcon = null,
         Func<IWin32Window, Task>? checkForUpdatesAsync = null,
-        Func<string>? watcherStatusProvider = null)
+        Func<string>? watcherStatusProvider = null,
+        ActivityHistoryStore? activityHistory = null,
+        SettingsPage initialPage = SettingsPage.Settings)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
         _checkForUpdatesAsync = checkForUpdatesAsync;
         _watcherStatusProvider = watcherStatusProvider;
+        _activityHistory = activityHistory ?? new ActivityHistoryStore(string.Empty);
+        _ownsActivityHistory = activityHistory is null;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
 
         StartPosition = FormStartPosition.CenterScreen;
@@ -180,6 +195,7 @@ internal sealed class SettingsForm : Form
         };
 
         Controls.Add(BuildRootLayout());
+        ShowPage(initialPage);
         AcceptButton = _saveButton;
         CancelButton = _cancelButton;
 
@@ -355,7 +371,18 @@ internal sealed class SettingsForm : Form
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         body.Controls.Add(BuildNavigation(), 0, 0);
-        body.Controls.Add(BuildCards(), 1, 0);
+        var pageHost = new Panel
+        {
+            Name = "PageHost",
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            BackColor = ClipCordTheme.Shell
+        };
+        _settingsPage = BuildCards();
+        _activityPage = new ActivityView(_activityHistory, _folderText.Text);
+        pageHost.Controls.Add(_settingsPage);
+        pageHost.Controls.Add(_activityPage);
+        body.Controls.Add(pageHost, 1, 0);
         return body;
     }
 
@@ -380,26 +407,21 @@ internal sealed class SettingsForm : Form
         settingsItem.AccessibleName = "Settings";
         settingsItem.AccessibleDescription = "Current page";
         settingsItem.AccessibleRole = AccessibleRole.MenuItem;
-        settingsItem.EnableKeyboardAccess();
+        settingsItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.Settings));
+        WireClick(settingsItem, () => ShowPage(SettingsPage.Settings));
+        _settingsNavigationItem = settingsItem;
 
         var activityItem = CreateNavigationItem(
             "Activity",
             BrandGlyph.Activity,
-            selected: false,
-            unavailable: true);
+            selected: false);
         activityItem.Name = "ActivityNavItem";
-        activityItem.Tag = ActivityComingSoonText;
-        activityItem.AccessibleName = "Activity, unavailable";
-        activityItem.AccessibleDescription = ActivityComingSoonText;
+        activityItem.AccessibleName = "Activity";
+        activityItem.AccessibleDescription = "Recent clip activity";
         activityItem.AccessibleRole = AccessibleRole.MenuItem;
-        activityItem.AccessibilityUnavailable = true;
-        activityItem.Cursor = Cursors.Help;
-        activityItem.EnableKeyboardAccess();
-        _toolTip.SetToolTip(activityItem, ActivityComingSoonText);
-        foreach (Control child in EnumerateControls(activityItem))
-        {
-            _toolTip.SetToolTip(child, ActivityComingSoonText);
-        }
+        activityItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.Activity));
+        WireClick(activityItem, () => ShowPage(SettingsPage.Activity));
+        _activityNavigationItem = activityItem;
 
         var aboutItem = CreateNavigationItem("About", BrandGlyph.About, selected: false);
         aboutItem.Name = "AboutNavItem";
@@ -412,6 +434,63 @@ internal sealed class SettingsForm : Form
         navigation.Controls.Add(activityItem, 0, 1);
         navigation.Controls.Add(aboutItem, 0, 2);
         return navigation;
+    }
+
+    internal void ShowPage(SettingsPage page)
+    {
+        if (_settingsPage is null || _activityPage is null) return;
+
+        var showActivity = page == SettingsPage.Activity;
+        _settingsPage.Visible = !showActivity;
+        _activityPage.Visible = showActivity;
+        if (showActivity) _activityPage.BringToFront();
+        else _settingsPage.BringToFront();
+
+        UpdateNavigationSelection(_settingsNavigationItem, !showActivity);
+        UpdateNavigationSelection(_activityNavigationItem, showActivity);
+        _saveButton.Visible = !showActivity;
+        _cancelButton.Text = showActivity ? "Close" : "Cancel";
+        AcceptButton = showActivity ? null : _saveButton;
+        Text = showActivity ? "ClipCord — Activity" : "ClipCord — Settings";
+        if (showActivity)
+        {
+            _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
+            _statusLabel.Text = "Recent activity is stored locally and never includes your webhook.";
+            _privacySummaryLabel.Text = "Closing this window does not stop clip processing.";
+        }
+        else
+        {
+            _statusLabel.Text = string.Empty;
+            UpdateUploadModeText();
+        }
+    }
+
+    private static void UpdateNavigationSelection(RoundedPanel? item, bool selected)
+    {
+        if (item is null) return;
+        item.BackColor = selected ? ClipCordTheme.VioletMuted : ClipCordTheme.Sidebar;
+        item.BorderColor = selected ? Color.FromArgb(73, 62, 107) : Color.Transparent;
+        item.AccessibleDescription = selected ? "Current page" : string.Empty;
+        foreach (var control in EnumerateControls(item))
+        {
+            switch (control)
+            {
+                case GradientStrip strip when strip.Name == "NavigationSelectionStrip":
+                    strip.Visible = selected;
+                    break;
+                case BrandGlyphControl glyph when glyph.Name == "NavigationGlyph":
+                    glyph.GlyphColor = selected ? ClipCordTheme.Violet : ClipCordTheme.ShellMutedText;
+                    glyph.Invalidate();
+                    break;
+                case Label label when label.Name == "NavigationLabel":
+                    label.ForeColor = ClipCordTheme.ShellText;
+                    label.Font = ClipCordTheme.InterfaceFont(
+                        11f,
+                        selected ? FontStyle.Bold : FontStyle.Regular);
+                    break;
+            }
+        }
+        item.Invalidate(true);
     }
 
     private static RoundedPanel CreateNavigationItem(
@@ -433,18 +512,22 @@ internal sealed class SettingsForm : Form
         var layout = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = selected ? 4 : 3,
+            ColumnCount = 4,
             RowCount = 1,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = Color.Transparent
         };
-        if (selected)
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 5));
+        var selectionStrip = new GradientStrip
         {
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 5));
-            layout.Controls.Add(new GradientStrip { Dock = DockStyle.Fill, Margin = Padding.Empty }, 0, 0);
-        }
-        var iconColumn = selected ? 1 : 0;
+            Name = "NavigationSelectionStrip",
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Visible = selected
+        };
+        layout.Controls.Add(selectionStrip, 0, 0);
+        const int iconColumn = 1;
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -452,6 +535,7 @@ internal sealed class SettingsForm : Form
 
         var icon = new BrandGlyphControl
         {
+            Name = "NavigationGlyph",
             Glyph = glyph,
             GlyphColor = unavailable
                 ? Color.FromArgb(105, 115, 134)
@@ -463,7 +547,7 @@ internal sealed class SettingsForm : Form
         };
         var label = new Label
         {
-            Name = unavailable ? "ActivityNavLabel" : string.Empty,
+            Name = "NavigationLabel",
             Text = text,
             Dock = DockStyle.Fill,
             ForeColor = unavailable ? Color.FromArgb(111, 121, 141) : ClipCordTheme.ShellText,
@@ -498,6 +582,7 @@ internal sealed class SettingsForm : Form
     {
         var cards = new BufferedTableLayoutPanel
         {
+            Name = "SettingsCards",
             Dock = DockStyle.Fill,
             AutoScroll = true,
             ColumnCount = 1,
@@ -1282,6 +1367,7 @@ internal sealed class SettingsForm : Form
             _watcherStatusTimer.Stop();
             _watcherStatusTimer.Dispose();
             _toolTip.Dispose();
+            if (_ownsActivityHistory) _activityHistory.Dispose();
             _ownedApplicationIcon?.Dispose();
         }
         base.Dispose(disposing);
