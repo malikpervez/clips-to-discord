@@ -141,7 +141,7 @@ internal sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.None;
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(1080, 780);
+        ClientSize = new Size(1080, 820);
         MinimumSize = new Size(900, 650);
         BackColor = ClipCordTheme.Header;
         Padding = new Padding(ResizeGrip);
@@ -518,16 +518,20 @@ internal sealed class SettingsForm : Form
 
     private Control BuildClipSourceCard()
     {
-        var layout = CreateCardContent(5);
+        var layout = CreateCardContent(3);
+        layout.ColumnCount = 2;
+        layout.ColumnStyles.Clear();
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
-        layout.Controls.Add(CreateCardHeading("Clip source"), 0, 0);
-        layout.Controls.Add(CreateFieldLabel("Clips folder"), 0, 1);
-        layout.Controls.Add(CreateFieldRow(CreateFieldHost(_folderText), _browseButton), 0, 2);
-        layout.Controls.Add(CreateHelper("New MP4 clips in this folder are detected automatically."), 0, 3);
+        var heading = CreateCardHeading("Clip source");
+        layout.Controls.Add(heading, 0, 0);
+        layout.SetColumnSpan(heading, 2);
+        layout.Controls.Add(CreateInlineFieldLabel("Clips folder"), 0, 1);
+        layout.Controls.Add(CreateFieldRow(CreateFieldHost(_folderText), _browseButton), 1, 1);
+        layout.Controls.Add(CreateHelper("New MP4 clips in this folder are detected automatically."), 1, 2);
         return CreateCard(BrandGlyph.Folder, "Clip source settings", layout, new Padding(0, 0, 0, 12));
     }
 
@@ -735,18 +739,6 @@ internal sealed class SettingsForm : Form
         Font = ClipCordTheme.DisplayFont(14f, FontStyle.Bold),
         TextAlign = ContentAlignment.MiddleLeft,
         Margin = new Padding(0, 0, 0, 4)
-    };
-
-    private static Label CreateFieldLabel(string text) => new()
-    {
-        Text = text,
-        Dock = DockStyle.Fill,
-        AutoSize = true,
-        AutoEllipsis = true,
-        ForeColor = ClipCordTheme.Text,
-        Font = ClipCordTheme.InterfaceFont(9.5f, FontStyle.Bold),
-        TextAlign = ContentAlignment.BottomLeft,
-        Margin = new Padding(0, 0, 0, 2)
     };
 
     private static Label CreateInlineFieldLabel(string text) => new()

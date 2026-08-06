@@ -4,6 +4,11 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.6.1 — 2026-08-05
+
+- Open Settings at a height that shows every card without unnecessary scrolling while retaining scrolling for constrained screens.
+- Align the Clips folder, Uploader name, and Webhook URL fields to the same horizontal grid and control height.
+
 ## 1.6.0 — 2026-08-05
 
 - Added a persistent **Upload new clips to Discord** toggle in Settings and the tray menu.

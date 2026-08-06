@@ -663,9 +663,13 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
+            var designedOpeningSize = form.Size;
+            AssertSettingsCardsOpenWithoutScrolling(form);
             form.Show();
             Application.DoEvents();
             AssertControlsFit(form);
+            AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, designedOpeningSize);
+            AssertSettingsTextFieldsAligned(form);
             AssertCriticalTextFits(form);
             AssertAccessibility(form);
             AssertOpaqueCustomControlsPaintEveryPixel(form);
@@ -897,6 +901,42 @@ static void AssertControlsFit(Form form)
                 $"Control {control.GetType().Name} '{control.Name}' ('{control.Text}') is clipped at {bounds} inside {form.ClientSize}; parent={control.Parent?.GetType().Name} '{control.Parent?.Name}' bounds={control.Parent?.Bounds}.");
         }
     }
+}
+
+static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
+{
+    var cards = EnumerateControls(form)
+        .OfType<ScrollableControl>()
+        .Single(control => control.AutoScroll);
+    cards.PerformLayout();
+    Assert(!cards.VerticalScroll.Visible && cards.AutoScrollPosition.Y == 0,
+        $"Settings must open with every card visible without scrolling; viewport={cards.ClientSize}, display={cards.DisplayRectangle}.");
+}
+
+static void AssertSettingsCardsScrollOnlyWhenScreenConstrained(SettingsForm form, Size designedOpeningSize)
+{
+    var cards = EnumerateControls(form)
+        .OfType<ScrollableControl>()
+        .Single(control => control.AutoScroll);
+    if (!cards.VerticalScroll.Visible) return;
+    Assert(form.Height < designedOpeningSize.Height,
+        $"Settings may scroll only when the screen reduced its designed opening height; designed={designedOpeningSize}, actual={form.Size}.");
+}
+
+static void AssertSettingsTextFieldsAligned(SettingsForm form)
+{
+    var fields = EnumerateControls(form)
+        .OfType<TextBox>()
+        .Where(control => control.AccessibleName is "Clips folder" or "Uploader name" or "Discord webhook URL")
+        .OrderBy(control => control.AccessibleName, StringComparer.Ordinal)
+        .ToArray();
+    Assert(fields.Length == 3, "The three primary Settings text fields must remain discoverable.");
+    var screenBounds = fields
+        .Select(control => new Rectangle(control.PointToScreen(Point.Empty), control.Size))
+        .ToArray();
+    Assert(screenBounds.Select(bounds => bounds.Left).Distinct().Count() == 1 &&
+           screenBounds.Select(bounds => bounds.Height).Distinct().Count() == 1,
+        $"Clip source and Discord destination fields must share one left edge and height: {string.Join(", ", screenBounds)}.");
 }
 
 static void AssertSettingsRoundTrip(AppSettings original)
