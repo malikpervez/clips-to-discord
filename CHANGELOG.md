@@ -8,6 +8,7 @@ All notable user-facing changes are documented here.
 - Stop automatic retries for an unachievable long clip until settings change or the app restarts, and report that the upload needs attention.
 - Disable webhook redirects, tighten accepted Discord webhook URLs, bound response bodies, and keep request deadlines active through streamed response reads.
 - Restrict FFmpeg discovery to the trusted application directories and drain its output safely during cancellation.
+- Log each completed compression's original size, actual output size, reduction percentage, target ceiling, and selected video/audio bitrates.
 
 ## 1.6.1 — 2026-08-05
 

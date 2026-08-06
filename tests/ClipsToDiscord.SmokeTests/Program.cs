@@ -437,6 +437,19 @@ try
         achievableBitrates.VideoKbps >= CompressionTargetPlanner.MinimumVideoKbps &&
         !CompressionTargetPlanner.TryCreateBitrates(TimeSpan.FromMinutes(20), 23, out _),
         "Compression feasibility must distinguish the last achievable target from the first impossible one.");
+    Assert(
+        CompressionTargetPlanner.TryCreateBitrates(TimeSpan.FromSeconds(29.3), 95, out var shortClipBitrates),
+        "A short clip must produce a valid compression bitrate plan.");
+    var compressionLog = DiscordWebhookClient.BuildCompressionLogMessage(
+        "Battlefield.mp4",
+        183_955_215,
+        26_214_400,
+        95,
+        shortClipBitrates);
+    Assert(
+        compressionLog ==
+        "Compression complete for Battlefield.mp4: 175.4 MB -> 25.0 MB (85.7% smaller; 95 MB target ceiling; 6000 kbps video / 96 kbps audio).",
+        $"Compression logs must report the actual before/after sizes and encoder plan; got '{compressionLog}'.");
     var untrustedFfmpegFolder = Directory.CreateDirectory(Path.Combine(temporaryRoot, "path-ffmpeg"));
     var untrustedFfmpegPath = Path.Combine(untrustedFfmpegFolder.FullName, "ffmpeg.exe");
     await File.WriteAllTextAsync(untrustedFfmpegPath, "not an executable");

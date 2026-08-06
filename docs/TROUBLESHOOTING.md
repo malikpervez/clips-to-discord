@@ -26,6 +26,8 @@ Both release packages include `ffmpeg.exe`. The installer keeps it with the appl
 
 The compression target is configurable from 1–100 MB and defaults to 95 MB for new settings. If the selected target is rejected, the app retries progressively smaller targets that can still preserve its minimum video bitrate. For a destination limited to Discord's standard 10 MiB per-file limit, selecting 9 MB avoids the initial larger attempts.
 
+The selected value is a size ceiling, not a request to fill the entire allowance. ClipCord currently caps compressed video at 6,000 kbps, so short high-bitrate recordings can finish substantially below the selected target while retaining good playback quality. The application log records the original and compressed sizes, reduction percentage, target ceiling, and chosen video/audio bitrates for each completed encode.
+
 Very long clips may be impossible to compress to a small Discord limit without falling below that bitrate. ClipCord reports **Upload needs attention**, leaves the original clip in place, and stops automatic retries for that clip until settings change or the app restarts. Shorten the clip, raise the compression target if the destination accepts larger files, or upload it another way.
 
 If building from source without FFmpeg, normal-size clips still work, but oversized clips report an error in the log.

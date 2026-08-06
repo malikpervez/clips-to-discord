@@ -103,6 +103,16 @@ internal sealed class DiscordWebhookClient : IDisposable
                     cancellationToken);
                 try
                 {
+                    var originalBytes = new FileInfo(filePath).Length;
+                    var compressedBytes = new FileInfo(compressedPath).Length;
+                    CompressionTargetPlanner.TryCreateBitrates(duration, targetMb, out var bitrates);
+                    Log.Info(BuildCompressionLogMessage(
+                        Path.GetFileName(filePath),
+                        originalBytes,
+                        compressedBytes,
+                        targetMb,
+                        bitrates));
+
                     await UploadOnceAsync(
                         webhookUrl,
                         compressedPath,
@@ -134,6 +144,24 @@ internal sealed class DiscordWebhookClient : IDisposable
                 "Discord rejected every configured compression target. Lower the compression target in Settings and retry.",
                 lastSizeException);
         }
+    }
+
+    internal static string BuildCompressionLogMessage(
+        string fileName,
+        long originalBytes,
+        long compressedBytes,
+        int targetMb,
+        CompressionTargetPlanner.CompressionBitrates bitrates)
+    {
+        var originalMb = originalBytes / 1024d / 1024d;
+        var compressedMb = compressedBytes / 1024d / 1024d;
+        var reductionPercent = originalBytes > 0
+            ? Math.Max(0, (1d - compressedBytes / (double)originalBytes) * 100d)
+            : 0;
+
+        FormattableString message =
+            $"Compression complete for {fileName}: {originalMb:F1} MB -> {compressedMb:F1} MB ({reductionPercent:F1}% smaller; {targetMb} MB target ceiling; {bitrates.VideoKbps} kbps video / {bitrates.AudioKbps} kbps audio).";
+        return FormattableString.Invariant(message);
     }
 
     private async Task UploadOnceAsync(
