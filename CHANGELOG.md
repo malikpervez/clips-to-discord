@@ -4,6 +4,17 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.7.0 — 2026-08-06
+
+- Activate the branded Activity page and add a tray shortcut for live, bounded clip history without coupling the window to the uploader lifecycle.
+- Persist up to 100 recent clips with atomic writes, including parsed game, lifecycle state, attempts, concise redacted errors, local route, and available file location.
+- Show actual before/after compression sizes, reduction percentage, target ceiling, and encoder bitrate in Activity while retaining the detailed diagnostic log entry.
+- Skip compression targets that cannot sustain the minimum video bitrate for a clip's duration, avoiding repeated two-pass encodes that can never meet Discord's size limit.
+- Stop automatic retries for an unachievable long clip until settings change or the app restarts, and report that the upload needs attention.
+- Disable webhook redirects, tighten accepted Discord webhook URLs, bound response bodies, and keep request deadlines active through streamed response reads.
+- Restrict FFmpeg discovery to the trusted application directories and drain its output safely during cancellation.
+- Log each completed compression's original size, actual output size, reduction percentage, target ceiling, and selected video/audio bitrates.
+
 ## 1.6.1 — 2026-08-05
 
 - Open Settings at a height that shows every card without unnecessary scrolling while retaining scrolling for constrained screens.

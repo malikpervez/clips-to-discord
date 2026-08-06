@@ -32,6 +32,8 @@ flowchart LR
 - `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes, debounces brief absences, and exposes an awaitable stop that Settings and tray reconfiguration must complete before starting a replacement worker.
 - `FileReadinessTracker` requires stable metadata across multiple observations and exponentially backs off unreadable files.
 - `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two clip consumers that either upload or archive locally according to the persisted setting.
+- `ActivityHistoryStore` accepts thread-safe immutable lifecycle updates from both workers, retains at most 100 redacted metadata entries with atomic persistence, and posts snapshots to non-blocking UI subscribers.
+- `ActivityView` renders those snapshots independently of the watcher and provides valid local file, uploaded-folder, and diagnostic-log actions.
 - `DiscordWebhookClient` sends multipart attachments with uploader/game attribution, disabled mentions, separate connection and total deadlines, and progressively smaller compression retries.
 - `FfmpegCompressor` performs local two-pass H.264/AAC compression to a requested target.
 - `SettingsStore` encrypts the webhook with DPAPI and performs staged legacy migration.
@@ -62,6 +64,7 @@ flowchart LR
 - Settings and tray mode changes disable concurrent reconfiguration and await complete shutdown of the old controller before creating the new one, so two workers cannot save independent stale state snapshots.
 - Controller disposal waits at most ten seconds on the UI thread, while any slower worker cleanup remains observed in the background.
 - Every runtime access to mutable watch-state collections is serialized through one gate shared by the scanner and both upload workers.
+- Activity subscribers receive immutable snapshots through their synchronization context; closing the Activity window detaches the subscription without stopping or reconfiguring the worker.
 - Version 1.1+ copies compatible settings from the former Moments to Discord data directory without deleting the original files.
 - Stable update discovery accepts only a newer semantic version with exact official GitHub release/asset paths and a SHA-256 asset digest or bounded checksum-manifest entry.
 - Update installation remains user-initiated. Downloads have visible progress and cancellation, are limited to 512 MiB, follow at most one allow-listed redirect, and are deleted if their length or digest fails verification.

@@ -58,6 +58,423 @@ internal sealed class BufferedTableLayoutPanel : TableLayoutPanel
     }
 }
 
+internal sealed class ActivityListPanel : Panel
+{
+    private bool _reflowing;
+    private int _contentHeight = 1;
+
+    public ActivityListPanel()
+    {
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+    }
+
+    internal void Reflow()
+    {
+        if (_reflowing) return;
+        _reflowing = true;
+        try
+        {
+            var top = Padding.Top;
+            var availableWidth = Math.Max(1, ClientSize.Width - Padding.Horizontal);
+            foreach (Control control in Controls)
+            {
+                var margin = control.Margin;
+                if (control.Dock != DockStyle.None) control.Dock = DockStyle.None;
+                var bounds = new Rectangle(
+                    Padding.Left + margin.Left,
+                    top + margin.Top,
+                    Math.Max(1, availableWidth - margin.Horizontal),
+                    control.Height);
+                if (control.Bounds != bounds) control.Bounds = bounds;
+                top = control.Bottom + margin.Bottom;
+            }
+            _contentHeight = Math.Max(1, top + Padding.Bottom);
+        }
+        finally
+        {
+            _reflowing = false;
+        }
+    }
+
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        return new Size(Math.Max(1, proposedSize.Width), MeasureContentHeight());
+    }
+
+    internal int MeasureContentHeight()
+    {
+        var height = Padding.Vertical;
+        foreach (Control control in Controls)
+        {
+            height += control.Margin.Top + control.Height + control.Margin.Bottom;
+        }
+        return Math.Max(1, height);
+    }
+
+    protected override void OnLayout(LayoutEventArgs eventArgs)
+    {
+        base.OnLayout(eventArgs);
+        Reflow();
+    }
+}
+
+internal sealed class BrandedScrollHost : Panel
+{
+    private const int ScrollbarGutter = 16;
+    private const int TrackWidth = 6;
+    private const int MinimumThumbHeight = 36;
+    private Control? _content;
+    private int _contentHeight;
+    private int _scrollOffset;
+    private bool _layingOut;
+    private bool _draggingThumb;
+    private bool _thumbHovered;
+    private int _dragStartY;
+    private int _dragStartOffset;
+    private int _lastDpi = 96;
+
+    public BrandedScrollHost()
+    {
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+        TabStop = true;
+        BackColor = ClipCordTheme.Shell;
+        AccessibleName = "Recent activity list";
+        AccessibleRole = AccessibleRole.Pane;
+        SetStyle(ControlStyles.Selectable, true);
+        Resize += (_, _) => RefreshContentLayout();
+    }
+
+    public Control? Content
+    {
+        get => _content;
+        set
+        {
+            if (ReferenceEquals(_content, value)) return;
+            if (_content is not null)
+            {
+                UnwireFocusTracking(_content);
+                Controls.Remove(_content);
+            }
+
+            _content = value;
+            _scrollOffset = 0;
+            if (_content is not null)
+            {
+                _content.Dock = DockStyle.None;
+                _content.Margin = Padding.Empty;
+                WireFocusTracking(_content);
+                Controls.Add(_content);
+            }
+            RefreshContentLayout();
+        }
+    }
+
+    internal bool HasOverflow => MaximumOffset > 0;
+    internal int ScrollOffset => _scrollOffset;
+    internal Rectangle ScrollThumbBounds => GetThumbBounds();
+
+    internal void RefreshContentLayout(bool preservePosition = true, int anchorAdjustment = 0)
+    {
+        if (_layingOut || _content is null || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+        _layingOut = true;
+        try
+        {
+            var measuredHeight = MeasureContentHeight();
+            var contentWidth = measuredHeight > ClientSize.Height
+                ? Math.Max(1, ClientSize.Width - ScaleLogical(ScrollbarGutter))
+                : ClientSize.Width;
+
+            _contentHeight = measuredHeight;
+            if (!preservePosition) _scrollOffset = 0;
+            else if (_scrollOffset > 0 && anchorAdjustment != 0)
+            {
+                _scrollOffset = (int)Math.Clamp(
+                    (long)_scrollOffset + anchorAdjustment,
+                    0,
+                    int.MaxValue);
+            }
+            _scrollOffset = Math.Clamp(_scrollOffset, 0, MaximumOffset);
+            var contentBounds = new Rectangle(0, -_scrollOffset, contentWidth, _contentHeight);
+            if (_content.Bounds != contentBounds) _content.Bounds = contentBounds;
+        }
+        finally
+        {
+            _layingOut = false;
+        }
+        Invalidate();
+    }
+
+    internal void ScrollBy(int pixels)
+    {
+        SetScrollOffset((int)Math.Clamp((long)_scrollOffset + pixels, 0, int.MaxValue));
+    }
+
+    protected override void OnHandleCreated(EventArgs eventArgs)
+    {
+        base.OnHandleCreated(eventArgs);
+        _lastDpi = DeviceDpi;
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs eventArgs)
+    {
+        var previousDpi = Math.Max(1, _lastDpi);
+        base.OnDpiChangedAfterParent(eventArgs);
+        var currentDpi = Math.Max(1, DeviceDpi);
+        if (_scrollOffset > 0 && currentDpi != previousDpi)
+        {
+            _scrollOffset = (int)Math.Clamp(
+                (long)Math.Round(_scrollOffset * currentDpi / (double)previousDpi),
+                0,
+                int.MaxValue);
+        }
+        _lastDpi = currentDpi;
+        RefreshContentLayout();
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs eventArgs)
+    {
+        if (HasOverflow && eventArgs.Delta != 0)
+        {
+            var step = ScaleLogical(72);
+            ScrollBy(eventArgs.Delta > 0 ? -step : step);
+        }
+        base.OnMouseWheel(eventArgs);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs eventArgs)
+    {
+        var step = ScaleLogical(48);
+        switch (eventArgs.KeyCode)
+        {
+            case Keys.Up:
+                ScrollBy(-step);
+                break;
+            case Keys.Down:
+                ScrollBy(step);
+                break;
+            case Keys.PageUp:
+                ScrollBy(-Math.Max(step, ClientSize.Height - step));
+                break;
+            case Keys.PageDown:
+                ScrollBy(Math.Max(step, ClientSize.Height - step));
+                break;
+            case Keys.Home:
+                SetScrollOffset(0);
+                break;
+            case Keys.End:
+                SetScrollOffset(MaximumOffset);
+                break;
+            default:
+                base.OnKeyDown(eventArgs);
+                return;
+        }
+        eventArgs.Handled = true;
+        eventArgs.SuppressKeyPress = true;
+        base.OnKeyDown(eventArgs);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs eventArgs)
+    {
+        Focus();
+        if (eventArgs.Button == MouseButtons.Left && HasOverflow)
+        {
+            var thumb = GetThumbBounds();
+            if (GetThumbHitBounds().Contains(eventArgs.Location))
+            {
+                _draggingThumb = true;
+                _dragStartY = eventArgs.Y;
+                _dragStartOffset = _scrollOffset;
+                Capture = true;
+                Invalidate();
+            }
+            else if (GetTrackHitBounds().Contains(eventArgs.Location))
+            {
+                ScrollBy(eventArgs.Y < thumb.Top ? -ClientSize.Height : ClientSize.Height);
+            }
+        }
+        base.OnMouseDown(eventArgs);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs eventArgs)
+    {
+        if (_draggingThumb)
+        {
+            var track = GetTrackBounds();
+            var thumb = GetThumbBounds();
+            var travel = Math.Max(1, track.Height - thumb.Height);
+            var offset = _dragStartOffset +
+                         (int)Math.Round((eventArgs.Y - _dragStartY) * MaximumOffset / (double)travel);
+            SetScrollOffset(offset);
+        }
+        else
+        {
+            var hovered = GetThumbHitBounds().Contains(eventArgs.Location);
+            if (hovered != _thumbHovered)
+            {
+                _thumbHovered = hovered;
+                Cursor = hovered ? Cursors.Hand : Cursors.Default;
+                Invalidate();
+            }
+        }
+        base.OnMouseMove(eventArgs);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs eventArgs)
+    {
+        if (eventArgs.Button == MouseButtons.Left && _draggingThumb)
+        {
+            _draggingThumb = false;
+            Capture = false;
+            Invalidate();
+        }
+        base.OnMouseUp(eventArgs);
+    }
+
+    protected override void OnMouseLeave(EventArgs eventArgs)
+    {
+        if (!_draggingThumb && _thumbHovered)
+        {
+            _thumbHovered = false;
+            Cursor = Cursors.Default;
+            Invalidate();
+        }
+        base.OnMouseLeave(eventArgs);
+    }
+
+    protected override void OnPaint(PaintEventArgs eventArgs)
+    {
+        base.OnPaint(eventArgs);
+        if (!HasOverflow) return;
+
+        eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        var track = GetTrackBounds();
+        var thumb = GetThumbBounds();
+        using var trackPath = RoundedPanel.CreateRoundedPath(track, track.Width / 2);
+        using var trackBrush = new SolidBrush(SystemInformation.HighContrast
+            ? SystemColors.ScrollBar
+            : Color.FromArgb(28, 39, 57));
+        eventArgs.Graphics.FillPath(trackBrush, trackPath);
+        using var thumbPath = RoundedPanel.CreateRoundedPath(thumb, thumb.Width / 2);
+        using var thumbBrush = new SolidBrush(SystemInformation.HighContrast
+            ? SystemColors.ControlDarkDark
+            : _draggingThumb || _thumbHovered
+                ? ClipCordTheme.Violet
+                : Color.FromArgb(103, 77, 154));
+        eventArgs.Graphics.FillPath(thumbBrush, thumbPath);
+    }
+
+    private int MeasureContentHeight()
+    {
+        if (_content is null) return 0;
+        if (_content is ActivityListPanel activityList)
+        {
+            return activityList.MeasureContentHeight();
+        }
+        _content.PerformLayout();
+        var preferred = _content.GetPreferredSize(new Size(Math.Max(1, ClientSize.Width), int.MaxValue));
+        return Math.Max(_content.MinimumSize.Height, preferred.Height);
+    }
+
+    private void WireFocusTracking(Control control)
+    {
+        control.GotFocus += DescendantGotFocus;
+        control.ControlAdded += DescendantControlAdded;
+        foreach (Control child in control.Controls) WireFocusTracking(child);
+    }
+
+    private void UnwireFocusTracking(Control control)
+    {
+        control.GotFocus -= DescendantGotFocus;
+        control.ControlAdded -= DescendantControlAdded;
+        foreach (Control child in control.Controls) UnwireFocusTracking(child);
+    }
+
+    private void DescendantControlAdded(object? sender, ControlEventArgs eventArgs)
+    {
+        if (eventArgs.Control is not null) WireFocusTracking(eventArgs.Control);
+    }
+
+    private void DescendantGotFocus(object? sender, EventArgs eventArgs)
+    {
+        if (sender is Control control) EnsureControlVisible(control);
+    }
+
+    internal void EnsureControlVisible(Control control)
+    {
+        if (_content is null || !HasOverflow ||
+            (!ReferenceEquals(control, _content) && !_content.Contains(control))) return;
+
+        var top = PointToClient(control.PointToScreen(Point.Empty)).Y;
+        var margin = ScaleLogical(4);
+        if (top < margin)
+        {
+            ScrollBy(top - margin);
+            return;
+        }
+
+        var bottom = top + control.Height;
+        var visibleBottom = ClientSize.Height - margin;
+        if (bottom > visibleBottom) ScrollBy(bottom - visibleBottom);
+    }
+
+    private int MaximumOffset => Math.Max(0, _contentHeight - ClientSize.Height);
+
+    private void SetScrollOffset(int value)
+    {
+        var clamped = Math.Clamp(value, 0, MaximumOffset);
+        if (clamped == _scrollOffset) return;
+        _scrollOffset = clamped;
+        if (_content is not null) _content.Top = -_scrollOffset;
+        Invalidate();
+    }
+
+    private Rectangle GetTrackBounds()
+    {
+        var width = ScaleLogical(TrackWidth);
+        var inset = ScaleLogical(4);
+        return new Rectangle(
+            Math.Max(0, ClientSize.Width - width - inset),
+            inset,
+            width,
+            Math.Max(1, ClientSize.Height - inset * 2));
+    }
+
+    internal Rectangle GetTrackHitBounds()
+    {
+        var hitWidth = ScaleLogical(20);
+        return new Rectangle(
+            Math.Max(0, ClientSize.Width - hitWidth),
+            0,
+            Math.Min(hitWidth, ClientSize.Width),
+            ClientSize.Height);
+    }
+
+    private Rectangle GetThumbBounds()
+    {
+        if (!HasOverflow) return Rectangle.Empty;
+        var track = GetTrackBounds();
+        var proportionalHeight = (int)Math.Round(track.Height * ClientSize.Height / (double)_contentHeight);
+        var height = Math.Clamp(proportionalHeight, ScaleLogical(MinimumThumbHeight), track.Height);
+        var travel = Math.Max(0, track.Height - height);
+        var top = track.Top + (MaximumOffset == 0
+            ? 0
+            : (int)Math.Round(travel * _scrollOffset / (double)MaximumOffset));
+        return new Rectangle(track.Left, top, track.Width, height);
+    }
+
+    internal Rectangle GetThumbHitBounds()
+    {
+        var thumb = GetThumbBounds();
+        if (thumb.IsEmpty) return Rectangle.Empty;
+        var trackHit = GetTrackHitBounds();
+        return new Rectangle(trackHit.Left, thumb.Top, trackHit.Width, thumb.Height);
+    }
+
+    private int ScaleLogical(int value) => Math.Max(1, (int)Math.Round(value * DeviceDpi / 96d));
+}
+
 internal enum BrandGlyph
 {
     Settings,

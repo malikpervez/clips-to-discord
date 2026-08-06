@@ -234,7 +234,15 @@ try
     }
     Assert(ReferenceEquals(ClipCordTheme.InterfaceFont(10f), ClipCordTheme.InterfaceFont(10f)),
         "ClipCord fonts must be cached instead of allocating GDI font handles for every control.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Activity, 144) == new Size(1564, 1156),
+        "The Activity window must use the user-approved 1043x771 design size at 150% scaling.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, 96) == new Size(1080, 820),
+        "The Settings page must retain its approved 1080x820 design size.");
+    Assert(SettingsForm.GetScaledMinimumSize(144) == new Size(1350, 975),
+        "The resize floor must scale with the active Windows DPI.");
+    AssertBrandedActivityScrollHost();
 
+    AssertActivityHistory(Path.Combine(temporaryRoot, "activity-history"));
     AssertSettingsFormLayout(new AppSettings(
         gameArchiveRoot,
         "https://discord.com/api/" + "webhooks/123456/test-token",
@@ -372,6 +380,38 @@ try
     Assert(
         !WebhookValidation.IsDiscordWebhook(apiRoot + "v10/channels/123456"),
         "A non-webhook Discord API path must be rejected.");
+    Assert(
+        !WebhookValidation.IsDiscordWebhook("https://user@discord.com/api/v10/webhooks/123456/test-token"),
+        "A webhook URL with userinfo must be rejected.");
+    Assert(
+        !WebhookValidation.IsDiscordWebhook("https://discord.com:444/api/v10/webhooks/123456/test-token"),
+        "A webhook URL with a non-default port must be rejected.");
+    Assert(
+        !WebhookValidation.IsDiscordWebhook(versionedWebhook + "#fragment"),
+        "A webhook URL with a fragment must be rejected.");
+    Assert(
+        DiscordWebhookClient.WithWait(versionedWebhook) == versionedWebhook + "?wait=true",
+        "Webhook requests must add wait=true as a real query parameter.");
+    var webhookWithQuery = new Uri(DiscordWebhookClient.WithWait(versionedWebhook + "?thread_id=42&wait=false"));
+    Assert(
+        webhookWithQuery.Query == "?thread_id=42&wait=true" && string.IsNullOrEmpty(webhookWithQuery.Fragment),
+        "Webhook requests must preserve existing query parameters and replace an existing wait value.");
+    using (var webhookHandler = DiscordWebhookClient.CreateHandler())
+    {
+        Assert(!webhookHandler.AllowAutoRedirect,
+            "Discord uploads must not automatically follow redirects away from the validated webhook URL.");
+    }
+    using (var oversizedResponse = new ByteArrayContent(
+               Enumerable.Repeat((byte)'x', DiscordWebhookClient.MaximumResponseBytes + 20).ToArray()))
+    {
+        var responseText = await DiscordWebhookClient.ReadResponseTextAsync(
+            oversizedResponse,
+            CancellationToken.None);
+        Assert(
+            responseText.Length == DiscordWebhookClient.MaximumResponseBytes + " [response truncated]".Length &&
+            responseText.EndsWith(" [response truncated]", StringComparison.Ordinal),
+            "Discord response bodies must be read through a bounded, visibly truncated path.");
+    }
 
     SensitiveDataRedactor.RegisterSecret(unversionedWebhook);
     var redactedExactSecret = SensitiveDataRedactor.Redact("Request failed: " + unversionedWebhook);
@@ -394,6 +434,48 @@ try
     var defaultCompressionTargets = CompressionTargetPlanner.Build(AppSettings.DefaultCompressionTargetMb);
     Assert(defaultCompressionTargets[0] == 95, "Default compression fallback must begin at 95 MB.");
     Assert(defaultCompressionTargets.Contains(9), "Default compression fallback must still reach 9 MB.");
+    var hourLongTargets = CompressionTargetPlanner.BuildAchievable(95, TimeSpan.FromMinutes(60));
+    Assert(hourLongTargets.Count == 0,
+        "An hour-long clip must reject every target that cannot sustain the minimum video bitrate before encoding.");
+    var twentyMinuteTargets = CompressionTargetPlanner.BuildAchievable(95, TimeSpan.FromMinutes(20));
+    Assert(twentyMinuteTargets.SequenceEqual([95, 47]),
+        $"A twenty-minute clip must skip futile lower targets; got [{string.Join(", ", twentyMinuteTargets)}].");
+    Assert(
+        CompressionTargetPlanner.TryCreateBitrates(TimeSpan.FromMinutes(20), 47, out var achievableBitrates) &&
+        achievableBitrates.VideoKbps >= CompressionTargetPlanner.MinimumVideoKbps &&
+        !CompressionTargetPlanner.TryCreateBitrates(TimeSpan.FromMinutes(20), 23, out _),
+        "Compression feasibility must distinguish the last achievable target from the first impossible one.");
+    Assert(
+        CompressionTargetPlanner.TryCreateBitrates(TimeSpan.FromSeconds(29.3), 95, out var shortClipBitrates),
+        "A short clip must produce a valid compression bitrate plan.");
+    var compressionLog = DiscordWebhookClient.BuildCompressionLogMessage(
+        "Battlefield.mp4",
+        183_955_215,
+        26_214_400,
+        95,
+        shortClipBitrates);
+    Assert(
+        compressionLog ==
+        "Compression complete for Battlefield.mp4: 175.4 MB -> 25.0 MB (85.7% smaller; 95 MB target ceiling; 6000 kbps video / 96 kbps audio).",
+        $"Compression logs must report the actual before/after sizes and encoder plan; got '{compressionLog}'.");
+    var untrustedFfmpegFolder = Directory.CreateDirectory(Path.Combine(temporaryRoot, "path-ffmpeg"));
+    var untrustedFfmpegPath = Path.Combine(untrustedFfmpegFolder.FullName, "ffmpeg.exe");
+    await File.WriteAllTextAsync(untrustedFfmpegPath, "not an executable");
+    var originalPath = Environment.GetEnvironmentVariable("PATH");
+    try
+    {
+        Environment.SetEnvironmentVariable("PATH", untrustedFfmpegFolder.FullName);
+        Assert(
+            !string.Equals(
+                FfmpegCompressor.FindExecutable(),
+                untrustedFfmpegPath,
+                StringComparison.OrdinalIgnoreCase),
+            "FFmpeg discovery must not execute an untrusted PATH entry.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("PATH", originalPath);
+    }
 
     var detectorResponses = new ConcurrentQueue<bool>(
         [true, false, false, true, false, false, false, true]);
@@ -570,12 +652,14 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         AppSettings.DefaultUploaderName,
         false);
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+    using var activityHistory = new ActivityHistoryStore(string.Empty);
     var worker = new UploaderWorker(
         settings,
         statuses.Enqueue,
         store,
         () => throw new InvalidOperationException(
-            "Local-only mode must not construct a Discord webhook client."));
+            "Local-only mode must not construct a Discord webhook client."),
+        activityHistory);
     var workerTask = worker.RunAsync(cancellation.Token);
     try
     {
@@ -607,6 +691,12 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         "A local-only clip must never be marked as uploaded.");
     Assert(state.PendingLocalOnlyMoves.Count == 0,
         "A completed local-only archive move must clear its durable pending entry.");
+    var activity = activityHistory.GetSnapshot().Entries.Single(entry => entry.FileName == clipName);
+    Assert(activity.State == ClipActivityState.Archived &&
+           activity.Route == ClipActivityRoute.LocalOnly &&
+           activity.AttemptCount == 1 &&
+           activity.CurrentPath == expectedDestination,
+        "Local-only processing must publish its final route and archive location to Activity.");
 
     const string pendingClipName = "Apex Legends__2026-08-05__12-30-00.mp4";
     var pendingSourcePath = Path.Combine(clipsFolder, pendingClipName);
@@ -649,6 +739,325 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         "A recovered local-only move must never be redirected into the uploaded archive.");
 }
 
+static void AssertActivityHistory(string root)
+{
+    Directory.CreateDirectory(root);
+    var spacedFolder = @"C:\Users\Test User\Videos\SteelSeries Moments\uploaded";
+    var openFolderStart = ActivityView.CreateOpenFolderStartInfo(spacedFolder);
+    Assert(openFolderStart.FileName == "explorer.exe" &&
+           openFolderStart.UseShellExecute &&
+           openFolderStart.ArgumentList.SequenceEqual([spacedFolder]),
+        "Opening a folder must pass a space-containing path as one Explorer argument.");
+    var spacedFile = Path.Combine(spacedFolder, "Battlefield 6", "clip one.mp4");
+    var selectFileStart = ActivityView.CreateSelectFileStartInfo(spacedFile);
+    Assert(selectFileStart.FileName == "explorer.exe" &&
+           selectFileStart.UseShellExecute &&
+           selectFileStart.ArgumentList.SequenceEqual([$"/select,{spacedFile}"]),
+        "Showing a clip must pass Explorer's /select switch and path as one argument token.");
+
+    var historyPath = Path.Combine(root, "activity.json");
+    var sourcePath = Path.Combine(root, "Battlefield™-6__2026-08-06__14-37-13.mp4");
+    using (var store = new ActivityHistoryStore(historyPath))
+    {
+        using var subscription = store.Subscribe(new SynchronizationContext(), _ => { });
+        Assert(store.SubscriptionCount == 1, "Activity subscribers must be tracked while attached.");
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Discovered, OriginalBytes: 183_955_215));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Waiting, Detail: "Waiting for a stable file."));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Hashing));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Queued));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Uploading, IncrementAttempt: true));
+        store.Transition(new ClipActivityUpdate(
+            sourcePath,
+            ClipActivityState.Compressing,
+            CompressedBytes: 26_214_400,
+            CompressionTargetMb: 95,
+            VideoKbps: 6000,
+            AudioKbps: 96));
+        store.Transition(new ClipActivityUpdate(sourcePath, ClipActivityState.Completed, Route: ClipActivityRoute.Uploaded));
+        var archivedPath = Path.Combine(root, "uploaded", "Battlefield™-6", Path.GetFileName(sourcePath));
+        store.Transition(new ClipActivityUpdate(
+            sourcePath,
+            ClipActivityState.Archived,
+            CurrentPath: archivedPath,
+            Route: ClipActivityRoute.Uploaded,
+            Detail: "Discord upload and local archive completed."));
+
+        var entry = store.GetSnapshot().Entries.Single();
+        Assert(entry.State == ClipActivityState.Archived &&
+               entry.AttemptCount == 1 &&
+               entry.GameName == "Battlefield™-6" &&
+               entry.OriginalBytes == 183_955_215 &&
+               entry.CompressedBytes == 26_214_400 &&
+               entry.VideoKbps == 6000,
+            "Activity transitions must preserve identity, attempts, parsed game, and compression metrics.");
+        Assert(ActivityView.BuildDetail(entry).Contains("175.4 MB -> 25.0 MB (85.7% smaller)", StringComparison.Ordinal),
+            "Activity details must expose the actual before/after compression result.");
+
+        subscription.Dispose();
+        Assert(store.SubscriptionCount == 0, "Closing an Activity subscriber must detach it exactly once.");
+    }
+
+    using (var reloaded = new ActivityHistoryStore(historyPath))
+    {
+        Assert(reloaded.GetSnapshot().Entries is [var persisted] &&
+               persisted.State == ClipActivityState.Archived &&
+               persisted.AttemptCount == 1,
+            "Bounded Activity history must survive restart.");
+
+        Parallel.For(0, 140, index =>
+        {
+            reloaded.Transition(new ClipActivityUpdate(
+                Path.Combine(root, $"Concurrent Game__2026-08-06__14-37-{index % 60:00}-{index}.mp4"),
+                ClipActivityState.Discovered,
+                OriginalBytes: index + 1));
+        });
+        var snapshot = reloaded.GetSnapshot();
+        Assert(snapshot.Entries.Count == ActivityHistoryStore.MaximumEntries &&
+               snapshot.Entries.Select(entry => entry.Id).Distinct().Count() == ActivityHistoryStore.MaximumEntries,
+            "Concurrent workers must retain a bounded set of distinct Activity entries.");
+
+        var secretPath = Path.Combine(root, "secret.mp4");
+        reloaded.Transition(new ClipActivityUpdate(
+            secretPath,
+            ClipActivityState.Failed,
+            Error: $"Could not move {secretPath}; rejected https://discord.com/api/webhooks/123456/never-persist-this-token"));
+        var redactedError = reloaded.GetSnapshot().Entries.Single(entry => entry.SourcePath == secretPath).Error;
+        Assert(redactedError is not null && !redactedError.Contains(root, StringComparison.OrdinalIgnoreCase),
+            "Concise Activity errors must not repeat full local clip paths in the UI.");
+        var persistedJson = File.ReadAllText(historyPath);
+        Assert(!persistedJson.Contains("never-persist-this-token", StringComparison.Ordinal) &&
+               persistedJson.Contains("[REDACTED DISCORD WEBHOOK]", StringComparison.Ordinal),
+            "Activity persistence must redact webhook credentials before writing to disk.");
+        Assert(!File.Exists(historyPath + ".tmp"), "Atomic Activity writes must not leave a temporary file behind.");
+    }
+
+    foreach (var state in Enum.GetValues<ClipActivityState>())
+    {
+        var presentation = ActivityView.GetPresentation(new ClipActivityEntry
+        {
+            Id = Guid.NewGuid(),
+            FileName = "clip.mp4",
+            SourcePath = sourcePath,
+            State = state
+        });
+        Assert(!string.IsNullOrWhiteSpace(presentation.Label),
+            $"Activity state {state} must have a deterministic UI label.");
+    }
+
+    using (var lifecycle = new ActivityHistoryStore(string.Empty))
+    {
+        var retryPath = Path.Combine(root, "retry.mp4");
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Retrying,
+            OriginalBytes: 20_000_000,
+            Error: "Discord returned HTTP 413",
+            CompressedBytes: 10_000_000,
+            CompressionTargetMb: 25,
+            VideoKbps: 3000));
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Uploading,
+            IncrementAttempt: true,
+            ResetCompression: true));
+        var retrying = lifecycle.GetSnapshot().Entries.Single();
+        Assert(retrying.Error == "Discord returned HTTP 413" &&
+               retrying.CompressedBytes is null &&
+               retrying.CompressionTargetMb is null,
+            "A retry must preserve its useful error while explicitly clearing stale compression metrics.");
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Compressing,
+            CompressionTargetMb: 9,
+            VideoKbps: 2200,
+            AudioKbps: 96,
+            ResetCompression: true));
+        var recompressing = lifecycle.GetSnapshot().Entries.Single();
+        Assert(recompressing.CompressedBytes is null &&
+               recompressing.CompressionTargetMb == 9 &&
+               recompressing.VideoKbps == 2200,
+            "A new compression attempt must clear the prior output while retaining its new encoder plan.");
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Completed,
+            ClearError: true));
+        Assert(lifecycle.GetSnapshot().Entries.Single().Error is null,
+            "A terminal success must explicitly clear the previous retry error.");
+
+        var recoveryPath = Path.Combine(root, "reused-name.mp4");
+        var first = lifecycle.Transition(new ClipActivityUpdate(
+            recoveryPath,
+            ClipActivityState.Archived,
+            OriginalBytes: 500_000_000,
+            Route: ClipActivityRoute.Uploaded));
+        var recovered = lifecycle.Transition(new ClipActivityUpdate(
+            recoveryPath,
+            ClipActivityState.Archived,
+            OriginalBytes: 7_000_000,
+            Route: ClipActivityRoute.LocalOnly));
+        Assert(first.Id != recovered.Id &&
+               recovered.OriginalBytes == 7_000_000 &&
+               recovered.CreatedUtc >= first.CreatedUtc,
+            "Recovery-first archive updates must not merge a reused path into an older terminal clip.");
+
+        var redundant = lifecycle.Transition(new ClipActivityUpdate(
+            recoveryPath,
+            ClipActivityState.Archived,
+            Route: ClipActivityRoute.LocalOnly,
+            Detail: "Recovered an already-finished pending move.",
+            ReuseTerminalEntry: true));
+        Assert(redundant.Id == recovered.Id &&
+               lifecycle.GetSnapshot().Entries.Count(entry => entry.SourcePath == recoveryPath) == 2,
+            "A redundant recovery with no moved file must reuse the latest terminal row instead of creating a duplicate.");
+    }
+
+    using (var concurrent = new ActivityHistoryStore(string.Empty))
+    {
+        Parallel.Invoke(
+            () => RecordConcurrentActivities(concurrent, root, "worker-a"),
+            () => RecordConcurrentActivities(concurrent, root, "worker-b"));
+        var entries = concurrent.GetSnapshot().Entries;
+        Assert(entries.Count == ActivityHistoryStore.MaximumEntries &&
+               entries.Select(entry => entry.Id).Distinct().Count() == ActivityHistoryStore.MaximumEntries &&
+               entries.All(entry => entry.State == ClipActivityState.Queued),
+            "Two workers must safely publish complete transitions while history remains bounded.");
+    }
+}
+
+static void AssertBrandedActivityScrollHost()
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            using var form = new Form
+            {
+                ClientSize = new Size(320, 220),
+                ShowInTaskbar = false
+            };
+            using var host = new BrandedScrollHost
+            {
+                Location = new Point(40, 20),
+                Size = new Size(260, 160)
+            };
+            using var content = new ActivityListPanel
+            {
+                BackColor = ClipCordTheme.Shell
+            };
+            Button? lastButton = null;
+            var cardLayoutCount = 0;
+            for (var index = 0; index < 20; index++)
+            {
+                var card = new Panel
+                {
+                    Height = 54,
+                    Margin = new Padding(0, 0, 0, 6)
+                };
+                card.Layout += (_, _) => cardLayoutCount++;
+                if (index == 19)
+                {
+                    lastButton = new Button
+                    {
+                        Text = "Last activity action",
+                        Location = new Point(10, 10),
+                        Size = new Size(150, 32)
+                    };
+                    card.Controls.Add(lastButton);
+                }
+                content.Controls.Add(card);
+            }
+            host.Content = content;
+            var outsideButton = new Button
+            {
+                Text = "Outside action",
+                Location = new Point(0, 185),
+                Size = new Size(120, 30)
+            };
+            form.Controls.Add(host);
+            form.Controls.Add(outsideButton);
+            form.Show();
+            Application.DoEvents();
+            host.RefreshContentLayout();
+
+            Assert(!host.AutoScroll && host.HasOverflow,
+                "Activity must use the branded scroll host instead of a native Windows scrollbar.");
+            var initialThumb = host.ScrollThumbBounds;
+            Assert(!initialThumb.IsEmpty && host.ClientRectangle.Contains(initialThumb),
+                $"The branded scrollbar thumb must begin inside its viewport; thumb={initialThumb}, viewport={host.ClientRectangle}.");
+            Assert(host.GetTrackHitBounds().Width >= 20 && host.GetThumbHitBounds().Width >= 20,
+                "The branded scrollbar must keep its slim artwork while exposing a usable pointer target.");
+
+            cardLayoutCount = 0;
+            for (var index = 0; index < 20; index++) host.RefreshContentLayout();
+            Assert(cardLayoutCount == 0,
+                $"No-op scrollbar refreshes must not relayout every activity card; observed {cardLayoutCount} layouts.");
+
+            host.ScrollBy(100);
+            Assert(host.ScrollOffset == 100 && host.ScrollThumbBounds.Top > initialThumb.Top && content.Top == -100,
+                "The branded scrollbar must move its thumb and activity content together.");
+            host.RefreshContentLayout(anchorAdjustment: 54);
+            Assert(host.ScrollOffset == 154,
+                "A new activity inserted above the viewport must preserve the user's reading position.");
+
+            host.ScrollBy(-int.MaxValue);
+            var onMouseWheel = typeof(BrandedScrollHost).GetMethod(
+                "OnMouseWheel",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            onMouseWheel.Invoke(host, [new MouseEventArgs(MouseButtons.None, 0, 0, 0, -120)]);
+            Assert(host.ScrollOffset > 0, "Mouse-wheel input must scroll the branded activity viewport.");
+
+            host.ScrollBy(-int.MaxValue);
+            var onKeyDown = typeof(BrandedScrollHost).GetMethod(
+                "OnKeyDown",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            onKeyDown.Invoke(host, [new KeyEventArgs(Keys.End)]);
+            var maximumOffset = host.ScrollOffset;
+            Assert(maximumOffset > 0,
+                "End must reach the bottom of the branded activity viewport.");
+            onKeyDown.Invoke(host, [new KeyEventArgs(Keys.Home)]);
+            Assert(host.ScrollOffset == 0, "Home must return to the top of the branded activity viewport.");
+
+            var finalButton = lastButton ?? throw new InvalidOperationException("The final activity button was not created.");
+            Assert(finalButton.Focus(),
+                "The last activity action must be keyboard focusable.");
+            Application.DoEvents();
+            var focusedBounds = new Rectangle(
+                host.PointToClient(finalButton.PointToScreen(Point.Empty)),
+                finalButton.Size);
+            Assert(focusedBounds.Top >= 0 && focusedBounds.Bottom <= host.ClientSize.Height,
+                $"Keyboard focus must scroll the final activity action into view; bounds={focusedBounds}, viewport={host.ClientRectangle}.");
+
+            outsideButton.Focus();
+            var onMouseEnter = typeof(Control).GetMethod(
+                "OnMouseEnter",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            onMouseEnter.Invoke(host, [EventArgs.Empty]);
+            Assert(outsideButton.Focused,
+                "Moving the pointer over Activity must not steal keyboard focus from another control.");
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) throw new InvalidOperationException("Branded scrollbar validation failed.", failure);
+}
+
+static void RecordConcurrentActivities(ActivityHistoryStore store, string root, string workerName)
+{
+    for (var index = 0; index < 120; index++)
+    {
+        var path = Path.Combine(root, $"{workerName}-{index}.mp4");
+        store.Transition(new ClipActivityUpdate(path, ClipActivityState.Discovered, OriginalBytes: index + 1));
+        store.Transition(new ClipActivityUpdate(path, ClipActivityState.Hashing));
+        store.Transition(new ClipActivityUpdate(path, ClipActivityState.Queued));
+    }
+}
+
 static void AssertSettingsFormLayout(AppSettings settings)
 {
     Exception? failure = null;
@@ -656,10 +1065,57 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
+            using (var activityOnly = new SettingsForm(
+                       settings,
+                       checkForUpdatesAsync: _ => Task.CompletedTask,
+                       initialPage: SettingsPage.Activity))
+            {
+                activityOnly.Show();
+                Application.DoEvents();
+                Assert(activityOnly.AcceptButton is null && activityOnly.SavedSettings is null,
+                    "Opening Activity must not expose an implicit save action or create saved settings.");
+                activityOnly.Close();
+                Assert(activityOnly.SavedSettings is null,
+                    "Closing Activity without visiting Settings must not enter the settings-save notification path.");
+            }
+
+            using (var activityThenSettings = new SettingsForm(
+                       settings,
+                       checkForUpdatesAsync: _ => Task.CompletedTask,
+                       initialPage: SettingsPage.Activity))
+            {
+                activityThenSettings.Show();
+                activityThenSettings.ShowPage(SettingsPage.Settings);
+                Application.DoEvents();
+                var save = EnumerateControls(activityThenSettings)
+                    .OfType<Button>()
+                    .Single(button => button.Text == "Save changes");
+                Assert(ReferenceEquals(activityThenSettings.AcceptButton, save) && save.Visible,
+                    "Activity-to-Settings navigation must restore the real save action.");
+                save.PerformClick();
+                Assert(activityThenSettings.DialogResult == DialogResult.OK &&
+                       activityThenSettings.SavedSettings is not null,
+                    "A legitimate save after Activity-to-Settings navigation must reach the normal confirmation path.");
+            }
+
+            using var activityHistory = new ActivityHistoryStore(string.Empty);
+            var longActivityName = new string('B', 180) + "__2026-08-06__14-37-13.mp4";
+            var activityPath = Path.Combine(settings.ClipsFolder, longActivityName);
+            activityHistory.Transition(new ClipActivityUpdate(
+                activityPath,
+                ClipActivityState.Compressing,
+                OriginalBytes: 183_955_215,
+                CompressedBytes: 26_214_400,
+                CompressionTargetMb: 95,
+                VideoKbps: 6000,
+                AudioKbps: 96,
+                IncrementAttempt: true,
+                Detail: "Compression complete; preparing the Discord upload."));
             using var form = new SettingsForm(
                 settings,
                 checkForUpdatesAsync: _ => Task.CompletedTask,
-                watcherStatusProvider: () => "Discord open — local-only mode");
+                watcherStatusProvider: () => "Discord open — local-only mode",
+                activityHistory: activityHistory);
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
@@ -718,7 +1174,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .OfType<Button>()
                 .Select(button => button.Text)
                 .ToHashSet(StringComparer.Ordinal);
-            Assert(buttonTexts.SetEquals(["Browse", "Test webhook", "Check for updates", "Save changes", "Cancel"]),
+            Assert(new[] { "Browse", "Test webhook", "Check for updates", "Save changes", "Cancel" }
+                    .All(buttonTexts.Contains),
                 "The settings form must keep all action buttons available.");
             var startupCheckbox = EnumerateControls(form)
                 .OfType<CheckBox>()
@@ -744,15 +1201,33 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertControlsFit(form);
             var activityItem = EnumerateControls(form)
                 .Single(control => control.Name == "ActivityNavItem");
-            Assert(activityItem.Tag as string == SettingsForm.ActivityComingSoonText &&
-                   activityItem.AccessibleDescription == SettingsForm.ActivityComingSoonText &&
-                   activityItem.AccessibilityObject.State.HasFlag(AccessibleStates.Unavailable),
-                "The disabled Activity navigation must explain that it belongs to a future release.");
-            var activityLabel = EnumerateControls(activityItem)
-                .OfType<Label>()
-                .Single(label => label.Name == "ActivityNavLabel");
-            Assert(!activityLabel.Enabled,
-                "The Activity navigation label must remain visibly unavailable.");
+            Assert(!activityItem.AccessibilityObject.State.HasFlag(AccessibleStates.Unavailable) &&
+                   activityItem.TabStop,
+                "Activity navigation must be available to pointer and keyboard users.");
+            form.Show();
+            form.ShowPage(SettingsPage.Activity);
+            Application.DoEvents();
+            Assert(form.Text == "ClipCord — Activity", "Activity navigation must activate the branded Activity page.");
+            Assert(EnumerateControls(form).Single(control => control.Name == "ActivityView").Visible,
+                "The Activity page must be visible after navigation.");
+            var activityScrollHost = EnumerateControls(form)
+                .OfType<BrandedScrollHost>()
+                .Single(control => control.Name == "ActivityScrollHost");
+            var activityList = EnumerateControls(form)
+                .OfType<ActivityListPanel>()
+                .Single(control => control.Name == "ActivityList");
+            Assert(!activityScrollHost.AutoScroll && !activityList.AutoScroll,
+                "Activity must not expose the native Windows scrollbar.");
+            Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 1,
+                "The Activity page must render the current bounded history.");
+            Assert(EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenUploadedFolderButton") &&
+                   EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenLogsButton") &&
+                   EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenFileLocationButton"),
+                "Activity must expose uploaded-folder, log, and per-clip location actions.");
+            AssertControlsFit(form);
+            AssertCriticalTextFits(form);
+            form.ShowPage(SettingsPage.Settings);
+            Application.DoEvents();
             Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Local only"),
                 "The branded header must present the complete local-only watcher status.");
             var headerLogo = EnumerateControls(form)
@@ -815,6 +1290,9 @@ static void AssertSettingsFormLayout(AppSettings settings)
 
             AssertSettingsRoundTrip(settings);
             AssertManualCheckCloseProtection(settings);
+            form.Dispose();
+            Assert(activityHistory.SubscriptionCount == 0,
+                "Closing the Settings/Activity window must detach its live-history subscription.");
         }
         catch (Exception exception)
         {
@@ -907,7 +1385,7 @@ static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
 {
     var cards = EnumerateControls(form)
         .OfType<ScrollableControl>()
-        .Single(control => control.AutoScroll);
+        .Single(control => control.Name == "SettingsCards");
     cards.PerformLayout();
     Assert(!cards.VerticalScroll.Visible && cards.AutoScrollPosition.Y == 0,
         $"Settings must open with every card visible without scrolling; viewport={cards.ClientSize}, display={cards.DisplayRectangle}.");
@@ -917,7 +1395,7 @@ static void AssertSettingsCardsScrollOnlyWhenScreenConstrained(SettingsForm form
 {
     var cards = EnumerateControls(form)
         .OfType<ScrollableControl>()
-        .Single(control => control.AutoScroll);
+        .Single(control => control.Name == "SettingsCards");
     if (!cards.VerticalScroll.Visible) return;
     Assert(form.Height < designedOpeningSize.Height,
         $"Settings may scroll only when the screen reduced its designed opening height; designed={designedOpeningSize}, actual={form.Size}.");
@@ -983,7 +1461,12 @@ static void AssertCriticalTextFits(Form form)
         "Local only",
         "Start with Windows",
         "Save changes",
-        "Cancel"
+        "Cancel",
+        "Recent activity",
+        "Open uploaded folder",
+        "Open logs",
+        "Show in folder",
+        "Close"
     };
     foreach (var control in EnumerateControls(form).Where(control => control.Visible && criticalText.Contains(control.Text)))
     {

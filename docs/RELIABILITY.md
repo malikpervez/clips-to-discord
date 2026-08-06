@@ -16,7 +16,7 @@ The cost is one extra sequential disk read before upload. This is intentional: m
 
 Discovery writes to a bounded queue with two consumers. If one upload stalls, the second consumer and scanner continue. Connection establishment has a 15-second timeout, and each complete multipart upload has a five-minute deadline.
 
-Failed uploads retain the existing five-minute retry delay. Cancellation caused by Discord closing stops active requests cleanly.
+Failed uploads retain the existing five-minute retry delay. A clip whose duration makes every remaining compression target mathematically unachievable is instead marked as needing attention and is not retried automatically until settings change or the app restarts. Cancellation caused by Discord closing stops active requests cleanly.
 
 Discord must be absent for three consecutive two-second polls before the worker is cancelled. The controller records that exit reason instead of polling again, so a quick updater relaunch cannot strand it awaiting a still-running worker. Each linked cancellation source remains alive until its worker task has been observed. Application exit waits up to ten seconds on the UI thread; if cleanup takes longer, it remains observed in the background rather than hanging the tray application.
 
@@ -32,9 +32,15 @@ Local-only decisions use a separate persisted hash set and pending-move queue. T
 
 There is still an irreducible interval between Discord accepting the HTTP request and the local durable write. Incoming Discord webhooks do not offer an idempotency key. Eliminating duplicates completely would require choosing at-most-once behavior, which could silently lose a clip if the app died before Discord accepted it. The app keeps at-least-once delivery and narrows the interval to the immediate durable state write.
 
+## Activity history
+
+Scanner and worker lifecycle updates enter one thread-safe local store. The store coalesces identical states, retains the 100 most recently updated clips, redacts webhook-shaped text, and atomically replaces `activity.json` after a material transition. Corrupt or unsupported history starts empty and never affects upload state or duplicate protection.
+
+The Activity window receives immutable snapshots through the Windows Forms synchronization context. Posting is non-blocking for worker threads, replaced controls are disposed during refresh, and closing the window removes its subscription. Activity persistence is informational: a write failure is logged but cannot fail an upload, change its route, or alter the persist-before-move guarantee.
+
 ## Compression fallback
 
-The configured target is 1–100 MB and defaults to 95 MB for new settings. Existing saved values are preserved. After a size rejection, FFmpeg compresses from the original clip. If Discord rejects that result, the app retries progressively smaller targets, up to five compression attempts; the default sequence reaches 9 MB on its fifth attempt.
+The configured target is 1–100 MB and defaults to 95 MB for new settings. Existing saved values are preserved. After a size rejection, FFmpeg probes the original clip once and ClipCord calculates which progressively smaller targets can still allocate at least 180 kbps to video after audio. Impossible targets are skipped before encoding. If Discord rejects every achievable result, the clip remains in place with a needs-attention status instead of repeatedly running equivalent two-pass encodes in the background.
 
 Two-pass compression uses the Windows `NUL` device for its first pass. The app targets Windows, and the compressor also has an explicit platform guard so this path cannot silently run with different semantics elsewhere.
 
@@ -62,6 +68,6 @@ An already staged file is reused only after its length and digest are checked ag
 
 ## Webhook validation and logging
 
-Validation permits Discord's unversioned `/api/webhooks/...` path and versioned `/api/v{number}/webhooks/...` path while retaining HTTPS and Discord-host allow-list checks.
+Validation permits Discord's unversioned `/api/webhooks/...` path and versioned `/api/v{number}/webhooks/...` path while retaining HTTPS and Discord-host allow-list checks. Userinfo, URL fragments, and non-default ports are rejected. Upload requests do not follow HTTP redirects, response bodies are capped at 64 KiB, and the request deadline remains active through the bounded response read.
 
 All log output passes through a centralized redactor. It removes the exact registered webhook and pattern-matches supported Discord webhook URL forms. The webhook remains DPAPI-encrypted at rest and is never intentionally included in a log call.

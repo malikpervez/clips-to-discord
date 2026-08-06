@@ -14,14 +14,14 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 ## Current priority
 
 1. [#17 Opt-in beta channel](https://github.com/malikpervez/clips-to-discord/issues/17) — expose public prereleases only to users who explicitly choose them while stable remains the default.
-2. [#18 Activity center](https://github.com/malikpervez/clips-to-discord/issues/18) — activate the Activity experience and make discovery, queueing, upload, compression, completion, and failure state visible.
-3. After the Activity foundation ships, implement [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20) as separate changes.
+2. Build on the shipped Activity foundation with [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20) as separate changes.
 
 ## Recently shipped
 
 - [#16 Stable-only update checker](https://github.com/malikpervez/clips-to-discord/issues/16) — shipped, followed by verified in-app download and installation in ClipCord v1.5.0.
 - [#32 Local-only mode](https://github.com/malikpervez/clips-to-discord/issues/32) — shipped in ClipCord v1.6.0 with durable routing, restart recovery, and no webhook requirement while uploads are disabled.
 - ClipCord v1.6.1 polished the Settings opening size and aligned the primary text fields.
+- [#18 Activity center](https://github.com/malikpervez/clips-to-discord/issues/18) — shipped in ClipCord v1.7.0 with bounded local history, live upload/compression status, and branded accessible scrolling.
 
 ## Planned milestones
 
@@ -30,7 +30,7 @@ Product phases describe dependency and outcome order. They are not promises that
 | Milestone | Outcome | Agent-ready work |
 | --- | --- | --- |
 | [User control and release channels](https://github.com/malikpervez/clips-to-discord/milestone/1) | Let users control what leaves their computer and which release channel they follow. | [#16 stable-only update checker](https://github.com/malikpervez/clips-to-discord/issues/16) and [#32 local-only mode](https://github.com/malikpervez/clips-to-discord/issues/32) are complete; [#17 opt-in beta channel](https://github.com/malikpervez/clips-to-discord/issues/17) is next. |
-| [Activity and recovery](https://github.com/malikpervez/clips-to-discord/milestone/2) | Make upload status and safe recovery visible in the app. | [#18 Activity center](https://github.com/malikpervez/clips-to-discord/issues/18), then [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20). |
+| [Activity and recovery](https://github.com/malikpervez/clips-to-discord/milestone/2) | Make upload status and safe recovery visible in the app. | [#18 Activity center](https://github.com/malikpervez/clips-to-discord/issues/18) is complete; [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20) are next. |
 | [Profiles and routing](https://github.com/malikpervez/clips-to-discord/milestone/3) | Support several clip sources and Discord destinations with predictable routing. | [#21 Multiple watched folders](https://github.com/malikpervez/clips-to-discord/issues/21), [#22 encrypted webhook profiles](https://github.com/malikpervez/clips-to-discord/issues/22), [#23 game-name aliases](https://github.com/malikpervez/clips-to-discord/issues/23), [#24 routing and exclusions](https://github.com/malikpervez/clips-to-discord/issues/24), [#25 message templates](https://github.com/malikpervez/clips-to-discord/issues/25). |
 | [Discord organization](https://github.com/malikpervez/clips-to-discord/milestone/4) | Improve attribution and organization when friends share destinations. | [#26 Per-upload username/avatar](https://github.com/malikpervez/clips-to-discord/issues/26), [#27 forum/thread routing](https://github.com/malikpervez/clips-to-discord/issues/27). |
 | [Future exploration](https://github.com/malikpervez/clips-to-discord/milestone/5) | Gather evidence before committing larger media features. | [#28 Research lightweight clip preparation](https://github.com/malikpervez/clips-to-discord/issues/28) |

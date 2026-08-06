@@ -10,13 +10,19 @@ internal sealed class DiscordAwareController : IDisposable
     private int _disposeStarted;
     private int _cleanupStarted;
 
-    public DiscordAwareController(AppSettings settings, Action<string> reportStatus)
+    public DiscordAwareController(
+        AppSettings settings,
+        Action<string> reportStatus,
+        ActivityHistoryStore? activityHistory = null)
         : this(
             settings,
             reportStatus,
             DiscordDetector.IsRunning,
-            static (workerSettings, status, cancellationToken) =>
-                new UploaderWorker(workerSettings, status).RunAsync(cancellationToken),
+            (workerSettings, status, cancellationToken) =>
+                new UploaderWorker(
+                    workerSettings,
+                    status,
+                    activityHistory: activityHistory).RunAsync(cancellationToken),
             DiscordControllerOptions.Default)
     {
     }
