@@ -663,10 +663,12 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
+            var designedOpeningSize = form.Size;
+            AssertSettingsCardsOpenWithoutScrolling(form);
             form.Show();
             Application.DoEvents();
             AssertControlsFit(form);
-            AssertSettingsCardsOpenWithoutScrolling(form);
+            AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, designedOpeningSize);
             AssertSettingsTextFieldsAligned(form);
             AssertCriticalTextFits(form);
             AssertAccessibility(form);
@@ -906,8 +908,19 @@ static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
     var cards = EnumerateControls(form)
         .OfType<ScrollableControl>()
         .Single(control => control.AutoScroll);
+    cards.PerformLayout();
     Assert(!cards.VerticalScroll.Visible && cards.AutoScrollPosition.Y == 0,
         $"Settings must open with every card visible without scrolling; viewport={cards.ClientSize}, display={cards.DisplayRectangle}.");
+}
+
+static void AssertSettingsCardsScrollOnlyWhenScreenConstrained(SettingsForm form, Size designedOpeningSize)
+{
+    var cards = EnumerateControls(form)
+        .OfType<ScrollableControl>()
+        .Single(control => control.AutoScroll);
+    if (!cards.VerticalScroll.Visible) return;
+    Assert(form.Height < designedOpeningSize.Height,
+        $"Settings may scroll only when the screen reduced its designed opening height; designed={designedOpeningSize}, actual={form.Size}.");
 }
 
 static void AssertSettingsTextFieldsAligned(SettingsForm form)
