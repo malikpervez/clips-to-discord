@@ -234,6 +234,13 @@ try
     }
     Assert(ReferenceEquals(ClipCordTheme.InterfaceFont(10f), ClipCordTheme.InterfaceFont(10f)),
         "ClipCord fonts must be cached instead of allocating GDI font handles for every control.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Activity, 144) == new Size(1564, 1156),
+        "The Activity window must use the user-approved 1043x771 design size at 150% scaling.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, 96) == new Size(1080, 820),
+        "The Settings page must retain its approved 1080x820 design size.");
+    Assert(SettingsForm.GetScaledMinimumSize(144) == new Size(1350, 975),
+        "The resize floor must scale with the active Windows DPI.");
+    AssertBrandedActivityScrollHost();
 
     AssertActivityHistory(Path.Combine(temporaryRoot, "activity-history"));
     AssertSettingsFormLayout(new AppSettings(
@@ -917,6 +924,129 @@ static void AssertActivityHistory(string root)
     }
 }
 
+static void AssertBrandedActivityScrollHost()
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            using var form = new Form
+            {
+                ClientSize = new Size(320, 220),
+                ShowInTaskbar = false
+            };
+            using var host = new BrandedScrollHost
+            {
+                Location = new Point(40, 20),
+                Size = new Size(260, 160)
+            };
+            using var content = new ActivityListPanel
+            {
+                BackColor = ClipCordTheme.Shell
+            };
+            Button? lastButton = null;
+            var cardLayoutCount = 0;
+            for (var index = 0; index < 20; index++)
+            {
+                var card = new Panel
+                {
+                    Height = 54,
+                    Margin = new Padding(0, 0, 0, 6)
+                };
+                card.Layout += (_, _) => cardLayoutCount++;
+                if (index == 19)
+                {
+                    lastButton = new Button
+                    {
+                        Text = "Last activity action",
+                        Location = new Point(10, 10),
+                        Size = new Size(150, 32)
+                    };
+                    card.Controls.Add(lastButton);
+                }
+                content.Controls.Add(card);
+            }
+            host.Content = content;
+            var outsideButton = new Button
+            {
+                Text = "Outside action",
+                Location = new Point(0, 185),
+                Size = new Size(120, 30)
+            };
+            form.Controls.Add(host);
+            form.Controls.Add(outsideButton);
+            form.Show();
+            Application.DoEvents();
+            host.RefreshContentLayout();
+
+            Assert(!host.AutoScroll && host.HasOverflow,
+                "Activity must use the branded scroll host instead of a native Windows scrollbar.");
+            var initialThumb = host.ScrollThumbBounds;
+            Assert(!initialThumb.IsEmpty && host.ClientRectangle.Contains(initialThumb),
+                $"The branded scrollbar thumb must begin inside its viewport; thumb={initialThumb}, viewport={host.ClientRectangle}.");
+            Assert(host.GetTrackHitBounds().Width >= 20 && host.GetThumbHitBounds().Width >= 20,
+                "The branded scrollbar must keep its slim artwork while exposing a usable pointer target.");
+
+            cardLayoutCount = 0;
+            for (var index = 0; index < 20; index++) host.RefreshContentLayout();
+            Assert(cardLayoutCount == 0,
+                $"No-op scrollbar refreshes must not relayout every activity card; observed {cardLayoutCount} layouts.");
+
+            host.ScrollBy(100);
+            Assert(host.ScrollOffset == 100 && host.ScrollThumbBounds.Top > initialThumb.Top && content.Top == -100,
+                "The branded scrollbar must move its thumb and activity content together.");
+            host.RefreshContentLayout(anchorAdjustment: 54);
+            Assert(host.ScrollOffset == 154,
+                "A new activity inserted above the viewport must preserve the user's reading position.");
+
+            host.ScrollBy(-int.MaxValue);
+            var onMouseWheel = typeof(BrandedScrollHost).GetMethod(
+                "OnMouseWheel",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            onMouseWheel.Invoke(host, [new MouseEventArgs(MouseButtons.None, 0, 0, 0, -120)]);
+            Assert(host.ScrollOffset > 0, "Mouse-wheel input must scroll the branded activity viewport.");
+
+            host.ScrollBy(-int.MaxValue);
+            var onKeyDown = typeof(BrandedScrollHost).GetMethod(
+                "OnKeyDown",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            onKeyDown.Invoke(host, [new KeyEventArgs(Keys.End)]);
+            var maximumOffset = host.ScrollOffset;
+            Assert(maximumOffset > 0,
+                "End must reach the bottom of the branded activity viewport.");
+            onKeyDown.Invoke(host, [new KeyEventArgs(Keys.Home)]);
+            Assert(host.ScrollOffset == 0, "Home must return to the top of the branded activity viewport.");
+
+            var finalButton = lastButton ?? throw new InvalidOperationException("The final activity button was not created.");
+            Assert(finalButton.Focus(),
+                "The last activity action must be keyboard focusable.");
+            Application.DoEvents();
+            var focusedBounds = new Rectangle(
+                host.PointToClient(finalButton.PointToScreen(Point.Empty)),
+                finalButton.Size);
+            Assert(focusedBounds.Top >= 0 && focusedBounds.Bottom <= host.ClientSize.Height,
+                $"Keyboard focus must scroll the final activity action into view; bounds={focusedBounds}, viewport={host.ClientRectangle}.");
+
+            outsideButton.Focus();
+            var onMouseEnter = typeof(Control).GetMethod(
+                "OnMouseEnter",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            onMouseEnter.Invoke(host, [EventArgs.Empty]);
+            Assert(outsideButton.Focused,
+                "Moving the pointer over Activity must not steal keyboard focus from another control.");
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) throw new InvalidOperationException("Branded scrollbar validation failed.", failure);
+}
+
 static void RecordConcurrentActivities(ActivityHistoryStore store, string root, string workerName)
 {
     for (var index = 0; index < 120; index++)
@@ -935,6 +1065,39 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
+            using (var activityOnly = new SettingsForm(
+                       settings,
+                       checkForUpdatesAsync: _ => Task.CompletedTask,
+                       initialPage: SettingsPage.Activity))
+            {
+                activityOnly.Show();
+                Application.DoEvents();
+                Assert(activityOnly.AcceptButton is null && activityOnly.SavedSettings is null,
+                    "Opening Activity must not expose an implicit save action or create saved settings.");
+                activityOnly.Close();
+                Assert(activityOnly.SavedSettings is null,
+                    "Closing Activity without visiting Settings must not enter the settings-save notification path.");
+            }
+
+            using (var activityThenSettings = new SettingsForm(
+                       settings,
+                       checkForUpdatesAsync: _ => Task.CompletedTask,
+                       initialPage: SettingsPage.Activity))
+            {
+                activityThenSettings.Show();
+                activityThenSettings.ShowPage(SettingsPage.Settings);
+                Application.DoEvents();
+                var save = EnumerateControls(activityThenSettings)
+                    .OfType<Button>()
+                    .Single(button => button.Text == "Save changes");
+                Assert(ReferenceEquals(activityThenSettings.AcceptButton, save) && save.Visible,
+                    "Activity-to-Settings navigation must restore the real save action.");
+                save.PerformClick();
+                Assert(activityThenSettings.DialogResult == DialogResult.OK &&
+                       activityThenSettings.SavedSettings is not null,
+                    "A legitimate save after Activity-to-Settings navigation must reach the normal confirmation path.");
+            }
+
             using var activityHistory = new ActivityHistoryStore(string.Empty);
             var longActivityName = new string('B', 180) + "__2026-08-06__14-37-13.mp4";
             var activityPath = Path.Combine(settings.ClipsFolder, longActivityName);
@@ -1047,6 +1210,14 @@ static void AssertSettingsFormLayout(AppSettings settings)
             Assert(form.Text == "ClipCord — Activity", "Activity navigation must activate the branded Activity page.");
             Assert(EnumerateControls(form).Single(control => control.Name == "ActivityView").Visible,
                 "The Activity page must be visible after navigation.");
+            var activityScrollHost = EnumerateControls(form)
+                .OfType<BrandedScrollHost>()
+                .Single(control => control.Name == "ActivityScrollHost");
+            var activityList = EnumerateControls(form)
+                .OfType<ActivityListPanel>()
+                .Single(control => control.Name == "ActivityList");
+            Assert(!activityScrollHost.AutoScroll && !activityList.AutoScroll,
+                "Activity must not expose the native Windows scrollbar.");
             Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 1,
                 "The Activity page must render the current bounded history.");
             Assert(EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenUploadedFolderButton") &&

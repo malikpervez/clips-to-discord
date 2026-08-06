@@ -12,6 +12,9 @@ internal enum SettingsPage
 
 internal sealed class SettingsForm : Form
 {
+    internal static readonly Size SettingsDesignedClientSize = new(1080, 820);
+    internal static readonly Size ActivityDesignedClientSize = new(1043, 771);
+    internal static readonly Size MinimumDesignedClientSize = new(900, 650);
     private static readonly Regex CompressionTargetPattern = new(
         @"^\s*(?<value>\d{1,3})\s*(?:MB)?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -124,6 +127,7 @@ internal sealed class SettingsForm : Form
     };
     private readonly Func<IWin32Window, Task>? _checkForUpdatesAsync;
     private readonly ActivityHistoryStore _activityHistory;
+    private readonly SettingsPage _openingPage;
     private readonly bool _ownsActivityHistory;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _activityNavigationItem;
@@ -150,14 +154,17 @@ internal sealed class SettingsForm : Form
         _watcherStatusProvider = watcherStatusProvider;
         _activityHistory = activityHistory ?? new ActivityHistoryStore(string.Empty);
         _ownsActivityHistory = activityHistory is null;
+        _openingPage = initialPage;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
 
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.None;
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(1080, 820);
-        MinimumSize = new Size(900, 650);
+        ClientSize = initialPage == SettingsPage.Activity
+            ? ActivityDesignedClientSize
+            : SettingsDesignedClientSize;
+        MinimumSize = MinimumDesignedClientSize;
         BackColor = ClipCordTheme.Header;
         Padding = new Padding(ResizeGrip);
         Font = ClipCordTheme.InterfaceFont(9.5f);
@@ -195,9 +202,9 @@ internal sealed class SettingsForm : Form
         };
 
         Controls.Add(BuildRootLayout());
-        ShowPage(initialPage);
         AcceptButton = _saveButton;
         CancelButton = _cancelButton;
+        ShowPage(initialPage);
 
         _watcherStatusTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _watcherStatusTimer.Tick += (_, _) => UpdateWatcherStatus();
@@ -445,6 +452,8 @@ internal sealed class SettingsForm : Form
         _activityPage.Visible = showActivity;
         if (showActivity) _activityPage.BringToFront();
         else _settingsPage.BringToFront();
+        if (showActivity) _activityPage.RefreshViewport();
+        else _settingsPage.PerformLayout();
 
         UpdateNavigationSelection(_settingsNavigationItem, !showActivity);
         UpdateNavigationSelection(_activityNavigationItem, showActivity);
@@ -1254,9 +1263,16 @@ internal sealed class SettingsForm : Form
     protected override void OnShown(EventArgs eventArgs)
     {
         var workingArea = Screen.FromControl(this).WorkingArea;
-        var availableWidth = Math.Max(MinimumSize.Width, workingArea.Width - 24);
-        var availableHeight = Math.Max(MinimumSize.Height, workingArea.Height - 24);
-        var fittedSize = new Size(Math.Min(Width, availableWidth), Math.Min(Height, availableHeight));
+        var availableWidth = Math.Max(1, workingArea.Width - 24);
+        var availableHeight = Math.Max(1, workingArea.Height - 24);
+        var scaledMinimum = GetScaledMinimumSize(DeviceDpi);
+        MinimumSize = new Size(
+            Math.Min(scaledMinimum.Width, availableWidth),
+            Math.Min(scaledMinimum.Height, availableHeight));
+        var designedSize = GetDesignedOpeningSize(_openingPage, DeviceDpi);
+        var fittedSize = new Size(
+            Math.Min(designedSize.Width, availableWidth),
+            Math.Min(designedSize.Height, availableHeight));
         if (fittedSize != Size)
         {
             Size = fittedSize;
@@ -1267,9 +1283,33 @@ internal sealed class SettingsForm : Form
         base.OnShown(eventArgs);
     }
 
+    internal static Size GetDesignedOpeningSize(SettingsPage page, int dpi)
+    {
+        var clientSize = page == SettingsPage.Activity
+            ? ActivityDesignedClientSize
+            : SettingsDesignedClientSize;
+        var scale = Math.Max(96, dpi) / 96d;
+        return new Size(
+            (int)Math.Round(clientSize.Width * scale),
+            (int)Math.Round(clientSize.Height * scale));
+    }
+
+    internal static Size GetScaledMinimumSize(int dpi)
+    {
+        var scale = Math.Max(96, dpi) / 96d;
+        return new Size(
+            (int)Math.Round(MinimumDesignedClientSize.Width * scale),
+            (int)Math.Round(MinimumDesignedClientSize.Height * scale));
+    }
+
     protected override void OnDpiChanged(DpiChangedEventArgs eventArgs)
     {
         base.OnDpiChanged(eventArgs);
+        var workingArea = Screen.FromControl(this).WorkingArea;
+        var scaledMinimum = GetScaledMinimumSize(DeviceDpi);
+        MinimumSize = new Size(
+            Math.Min(scaledMinimum.Width, Math.Max(1, workingArea.Width - 24)),
+            Math.Min(scaledMinimum.Height, Math.Max(1, workingArea.Height - 24)));
         RefitDpiSensitiveControls();
         if (IsHandleCreated && !IsDisposed && !Disposing)
         {

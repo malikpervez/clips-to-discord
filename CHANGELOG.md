@@ -4,6 +4,8 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.7.0 — 2026-08-06
+
 - Activate the branded Activity page and add a tray shortcut for live, bounded clip history without coupling the window to the uploader lifecycle.
 - Persist up to 100 recent clips with atomic writes, including parsed game, lifecycle state, attempts, concise redacted errors, local route, and available file location.
 - Show actual before/after compression sizes, reduction percentage, target ceiling, and encoder bitrate in Activity while retaining the detailed diagnostic log entry.

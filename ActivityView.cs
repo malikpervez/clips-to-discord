@@ -7,9 +7,11 @@ internal sealed class ActivityView : UserControl
     private readonly ActivityHistoryStore _history;
     private readonly string _clipsFolder;
     private readonly ToolTip _toolTip = new() { ShowAlways = true };
-    private readonly BufferedTableLayoutPanel _activityList;
+    private readonly ActivityListPanel _activityList;
+    private readonly BrandedScrollHost _scrollHost;
     private readonly Label _summaryLabel;
     private readonly IDisposable _subscription;
+    private Guid? _firstEntryId;
 
     internal ActivityView(ActivityHistoryStore history, string clipsFolder)
     {
@@ -88,25 +90,30 @@ internal sealed class ActivityView : UserControl
         openLogs.Click += (_, _) => OpenLogs();
         headerActions.Controls.Add(openUploaded);
         headerActions.Controls.Add(openLogs);
+        headerActions.MinimumSize = new Size(
+            openUploaded.PreferredSize.Width + openUploaded.Margin.Horizontal +
+            openLogs.PreferredSize.Width + openLogs.Margin.Horizontal,
+            Math.Max(openUploaded.PreferredSize.Height, openLogs.PreferredSize.Height));
         headerActions.Margin = new Padding(0, 10, 0, 0);
         header.Controls.Add(headerActions, 0, 2);
 
-        _activityList = new BufferedTableLayoutPanel
+        _activityList = new ActivityListPanel
         {
             Name = "ActivityList",
-            Dock = DockStyle.Fill,
-            AutoScroll = true,
-            ColumnCount = 1,
-            RowCount = 1,
             Margin = Padding.Empty,
-            Padding = new Padding(0, 0, 8, 0),
+            Padding = Padding.Empty,
             BackColor = ClipCordTheme.Shell
         };
-        _activityList.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        _activityList.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _scrollHost = new BrandedScrollHost
+        {
+            Name = "ActivityScrollHost",
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Content = _activityList
+        };
 
         root.Controls.Add(header, 0, 0);
-        root.Controls.Add(_activityList, 0, 1);
+        root.Controls.Add(_scrollHost, 0, 1);
         Controls.Add(root);
 
         var context = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
@@ -134,39 +141,60 @@ internal sealed class ActivityView : UserControl
         _ => new("Activity", ClipCordTheme.ShellMutedText)
     };
 
+    internal void RefreshViewport()
+    {
+        PerformLayout();
+        _scrollHost.RefreshContentLayout();
+    }
+
     private void RenderSnapshot(ClipActivitySnapshot snapshot)
     {
         if (IsDisposed || Disposing) return;
+        var anchorAdjustment = 0;
+        if (_firstEntryId is { } previousFirstId && _scrollHost.ScrollOffset > 0)
+        {
+            var previousFirstIndex = snapshot.Entries
+                .Select((entry, index) => (entry.Id, index))
+                .FirstOrDefault(item => item.Id == previousFirstId)
+                .index;
+            if (previousFirstIndex > 0)
+            {
+                anchorAdjustment = snapshot.Entries
+                    .Take(previousFirstIndex)
+                    .Sum(GetActivityCardOuterHeight);
+            }
+        }
+        _firstEntryId = snapshot.Entries.FirstOrDefault()?.Id;
         _activityList.SuspendLayout();
         try
         {
             var previousControls = _activityList.Controls.Cast<Control>().ToArray();
             _activityList.Controls.Clear();
             foreach (var control in previousControls) control.Dispose();
-            _activityList.RowStyles.Clear();
-            _activityList.RowCount = Math.Max(1, snapshot.Entries.Count);
             _summaryLabel.Text = snapshot.Entries.Count == 0
                 ? "Your latest clips and upload results appear here."
                 : $"Showing {snapshot.Entries.Count} most recent clip{(snapshot.Entries.Count == 1 ? string.Empty : "s")}.";
 
             if (snapshot.Entries.Count == 0)
             {
-                _activityList.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                _activityList.Controls.Add(BuildEmptyState(), 0, 0);
+                _activityList.Controls.Add(BuildEmptyState());
                 return;
             }
 
             for (var index = 0; index < snapshot.Entries.Count; index++)
             {
-                _activityList.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                _activityList.Controls.Add(BuildActivityCard(snapshot.Entries[index]), 0, index);
+                _activityList.Controls.Add(BuildActivityCard(snapshot.Entries[index]));
             }
         }
         finally
         {
             _activityList.ResumeLayout(true);
+            _scrollHost.RefreshContentLayout(anchorAdjustment: anchorAdjustment);
         }
     }
+
+    private static int GetActivityCardOuterHeight(ClipActivityEntry entry) =>
+        (entry.Error is null ? 116 : 136) + 10;
 
     private Control BuildEmptyState()
     {
