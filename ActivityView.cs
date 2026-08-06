@@ -375,10 +375,7 @@ internal sealed class ActivityView : UserControl
         if (entry.CurrentPath is null || !File.Exists(entry.CurrentPath)) return;
         try
         {
-            var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
-            start.ArgumentList.Add("/select,");
-            start.ArgumentList.Add(entry.CurrentPath);
-            Process.Start(start);
+            Process.Start(CreateSelectFileStartInfo(entry.CurrentPath));
         }
         catch (Exception exception)
         {
@@ -392,7 +389,7 @@ internal sealed class ActivityView : UserControl
         try
         {
             var folder = UploadedFolder.GetOrCreate(_clipsFolder);
-            Process.Start(new ProcessStartInfo("explorer.exe", folder) { UseShellExecute = true });
+            Process.Start(CreateOpenFolderStartInfo(folder));
         }
         catch (Exception exception)
         {
@@ -409,14 +406,11 @@ internal sealed class ActivityView : UserControl
             var logPath = Path.Combine(SettingsStore.DataDirectory, "app.log");
             if (File.Exists(logPath))
             {
-                var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
-                start.ArgumentList.Add("/select,");
-                start.ArgumentList.Add(logPath);
-                Process.Start(start);
+                Process.Start(CreateSelectFileStartInfo(logPath));
             }
             else
             {
-                Process.Start(new ProcessStartInfo("explorer.exe", SettingsStore.DataDirectory) { UseShellExecute = true });
+                Process.Start(CreateOpenFolderStartInfo(SettingsStore.DataDirectory));
             }
         }
         catch (Exception exception)
@@ -424,6 +418,22 @@ internal sealed class ActivityView : UserControl
             Log.Error("Could not open the ClipCord logs folder.", exception);
             MessageBox.Show(this, "Windows could not open the logs folder.", "Could not open logs", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    internal static ProcessStartInfo CreateOpenFolderStartInfo(string folder)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(folder);
+        var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+        start.ArgumentList.Add(folder);
+        return start;
+    }
+
+    internal static ProcessStartInfo CreateSelectFileStartInfo(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
+        start.ArgumentList.Add($"/select,{path}");
+        return start;
     }
 
     protected override void Dispose(bool disposing)

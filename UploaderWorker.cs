@@ -251,7 +251,9 @@ internal sealed class UploaderWorker(
                     ClipActivityState.Archived,
                     OriginalBytes: clip.Length,
                     Route: ClipActivityRoute.Baseline,
-                    Detail: "Existing baseline clip was left in place."));
+                    Detail: "Existing baseline clip was left in place.",
+                    ClearError: true,
+                    ResetCompression: true));
                 return;
             }
 
@@ -262,7 +264,8 @@ internal sealed class UploaderWorker(
                     clip.FilePath,
                     ClipActivityState.Uploading,
                     OriginalBytes: clip.Length,
-                    IncrementAttempt: true));
+                    IncrementAttempt: true,
+                    ResetCompression: true));
                 Log.Info($"Uploading new clip: {clip.FileName} ({clip.Length / 1024d / 1024d:F1} MB).");
                 await (discord ?? throw new InvalidOperationException("The Discord client is unavailable in upload mode."))
                     .UploadWithCompressionAsync(
@@ -278,17 +281,19 @@ internal sealed class UploaderWorker(
                         Detail: progress.CompressedBytes is null
                             ? $"Encoding toward the {progress.TargetMb} MB ceiling."
                             : "Compression complete; preparing the Discord upload.",
-                        CompressedBytes: progress.CompressedBytes ?? 0,
+                        CompressedBytes: progress.CompressedBytes,
                         CompressionTargetMb: progress.TargetMb,
                         VideoKbps: progress.VideoKbps,
-                        AudioKbps: progress.AudioKbps)));
+                        AudioKbps: progress.AudioKbps,
+                        ResetCompression: progress.CompressedBytes is null)));
                 uploadedNow = true;
                 activityHistory?.Transition(new ClipActivityUpdate(
                     clip.FilePath,
                     ClipActivityState.Completed,
                     OriginalBytes: clip.Length,
                     Route: ClipActivityRoute.Uploaded,
-                    Detail: "Discord accepted the clip; archiving the original."));
+                    Detail: "Discord accepted the clip; archiving the original.",
+                    ClearError: true));
             }
             else if (settings.UploadToDiscord)
             {
@@ -303,7 +308,8 @@ internal sealed class UploaderWorker(
                     ClipActivityState.Queued,
                     OriginalBytes: clip.Length,
                     IncrementAttempt: true,
-                    Detail: "Local-only mode; no Discord request will be made."));
+                    Detail: "Local-only mode; no Discord request will be made.",
+                    ResetCompression: true));
                 Log.Info($"Local-only mode selected; archiving without a Discord request: {clip.FileName}.");
             }
 
@@ -361,7 +367,9 @@ internal sealed class UploaderWorker(
                     Route: duplicate ? ClipActivityRoute.Duplicate : ClipActivityRoute.Uploaded,
                     Detail: duplicate
                         ? "Matching content was archived without another Discord post."
-                        : "Discord upload and local archive completed."));
+                        : "Discord upload and local archive completed.",
+                    ClearError: true,
+                    ResetCompression: duplicate));
             }
             else
             {
@@ -373,7 +381,8 @@ internal sealed class UploaderWorker(
                     OriginalBytes: clip.Length,
                     CurrentPath: archivedPath,
                     Route: ClipActivityRoute.LocalOnly,
-                    Detail: "Saved locally without a Discord request."));
+                    Detail: "Saved locally without a Discord request.",
+                    ClearError: true));
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -483,7 +492,8 @@ internal sealed class UploaderWorker(
                         ClipActivityState.Archived,
                         CurrentPath: archivedPath,
                         Route: ClipActivityRoute.Uploaded,
-                        Detail: "Recovered the pending uploaded-clip archive move."));
+                        Detail: "Recovered the pending uploaded-clip archive move.",
+                        ClearError: true));
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
@@ -509,7 +519,8 @@ internal sealed class UploaderWorker(
                         ClipActivityState.Archived,
                         CurrentPath: archivedPath,
                         Route: ClipActivityRoute.LocalOnly,
-                        Detail: "Recovered the pending local-only archive move."));
+                        Detail: "Recovered the pending local-only archive move.",
+                        ClearError: true));
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)

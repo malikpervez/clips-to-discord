@@ -735,6 +735,19 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
 static void AssertActivityHistory(string root)
 {
     Directory.CreateDirectory(root);
+    var spacedFolder = @"C:\Users\Test User\Videos\SteelSeries Moments\uploaded";
+    var openFolderStart = ActivityView.CreateOpenFolderStartInfo(spacedFolder);
+    Assert(openFolderStart.FileName == "explorer.exe" &&
+           openFolderStart.UseShellExecute &&
+           openFolderStart.ArgumentList.SequenceEqual([spacedFolder]),
+        "Opening a folder must pass a space-containing path as one Explorer argument.");
+    var spacedFile = Path.Combine(spacedFolder, "Battlefield 6", "clip one.mp4");
+    var selectFileStart = ActivityView.CreateSelectFileStartInfo(spacedFile);
+    Assert(selectFileStart.FileName == "explorer.exe" &&
+           selectFileStart.UseShellExecute &&
+           selectFileStart.ArgumentList.SequenceEqual([$"/select,{spacedFile}"]),
+        "Showing a clip must pass Explorer's /select switch and path as one argument token.");
+
     var historyPath = Path.Combine(root, "activity.json");
     var sourcePath = Path.Combine(root, "Battlefield™-6__2026-08-06__14-37-13.mp4");
     using (var store = new ActivityHistoryStore(historyPath))
@@ -822,6 +835,86 @@ static void AssertActivityHistory(string root)
         });
         Assert(!string.IsNullOrWhiteSpace(presentation.Label),
             $"Activity state {state} must have a deterministic UI label.");
+    }
+
+    using (var lifecycle = new ActivityHistoryStore(string.Empty))
+    {
+        var retryPath = Path.Combine(root, "retry.mp4");
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Retrying,
+            OriginalBytes: 20_000_000,
+            Error: "Discord returned HTTP 413",
+            CompressedBytes: 10_000_000,
+            CompressionTargetMb: 25,
+            VideoKbps: 3000));
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Uploading,
+            IncrementAttempt: true,
+            ResetCompression: true));
+        var retrying = lifecycle.GetSnapshot().Entries.Single();
+        Assert(retrying.Error == "Discord returned HTTP 413" &&
+               retrying.CompressedBytes is null &&
+               retrying.CompressionTargetMb is null,
+            "A retry must preserve its useful error while explicitly clearing stale compression metrics.");
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Compressing,
+            CompressionTargetMb: 9,
+            VideoKbps: 2200,
+            AudioKbps: 96,
+            ResetCompression: true));
+        var recompressing = lifecycle.GetSnapshot().Entries.Single();
+        Assert(recompressing.CompressedBytes is null &&
+               recompressing.CompressionTargetMb == 9 &&
+               recompressing.VideoKbps == 2200,
+            "A new compression attempt must clear the prior output while retaining its new encoder plan.");
+        lifecycle.Transition(new ClipActivityUpdate(
+            retryPath,
+            ClipActivityState.Completed,
+            ClearError: true));
+        Assert(lifecycle.GetSnapshot().Entries.Single().Error is null,
+            "A terminal success must explicitly clear the previous retry error.");
+
+        var recoveryPath = Path.Combine(root, "reused-name.mp4");
+        var first = lifecycle.Transition(new ClipActivityUpdate(
+            recoveryPath,
+            ClipActivityState.Archived,
+            OriginalBytes: 500_000_000,
+            Route: ClipActivityRoute.Uploaded));
+        var recovered = lifecycle.Transition(new ClipActivityUpdate(
+            recoveryPath,
+            ClipActivityState.Archived,
+            OriginalBytes: 7_000_000,
+            Route: ClipActivityRoute.LocalOnly));
+        Assert(first.Id != recovered.Id &&
+               recovered.OriginalBytes == 7_000_000 &&
+               recovered.CreatedUtc >= first.CreatedUtc,
+            "Recovery-first archive updates must not merge a reused path into an older terminal clip.");
+    }
+
+    using (var concurrent = new ActivityHistoryStore(string.Empty))
+    {
+        Parallel.Invoke(
+            () => RecordConcurrentActivities(concurrent, root, "worker-a"),
+            () => RecordConcurrentActivities(concurrent, root, "worker-b"));
+        var entries = concurrent.GetSnapshot().Entries;
+        Assert(entries.Count == ActivityHistoryStore.MaximumEntries &&
+               entries.Select(entry => entry.Id).Distinct().Count() == ActivityHistoryStore.MaximumEntries &&
+               entries.All(entry => entry.State == ClipActivityState.Queued),
+            "Two workers must safely publish complete transitions while history remains bounded.");
+    }
+}
+
+static void RecordConcurrentActivities(ActivityHistoryStore store, string root, string workerName)
+{
+    for (var index = 0; index < 120; index++)
+    {
+        var path = Path.Combine(root, $"{workerName}-{index}.mp4");
+        store.Transition(new ClipActivityUpdate(path, ClipActivityState.Discovered, OriginalBytes: index + 1));
+        store.Transition(new ClipActivityUpdate(path, ClipActivityState.Hashing));
+        store.Transition(new ClipActivityUpdate(path, ClipActivityState.Queued));
     }
 }
 

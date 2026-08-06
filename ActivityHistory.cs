@@ -59,7 +59,9 @@ internal sealed record ClipActivityUpdate(
     long? CompressedBytes = null,
     int? CompressionTargetMb = null,
     int? VideoKbps = null,
-    int? AudioKbps = null);
+    int? AudioKbps = null,
+    bool ClearError = false,
+    bool ResetCompression = false);
 
 internal sealed record ClipActivitySnapshot(IReadOnlyList<ClipActivityEntry> Entries);
 
@@ -153,15 +155,27 @@ internal sealed class ActivityHistoryStore : IDisposable
                 Route = update.Route ?? current?.Route,
                 AttemptCount = Math.Max(0, (current?.AttemptCount ?? 0) + (update.IncrementAttempt ? 1 : 0)),
                 Detail = update.Detail is null ? current?.Detail : SanitizeText(update.Detail, MaximumDetailLength),
-                Error = update.Error is null ? null : SanitizeError(update.Error, sourcePath),
+                Error = update.ClearError
+                    ? null
+                    : update.Error is null
+                        ? current?.Error
+                        : SanitizeError(update.Error, sourcePath),
                 OriginalBytes = Math.Max(0, update.OriginalBytes ?? current?.OriginalBytes ?? 0),
                 CurrentPath = update.CurrentPath is null
                     ? current?.CurrentPath ?? sourcePath
                     : SanitizePath(update.CurrentPath),
-                CompressedBytes = update.CompressedBytes ?? current?.CompressedBytes,
-                CompressionTargetMb = update.CompressionTargetMb ?? current?.CompressionTargetMb,
-                VideoKbps = update.VideoKbps ?? current?.VideoKbps,
-                AudioKbps = update.AudioKbps ?? current?.AudioKbps
+                CompressedBytes = update.ResetCompression
+                    ? update.CompressedBytes
+                    : update.CompressedBytes ?? current?.CompressedBytes,
+                CompressionTargetMb = update.ResetCompression
+                    ? update.CompressionTargetMb
+                    : update.CompressionTargetMb ?? current?.CompressionTargetMb,
+                VideoKbps = update.ResetCompression
+                    ? update.VideoKbps
+                    : update.VideoKbps ?? current?.VideoKbps,
+                AudioKbps = update.ResetCompression
+                    ? update.AudioKbps
+                    : update.AudioKbps ?? current?.AudioKbps
             };
 
             var changed = current is null || !EquivalentExceptTimestamp(current, next);
@@ -215,7 +229,7 @@ internal sealed class ActivityHistoryStore : IDisposable
         var active = _entries.FirstOrDefault(entry =>
             entry.SourcePath.Equals(sourcePath, StringComparison.OrdinalIgnoreCase) && !IsTerminal(entry.State));
         if (active is not null) return active;
-        if (state == ClipActivityState.Discovered) return null;
+        if (state is ClipActivityState.Discovered or ClipActivityState.Archived) return null;
         return _entries.FirstOrDefault(entry =>
             entry.SourcePath.Equals(sourcePath, StringComparison.OrdinalIgnoreCase));
     }
