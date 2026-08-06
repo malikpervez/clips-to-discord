@@ -24,7 +24,9 @@ Clips already present during the first scan are recorded as a safe baseline and 
 
 Both release packages include `ffmpeg.exe`. The installer keeps it with the application automatically. Portable users must keep it beside `ClipsToDiscord.exe`. The app uses FFmpeg only after Discord rejects an original clip for size, and compression can take a while on long clips.
 
-The compression target is configurable from 1–100 MB and defaults to 95 MB for new settings. If the selected target is rejected, the app retries progressively smaller targets. For a destination limited to Discord's standard 10 MiB per-file limit, selecting 9 MB avoids the initial larger attempts.
+The compression target is configurable from 1–100 MB and defaults to 95 MB for new settings. If the selected target is rejected, the app retries progressively smaller targets that can still preserve its minimum video bitrate. For a destination limited to Discord's standard 10 MiB per-file limit, selecting 9 MB avoids the initial larger attempts.
+
+Very long clips may be impossible to compress to a small Discord limit without falling below that bitrate. ClipCord reports **Upload needs attention**, leaves the original clip in place, and stops automatic retries for that clip until settings change or the app restarts. Shorten the clip, raise the compression target if the destination accepts larger files, or upload it another way.
 
 If building from source without FFmpeg, normal-size clips still work, but oversized clips report an error in the log.
 

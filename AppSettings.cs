@@ -206,6 +206,9 @@ public static partial class WebhookValidation
         return Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
                uri.Scheme == Uri.UriSchemeHttps &&
                AllowedHosts.Contains(uri.Host) &&
+               uri.IsDefaultPort &&
+               string.IsNullOrEmpty(uri.UserInfo) &&
+               string.IsNullOrEmpty(uri.Fragment) &&
                WebhookPathPattern().IsMatch(uri.AbsolutePath);
     }
 

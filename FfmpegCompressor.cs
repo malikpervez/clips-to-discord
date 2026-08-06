@@ -14,13 +14,6 @@ internal static partial class FfmpegCompressor
         var toolsFolder = Path.Combine(AppContext.BaseDirectory, "tools", "ffmpeg.exe");
         if (File.Exists(toolsFolder)) return toolsFolder;
 
-        foreach (var folder in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
-                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var candidate = Path.Combine(folder.Trim(), "ffmpeg.exe");
-            if (File.Exists(candidate)) return candidate;
-        }
-
         return null;
     }
 
@@ -36,6 +29,20 @@ internal static partial class FfmpegCompressor
                 "FFmpeg two-pass compression uses the Windows NUL device and is only supported on Windows.");
         }
 
+        var duration = await ProbeDurationAsync(inputPath, ffmpegPath, cancellationToken);
+        return await CompressAsync(
+            inputPath,
+            ffmpegPath,
+            targetMegabytes,
+            duration,
+            cancellationToken);
+    }
+
+    internal static async Task<TimeSpan> ProbeDurationAsync(
+        string inputPath,
+        string ffmpegPath,
+        CancellationToken cancellationToken)
+    {
         var probe = await RunAsync(
             ffmpegPath,
             ["-hide_banner", "-i", inputPath],
@@ -55,22 +62,39 @@ internal static partial class FfmpegCompressor
             throw new InvalidOperationException("The clip duration is invalid.");
         }
 
+        return duration;
+    }
+
+    internal static async Task<string> CompressAsync(
+        string inputPath,
+        string ffmpegPath,
+        int targetMegabytes,
+        TimeSpan duration,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "FFmpeg two-pass compression uses the Windows NUL device and is only supported on Windows.");
+        }
+
         if (targetMegabytes is < 1 or > 100)
         {
             throw new ArgumentOutOfRangeException(nameof(targetMegabytes));
         }
 
-        var targetBytes = (long)targetMegabytes * 1024 * 1024;
-        var totalKbps = Math.Floor((targetBytes * 8d / duration.TotalSeconds / 1000d) * 0.94d);
-        var audioKbps = totalKbps >= 500 ? 96 : 64;
-        var videoKbps = Math.Max(180, Math.Min(6000, totalKbps - audioKbps));
+        if (!CompressionTargetPlanner.TryCreateBitrates(duration, targetMegabytes, out var bitrates))
+        {
+            throw new CompressionTargetUnachievableException(
+                $"A {targetMegabytes} MB target cannot preserve the minimum video bitrate for this {duration.TotalMinutes:F1}-minute clip.");
+        }
 
         var temporaryFolder = Path.Combine(Path.GetTempPath(), "ClipsToDiscord");
         Directory.CreateDirectory(temporaryFolder);
         var token = Guid.NewGuid().ToString("N");
         var outputPath = Path.Combine(temporaryFolder, token + ".mp4");
         var passLog = Path.Combine(temporaryFolder, token);
-        var videoRate = $"{Math.Floor(videoKbps).ToString(CultureInfo.InvariantCulture)}k";
+        var videoRate = $"{bitrates.VideoKbps.ToString(CultureInfo.InvariantCulture)}k";
 
         try
         {
@@ -89,7 +113,7 @@ internal static partial class FfmpegCompressor
                 "-vf", "scale=min(1280\\,iw):-2",
                 "-c:v", "libx264", "-preset", "veryfast", "-b:v", videoRate,
                 "-pass", "2", "-passlogfile", passLog,
-                "-c:a", "aac", "-b:a", $"{audioKbps}k",
+                "-c:a", "aac", "-b:a", $"{bitrates.AudioKbps}k",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", outputPath
             ], cancellationToken);
 
@@ -138,8 +162,8 @@ internal static partial class FfmpegCompressor
 
         using var process = new Process { StartInfo = startInfo };
         process.Start();
-        var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
-        var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var standardError = process.StandardError.ReadToEndAsync();
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
         try
         {
             await process.WaitForExitAsync(cancellationToken);
@@ -147,6 +171,14 @@ internal static partial class FfmpegCompressor
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch { }
+            using var cleanupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            try { await process.WaitForExitAsync(cleanupDeadline.Token); } catch { }
+            try
+            {
+                await Task.WhenAll(standardOutput, standardError)
+                    .WaitAsync(cleanupDeadline.Token);
+            }
+            catch { }
             throw;
         }
 
@@ -176,3 +208,6 @@ internal static partial class FfmpegCompressor
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 }
+
+internal sealed class CompressionTargetUnachievableException(string message, Exception? innerException = null)
+    : InvalidOperationException(message, innerException);

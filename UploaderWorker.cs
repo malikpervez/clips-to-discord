@@ -291,6 +291,14 @@ internal sealed class UploaderWorker(
         {
             throw;
         }
+        catch (CompressionTargetUnachievableException exception)
+        {
+            _retryAfter[clip.ContentHash] = DateTime.MaxValue;
+            Log.Error(
+                $"Upload needs attention for {clip.FileName}; ClipCord will not retry it automatically unless settings change or the app restarts.",
+                exception);
+            reportStatus($"Upload needs attention — {clip.FileName}");
+        }
         catch (Exception exception)
         {
             if (durableDisposition)

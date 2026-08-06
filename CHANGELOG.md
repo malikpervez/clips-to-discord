@@ -4,6 +4,11 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- Skip compression targets that cannot sustain the minimum video bitrate for a clip's duration, avoiding repeated two-pass encodes that can never meet Discord's size limit.
+- Stop automatic retries for an unachievable long clip until settings change or the app restarts, and report that the upload needs attention.
+- Disable webhook redirects, tighten accepted Discord webhook URLs, bound response bodies, and keep request deadlines active through streamed response reads.
+- Restrict FFmpeg discovery to the trusted application directories and drain its output safely during cancellation.
+
 ## 1.6.1 — 2026-08-05
 
 - Open Settings at a height that shows every card without unnecessary scrolling while retaining scrolling for constrained screens.

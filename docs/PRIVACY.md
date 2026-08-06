@@ -26,7 +26,7 @@ The webhook cannot normally be decrypted by another Windows account or after mov
 
 ## Network access
 
-Normal upload operation connects only to the Discord webhook URL supplied by the user. Each upload sends the configured uploader name and parsed game name as visible message text and attachment description. When a clip is too large, compression is performed locally by the bundled FFmpeg executable before the smaller copy is uploaded.
+Normal upload operation connects only to the validated Discord webhook URL supplied by the user and does not follow HTTP redirects. Each upload sends the configured uploader name and parsed game name as visible message text and attachment description. When a clip is too large, compression is performed locally by the bundled FFmpeg executable before the smaller copy is uploaded.
 
 The app also makes an anonymous HTTPS request to the fixed official `malikpervez/clips-to-discord` GitHub Releases API no more than once every 24 hours, or when the user explicitly selects **Check for updates**. If GitHub's installer metadata lacks its own digest, the app may fetch the release's small checksum file through the validated GitHub URL and at most one allow-listed GitHub asset-CDN redirect. These requests do not contain the webhook, uploader name, clip names or paths, settings, or a project account identifier. **View changes** opens the official release page. If the user explicitly chooses **Install update**, ClipCord downloads the verified installer directly from GitHub's allow-listed release-asset host, stages it locally, and starts it only after length and SHA-256 verification.
 

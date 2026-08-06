@@ -10,20 +10,24 @@ internal sealed class DiscordWebhookClient : IDisposable
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan UploadTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(30);
+    internal const int MaximumResponseBytes = 64 * 1024;
     private readonly HttpClient _client;
 
     public DiscordWebhookClient()
     {
-        var handler = new SocketsHttpHandler
-        {
-            ConnectTimeout = ConnectionTimeout,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(10)
-        };
+        var handler = CreateHandler();
         _client = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
     }
+
+    internal static SocketsHttpHandler CreateHandler() => new()
+    {
+        AllowAutoRedirect = false,
+        ConnectTimeout = ConnectionTimeout,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+    };
 
     public async Task TestConnectionAsync(
         string webhookUrl,
@@ -36,16 +40,15 @@ internal sealed class DiscordWebhookClient : IDisposable
             allowed_mentions = new { parse = Array.Empty<string>() }
         });
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-        using var response = await PostWithDeadlineAsync(
+        var response = await PostWithDeadlineAsync(
             WithWait(webhookUrl),
             content,
             TestTimeout,
             cancellationToken);
-        var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"Discord rejected the webhook (HTTP {(int)response.StatusCode}). {responseText}");
+                $"Discord rejected the webhook (HTTP {(int)response.StatusCode}). {response.ResponseText}");
         }
     }
 
@@ -78,14 +81,25 @@ internal sealed class DiscordWebhookClient : IDisposable
                     exception);
             }
 
+            var plannedTargets = CompressionTargetPlanner.Build(compressionTargetMb);
+            var duration = await FfmpegCompressor.ProbeDurationAsync(filePath, ffmpegPath, cancellationToken);
+            var achievableTargets = CompressionTargetPlanner.BuildAchievable(compressionTargetMb, duration);
+            if (achievableTargets.Count == 0)
+            {
+                throw new CompressionTargetUnachievableException(
+                    $"This {duration.TotalMinutes:F1}-minute clip is too long to reach any configured upload target without falling below ClipCord's minimum video bitrate.",
+                    exception);
+            }
+
             DiscordUploadException lastSizeException = exception;
-            foreach (var targetMb in CompressionTargetPlanner.Build(compressionTargetMb))
+            foreach (var targetMb in achievableTargets)
             {
                 Log.Info($"Compressing oversized clip {Path.GetFileName(filePath)} to a {targetMb} MB target.");
                 var compressedPath = await FfmpegCompressor.CompressAsync(
                     filePath,
                     ffmpegPath,
                     targetMb,
+                    duration,
                     cancellationToken);
                 try
                 {
@@ -107,6 +121,13 @@ internal sealed class DiscordWebhookClient : IDisposable
                 {
                     TryDelete(compressedPath);
                 }
+            }
+
+            if (achievableTargets.Count < plannedTargets.Count)
+            {
+                throw new CompressionTargetUnachievableException(
+                    "Discord rejected every achievable compression target. Smaller targets would fall below ClipCord's minimum video bitrate for this clip.",
+                    lastSizeException);
             }
 
             throw new InvalidOperationException(
@@ -139,21 +160,20 @@ internal sealed class DiscordWebhookClient : IDisposable
         streamContent.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
         multipart.Add(streamContent, "files[0]", safeFileName);
 
-        using var response = await PostWithDeadlineAsync(
+        var response = await PostWithDeadlineAsync(
             WithWait(webhookUrl),
             multipart,
             UploadTimeout,
             cancellationToken);
-        var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             var tooLarge = response.StatusCode == HttpStatusCode.RequestEntityTooLarge ||
-                           responseText.Contains("40005", StringComparison.OrdinalIgnoreCase) ||
-                           responseText.Contains("50045", StringComparison.OrdinalIgnoreCase) ||
-                           responseText.Contains("too large", StringComparison.OrdinalIgnoreCase) ||
-                           responseText.Contains("maximum", StringComparison.OrdinalIgnoreCase);
+                           response.ResponseText.Contains("40005", StringComparison.OrdinalIgnoreCase) ||
+                           response.ResponseText.Contains("50045", StringComparison.OrdinalIgnoreCase) ||
+                           response.ResponseText.Contains("too large", StringComparison.OrdinalIgnoreCase) ||
+                           response.ResponseText.Contains("maximum", StringComparison.OrdinalIgnoreCase);
             throw new DiscordUploadException(
-                $"Discord returned HTTP {(int)response.StatusCode}: {responseText}",
+                $"Discord returned HTTP {(int)response.StatusCode}: {response.ResponseText}",
                 tooLarge);
         }
     }
@@ -169,7 +189,7 @@ internal sealed class DiscordWebhookClient : IDisposable
             allowed_mentions = new { parse = Array.Empty<string>() }
         });
 
-    private async Task<HttpResponseMessage> PostWithDeadlineAsync(
+    private async Task<WebhookResponse> PostWithDeadlineAsync(
         string requestUrl,
         HttpContent content,
         TimeSpan timeout,
@@ -179,7 +199,16 @@ internal sealed class DiscordWebhookClient : IDisposable
         deadline.CancelAfter(timeout);
         try
         {
-            return await _client.PostAsync(requestUrl, content, deadline.Token);
+            using var request = new HttpRequestMessage(HttpMethod.Post, requestUrl)
+            {
+                Content = content
+            };
+            using var response = await _client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                deadline.Token);
+            var responseText = await ReadResponseTextAsync(response.Content, deadline.Token);
+            return new WebhookResponse(response.StatusCode, response.IsSuccessStatusCode, responseText);
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -187,8 +216,52 @@ internal sealed class DiscordWebhookClient : IDisposable
         }
     }
 
-    private static string WithWait(string webhookUrl) =>
-        webhookUrl + (webhookUrl.Contains('?') ? "&wait=true" : "?wait=true");
+    internal static string WithWait(string webhookUrl)
+    {
+        var builder = new UriBuilder(webhookUrl) { Fragment = string.Empty };
+        var queryParts = builder.Query
+            .TrimStart('?')
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(part => !IsWaitParameter(part))
+            .Append("wait=true");
+        builder.Query = string.Join('&', queryParts);
+        return builder.Uri.AbsoluteUri;
+    }
+
+    private static bool IsWaitParameter(string queryPart)
+    {
+        var separator = queryPart.IndexOf('=');
+        var name = separator < 0 ? queryPart : queryPart[..separator];
+        try
+        {
+            return Uri.UnescapeDataString(name).Equals("wait", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (UriFormatException)
+        {
+            return false;
+        }
+    }
+
+    internal static async Task<string> ReadResponseTextAsync(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+        var buffer = new byte[MaximumResponseBytes + 1];
+        var total = 0;
+        while (total < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(total, buffer.Length - total), cancellationToken);
+            if (read == 0) break;
+            total += read;
+        }
+
+        var length = Math.Min(total, MaximumResponseBytes);
+        var responseText = Encoding.UTF8.GetString(buffer, 0, length);
+        return total > MaximumResponseBytes
+            ? responseText + " [response truncated]"
+            : responseText;
+    }
 
     private static string SanitizeFileName(string fileName)
     {
@@ -204,6 +277,11 @@ internal sealed class DiscordWebhookClient : IDisposable
     }
 
     public void Dispose() => _client.Dispose();
+
+    private readonly record struct WebhookResponse(
+        HttpStatusCode StatusCode,
+        bool IsSuccessStatusCode,
+        string ResponseText);
 }
 
 internal sealed class DiscordUploadException(string message, bool isTooLarge) : Exception(message)

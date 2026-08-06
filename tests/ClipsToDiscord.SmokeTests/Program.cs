@@ -372,6 +372,38 @@ try
     Assert(
         !WebhookValidation.IsDiscordWebhook(apiRoot + "v10/channels/123456"),
         "A non-webhook Discord API path must be rejected.");
+    Assert(
+        !WebhookValidation.IsDiscordWebhook("https://user@discord.com/api/v10/webhooks/123456/test-token"),
+        "A webhook URL with userinfo must be rejected.");
+    Assert(
+        !WebhookValidation.IsDiscordWebhook("https://discord.com:444/api/v10/webhooks/123456/test-token"),
+        "A webhook URL with a non-default port must be rejected.");
+    Assert(
+        !WebhookValidation.IsDiscordWebhook(versionedWebhook + "#fragment"),
+        "A webhook URL with a fragment must be rejected.");
+    Assert(
+        DiscordWebhookClient.WithWait(versionedWebhook) == versionedWebhook + "?wait=true",
+        "Webhook requests must add wait=true as a real query parameter.");
+    var webhookWithQuery = new Uri(DiscordWebhookClient.WithWait(versionedWebhook + "?thread_id=42&wait=false"));
+    Assert(
+        webhookWithQuery.Query == "?thread_id=42&wait=true" && string.IsNullOrEmpty(webhookWithQuery.Fragment),
+        "Webhook requests must preserve existing query parameters and replace an existing wait value.");
+    using (var webhookHandler = DiscordWebhookClient.CreateHandler())
+    {
+        Assert(!webhookHandler.AllowAutoRedirect,
+            "Discord uploads must not automatically follow redirects away from the validated webhook URL.");
+    }
+    using (var oversizedResponse = new ByteArrayContent(
+               Enumerable.Repeat((byte)'x', DiscordWebhookClient.MaximumResponseBytes + 20).ToArray()))
+    {
+        var responseText = await DiscordWebhookClient.ReadResponseTextAsync(
+            oversizedResponse,
+            CancellationToken.None);
+        Assert(
+            responseText.Length == DiscordWebhookClient.MaximumResponseBytes + " [response truncated]".Length &&
+            responseText.EndsWith(" [response truncated]", StringComparison.Ordinal),
+            "Discord response bodies must be read through a bounded, visibly truncated path.");
+    }
 
     SensitiveDataRedactor.RegisterSecret(unversionedWebhook);
     var redactedExactSecret = SensitiveDataRedactor.Redact("Request failed: " + unversionedWebhook);
@@ -394,6 +426,35 @@ try
     var defaultCompressionTargets = CompressionTargetPlanner.Build(AppSettings.DefaultCompressionTargetMb);
     Assert(defaultCompressionTargets[0] == 95, "Default compression fallback must begin at 95 MB.");
     Assert(defaultCompressionTargets.Contains(9), "Default compression fallback must still reach 9 MB.");
+    var hourLongTargets = CompressionTargetPlanner.BuildAchievable(95, TimeSpan.FromMinutes(60));
+    Assert(hourLongTargets.Count == 0,
+        "An hour-long clip must reject every target that cannot sustain the minimum video bitrate before encoding.");
+    var twentyMinuteTargets = CompressionTargetPlanner.BuildAchievable(95, TimeSpan.FromMinutes(20));
+    Assert(twentyMinuteTargets.SequenceEqual([95, 47]),
+        $"A twenty-minute clip must skip futile lower targets; got [{string.Join(", ", twentyMinuteTargets)}].");
+    Assert(
+        CompressionTargetPlanner.TryCreateBitrates(TimeSpan.FromMinutes(20), 47, out var achievableBitrates) &&
+        achievableBitrates.VideoKbps >= CompressionTargetPlanner.MinimumVideoKbps &&
+        !CompressionTargetPlanner.TryCreateBitrates(TimeSpan.FromMinutes(20), 23, out _),
+        "Compression feasibility must distinguish the last achievable target from the first impossible one.");
+    var untrustedFfmpegFolder = Directory.CreateDirectory(Path.Combine(temporaryRoot, "path-ffmpeg"));
+    var untrustedFfmpegPath = Path.Combine(untrustedFfmpegFolder.FullName, "ffmpeg.exe");
+    await File.WriteAllTextAsync(untrustedFfmpegPath, "not an executable");
+    var originalPath = Environment.GetEnvironmentVariable("PATH");
+    try
+    {
+        Environment.SetEnvironmentVariable("PATH", untrustedFfmpegFolder.FullName);
+        Assert(
+            !string.Equals(
+                FfmpegCompressor.FindExecutable(),
+                untrustedFfmpegPath,
+                StringComparison.OrdinalIgnoreCase),
+            "FFmpeg discovery must not execute an untrusted PATH entry.");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("PATH", originalPath);
+    }
 
     var detectorResponses = new ConcurrentQueue<bool>(
         [true, false, false, true, false, false, false, true]);
