@@ -61,7 +61,8 @@ internal sealed record ClipActivityUpdate(
     int? VideoKbps = null,
     int? AudioKbps = null,
     bool ClearError = false,
-    bool ResetCompression = false);
+    bool ResetCompression = false,
+    bool ReuseTerminalEntry = false);
 
 internal sealed record ClipActivitySnapshot(IReadOnlyList<ClipActivityEntry> Entries);
 
@@ -137,7 +138,10 @@ internal sealed class ActivityHistoryStore : IDisposable
                 throw new ArgumentException("An activity entry requires a source path.", nameof(update));
             }
 
-            var current = FindCurrentEntryLocked(sourcePath, update.State);
+            var current = FindCurrentEntryLocked(
+                sourcePath,
+                update.State,
+                update.ReuseTerminalEntry);
             var now = DateTime.UtcNow;
             var fileName = SanitizeText(Path.GetFileName(sourcePath), 260) ?? "Unknown clip.mp4";
             var next = (current ?? new ClipActivityEntry
@@ -224,12 +228,19 @@ internal sealed class ActivityHistoryStore : IDisposable
         }
     }
 
-    private ClipActivityEntry? FindCurrentEntryLocked(string sourcePath, ClipActivityState state)
+    private ClipActivityEntry? FindCurrentEntryLocked(
+        string sourcePath,
+        ClipActivityState state,
+        bool reuseTerminalEntry)
     {
         var active = _entries.FirstOrDefault(entry =>
             entry.SourcePath.Equals(sourcePath, StringComparison.OrdinalIgnoreCase) && !IsTerminal(entry.State));
         if (active is not null) return active;
-        if (state is ClipActivityState.Discovered or ClipActivityState.Archived) return null;
+        if (state == ClipActivityState.Discovered ||
+            (state == ClipActivityState.Archived && !reuseTerminalEntry))
+        {
+            return null;
+        }
         return _entries.FirstOrDefault(entry =>
             entry.SourcePath.Equals(sourcePath, StringComparison.OrdinalIgnoreCase));
     }

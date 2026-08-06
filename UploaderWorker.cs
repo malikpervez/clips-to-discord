@@ -493,7 +493,8 @@ internal sealed class UploaderWorker(
                         CurrentPath: archivedPath,
                         Route: ClipActivityRoute.Uploaded,
                         Detail: "Recovered the pending uploaded-clip archive move.",
-                        ClearError: true));
+                        ClearError: true,
+                        ReuseTerminalEntry: archivedPath is null));
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
@@ -520,7 +521,8 @@ internal sealed class UploaderWorker(
                         CurrentPath: archivedPath,
                         Route: ClipActivityRoute.LocalOnly,
                         Detail: "Recovered the pending local-only archive move.",
-                        ClearError: true));
+                        ClearError: true,
+                        ReuseTerminalEntry: archivedPath is null));
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)

@@ -892,6 +892,16 @@ static void AssertActivityHistory(string root)
                recovered.OriginalBytes == 7_000_000 &&
                recovered.CreatedUtc >= first.CreatedUtc,
             "Recovery-first archive updates must not merge a reused path into an older terminal clip.");
+
+        var redundant = lifecycle.Transition(new ClipActivityUpdate(
+            recoveryPath,
+            ClipActivityState.Archived,
+            Route: ClipActivityRoute.LocalOnly,
+            Detail: "Recovered an already-finished pending move.",
+            ReuseTerminalEntry: true));
+        Assert(redundant.Id == recovered.Id &&
+               lifecycle.GetSnapshot().Entries.Count(entry => entry.SourcePath == recoveryPath) == 2,
+            "A redundant recovery with no moved file must reuse the latest terminal row instead of creating a duplicate.");
     }
 
     using (var concurrent = new ActivityHistoryStore(string.Empty))
