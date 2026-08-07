@@ -1219,7 +1219,9 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
+            TraceSmokeStep("Settings layout: pre-handle Gallery lifecycle");
             AssertGalleryPreHandleLifecycle(settings);
+            TraceSmokeStep("Settings layout: Activity navigation lifecycle");
             using (var activityOnly = new SettingsForm(
                        settings,
                        checkForUpdatesAsync: _ => Task.CompletedTask,
@@ -1271,6 +1273,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 checkForUpdatesAsync: _ => Task.CompletedTask,
                 watcherStatusProvider: () => "Discord open — local-only mode",
                 activityHistory: activityHistory);
+            TraceSmokeStep("Settings layout: primary form geometry");
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
@@ -1382,6 +1385,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertControlsFit(form);
             AssertCriticalTextFits(form);
 
+            TraceSmokeStep("Settings layout: Gallery interaction");
             form.ShowPage(SettingsPage.Gallery);
             WaitForUiCondition(
                 () => EnumerateControls(form).Count(control => control.Name == "GalleryGameCard") == 2,
@@ -1498,12 +1502,15 @@ static void AssertSettingsFormLayout(AppSettings settings)
                     "A disposed Settings form must be dropped before update UI uses its handle.");
             }
 
+            TraceSmokeStep("Settings layout: update and round-trip dialogs");
             AssertSettingsRoundTrip(settings);
             AssertManualCheckCloseProtection(settings);
             form.Dispose();
             Assert(galleryGridForDisposal.IsDisposed && galleryListForDisposal.IsDisposed,
                 "Both Gallery content panels must be disposed, including the one detached from the scroll host.");
+            TraceSmokeStep("Settings layout: Gallery 150% scaling");
             AssertGalleryScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Gallery 200% scaling");
             AssertGalleryScaledLayout(settings, 2f);
             using (var emptyGalleryGrid = new GalleryGridPanel { Size = new Size(1024, 400) })
             using (var emptyGalleryState = new Panel { Name = "GalleryEmptyState", Height = 160 })
@@ -1516,6 +1523,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             }
             Assert(activityHistory.SubscriptionCount == 0,
                 "Closing the Settings/Activity window must detach its live-history subscription.");
+            TraceSmokeStep("Settings layout: complete");
         }
         catch (Exception exception)
         {
@@ -1523,9 +1531,21 @@ static void AssertSettingsFormLayout(AppSettings settings)
         }
     });
     thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
     thread.Start();
-    thread.Join();
+    if (!thread.Join(TimeSpan.FromSeconds(60)))
+    {
+        throw new TimeoutException(
+            "Settings form layout validation did not finish within 60 seconds. " +
+            "The last emitted Settings layout checkpoint identifies the stalled operation.");
+    }
     if (failure is not null) throw new InvalidOperationException("Settings form layout validation failed.", failure);
+}
+
+static void TraceSmokeStep(string message)
+{
+    Console.WriteLine($"[smoke] {message}");
+    Console.Out.Flush();
 }
 
 static void AssertManualCheckCloseProtection(AppSettings settings)
