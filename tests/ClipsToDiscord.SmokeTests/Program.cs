@@ -1586,8 +1586,14 @@ static void AssertGalleryScaledLayout(AppSettings settings, float scale)
             () => EnumerateControls(form).Any(control => control.Name == "GalleryGameCard"),
             TimeSpan.FromSeconds(5),
             $"Gallery did not populate before the {scale:F1}x layout check.");
+        var gallery = EnumerateControls(form).OfType<GalleryView>().Single();
+        var topNavigation = EnumerateControls(form)
+            .Single(control => control.Name == "TopNavigation");
         form.Scale(new SizeF(scale, scale));
-        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        var featureControls = new[] { (Control)gallery, topNavigation }
+            .SelectMany(root => new[] { root }.Concat(EnumerateControls(root)))
+            .Distinct();
+        foreach (var control in featureControls)
         {
             var source = control.Font;
             var key = (source.FontFamily.Name, source.Size * scale, source.Style);
