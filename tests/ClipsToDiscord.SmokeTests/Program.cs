@@ -1606,10 +1606,17 @@ static void AssertGalleryScaledLayout(AppSettings settings, float scale)
             () => EnumerateControls(form).Any(control => control.Name == "GalleryGameCard"),
             TimeSpan.FromSeconds(5),
             $"Gallery did not populate before the {scale:F1}x layout check.");
+        TraceSmokeStep($"Gallery {scale:F1}x: archive populated");
         var gallery = EnumerateControls(form).OfType<GalleryView>().Single();
         var topNavigation = EnumerateControls(form)
             .Single(control => control.Name == "TopNavigation");
+        // Synthetic scaling should model Windows' startup-DPI pass, which occurs
+        // before the window is displayed. Scaling an already-visible oversized
+        // form can deadlock WinForms layout on a small headless CI desktop.
+        form.Hide();
+        TraceSmokeStep($"Gallery {scale:F1}x: applying synthetic startup scale");
         form.Scale(new SizeF(scale, scale));
+        TraceSmokeStep($"Gallery {scale:F1}x: geometry scaled");
         var featureControls = new[] { (Control)gallery, topNavigation }
             .SelectMany(root => new[] { root }.Concat(EnumerateControls(root)))
             .Distinct();
@@ -1624,10 +1631,13 @@ static void AssertGalleryScaledLayout(AppSettings settings, float scale)
             }
             control.Font = scaledFont;
         }
+        TraceSmokeStep($"Gallery {scale:F1}x: fonts scaled");
         form.PerformLayout();
         Application.DoEvents();
+        TraceSmokeStep($"Gallery {scale:F1}x: layout completed");
         AssertControlsFit(form);
         AssertCriticalTextFits(form);
+        TraceSmokeStep($"Gallery {scale:F1}x: assertions passed");
     }
     finally
     {
