@@ -115,9 +115,11 @@ try
         "Resolving a differently-cased game name must not create a duplicate folder.");
 
     var rootArchiveClip = Path.Combine(gameUploadedFolder, "legacy-root.mp4");
-    var nestedArchiveClip = Path.Combine(existingGameFolder, "nested.mp4");
+    var nestedArchiveClip = Path.Combine(existingGameFolder, "nested.MP4");
+    var ignoredGalleryFile = Path.Combine(existingGameFolder, "notes.txt");
     await File.WriteAllBytesAsync(rootArchiveClip, [1, 1, 2, 3]);
     await File.WriteAllBytesAsync(nestedArchiveClip, [5, 8, 13, 21]);
+    await File.WriteAllTextAsync(ignoredGalleryFile, "not a clip");
     var archivedClips = UploadedFolder.EnumerateArchivedClips(gameUploadedFolder).ToHashSet(
         StringComparer.OrdinalIgnoreCase);
     Assert(archivedClips.Contains(rootArchiveClip), "Archived baseline enumeration must retain legacy root clips.");
@@ -125,6 +127,13 @@ try
 
     var gameLocalOnlyFolder = Directory.CreateDirectory(Path.Combine(gameArchiveRoot, "Local-Only")).FullName;
     var existingLocalOnlyGameFolder = Directory.CreateDirectory(Path.Combine(gameLocalOnlyFolder, "Battlefield™-6")).FullName;
+    var temporaryLocalOnlyGameFolder = Path.Combine(gameLocalOnlyFolder, "case-swap");
+    var lowercaseLocalOnlyGameFolder = Path.Combine(
+        gameLocalOnlyFolder,
+        Path.GetFileName(existingLocalOnlyGameFolder).ToLowerInvariant());
+    Directory.Move(existingLocalOnlyGameFolder, temporaryLocalOnlyGameFolder);
+    Directory.Move(temporaryLocalOnlyGameFolder, lowercaseLocalOnlyGameFolder);
+    existingLocalOnlyGameFolder = lowercaseLocalOnlyGameFolder;
     var resolvedLocalOnlyGameFolder = UploadedFolder.GetOrCreateLocalOnlyForClip(
         gameArchiveRoot,
         "battlefield™-6__2026-08-03__13-43-46.mp4");
@@ -135,6 +144,138 @@ try
     var localOnlyNestedClip = Path.Combine(existingLocalOnlyGameFolder, "local-nested.mp4");
     await File.WriteAllBytesAsync(localOnlyRootClip, [34, 55, 89]);
     await File.WriteAllBytesAsync(localOnlyNestedClip, [144, 233, 121]);
+
+    var linkedGalleryTarget = Directory.CreateDirectory(Path.Combine(temporaryRoot, "gallery-linked-target")).FullName;
+    var linkedGalleryClip = Path.Combine(linkedGalleryTarget, "outside-archive.mp4");
+    await File.WriteAllBytesAsync(linkedGalleryClip, [1, 2, 3, 4]);
+    var linkedGalleryGame = Path.Combine(gameUploadedFolder, "Linked game");
+    CreateDirectoryJunction(linkedGalleryGame, linkedGalleryTarget);
+    GallerySnapshot gallerySnapshot;
+    try
+    {
+        gallerySnapshot = GalleryCatalog.Scan(gameArchiveRoot, CancellationToken.None);
+    }
+    finally
+    {
+        Directory.Delete(linkedGalleryGame);
+    }
+    Assert(File.Exists(linkedGalleryClip),
+        "Gallery junction cleanup must not remove content outside the archive.");
+    Assert(gallerySnapshot.TotalClips == 4 && gallerySnapshot.UploadedCount == 2 && gallerySnapshot.LocalOnlyCount == 2,
+        "Gallery must combine uploaded and local-only clips without changing their route.");
+    Assert(gallerySnapshot.Games.SelectMany(game => game.Clips).All(clip =>
+            Path.GetExtension(clip.Path).Equals(".mp4", StringComparison.OrdinalIgnoreCase)),
+        "Gallery must include uppercase MP4 extensions while excluding non-video archive files.");
+    Assert(gallerySnapshot.Games.All(game => !game.Name.Equals("Linked game", StringComparison.OrdinalIgnoreCase)),
+        "Gallery must not traverse a linked game folder outside the archive.");
+    var galleryBattlefield = gallerySnapshot.Games.Single(game =>
+        game.Name.StartsWith("Battlefield", StringComparison.OrdinalIgnoreCase));
+    Assert(galleryBattlefield.Clips.Count == 2 &&
+           galleryBattlefield.UploadedCount == 1 &&
+           galleryBattlefield.LocalOnlyCount == 1,
+        "Gallery must merge case-insensitive game folders across both archives.");
+    Assert(gallerySnapshot.Games.Single(game => game.Name == "Uncategorized").Clips.Count == 2,
+        "Legacy clips stored at an archive root must remain visible under Uncategorized.");
+    Assert(GalleryCatalog.GetGradient("Battlefield 6") == new GalleryGradient(
+               Color.FromArgb(73, 153, 83),
+               Color.FromArgb(29, 58, 68)),
+        "The deterministic Battlefield gradient mapping must remain stable.");
+    Assert(GalleryCatalog.GetGradient("Caf\u00e9") == GalleryCatalog.GetGradient("Cafe\u0301"),
+        "Game gradients must normalize equivalent Unicode names before hashing.");
+    Assert(GalleryCatalog.GetInitials("Battlefield 6") == "B6" &&
+           GalleryCatalog.GetInitials("Counter-Strike 2") == "CS2",
+        "Game cards must derive concise deterministic initials.");
+    var playClipStart = GalleryView.CreatePlayClipStartInfo(localOnlyNestedClip);
+    Assert(playClipStart.UseShellExecute && playClipStart.FileName == localOnlyNestedClip &&
+           playClipStart.ArgumentList.Count == 0,
+        "Gallery playback must pass the exact clip path to Windows without a shell command string.");
+
+    var parseableLegacyRoot = Path.Combine(temporaryRoot, "gallery-parseable-root");
+    var parseableLegacyUploaded = Directory.CreateDirectory(Path.Combine(parseableLegacyRoot, "uploaded")).FullName;
+    await File.WriteAllBytesAsync(
+        Path.Combine(parseableLegacyUploaded, "Halo Infinite__2026-01-02__10-00-00.mp4"),
+        [3, 1, 4]);
+    var parseableLegacySnapshot = GalleryCatalog.Scan(parseableLegacyRoot, CancellationToken.None);
+    Assert(parseableLegacySnapshot.Games.Single().Name == "Halo Infinite",
+        "A parseable legacy root clip should join its inferred game instead of losing useful organization.");
+
+    var unicodeGalleryRoot = Path.Combine(temporaryRoot, "gallery-unicode-groups");
+    var composedGameFolder = Directory.CreateDirectory(
+        Path.Combine(unicodeGalleryRoot, "uploaded", "Caf\u00e9")).FullName;
+    var decomposedGameFolder = Directory.CreateDirectory(
+        Path.Combine(unicodeGalleryRoot, "local-only", "Cafe\u0301")).FullName;
+    await File.WriteAllBytesAsync(Path.Combine(composedGameFolder, "uploaded.mp4"), [1, 6, 1, 8]);
+    await File.WriteAllBytesAsync(Path.Combine(decomposedGameFolder, "local.mp4"), [0, 3, 3, 9]);
+    var unicodeGallerySnapshot = GalleryCatalog.Scan(unicodeGalleryRoot, CancellationToken.None);
+    Assert(unicodeGallerySnapshot.Games.Count == 1 &&
+           unicodeGallerySnapshot.Games.Single().Clips.Count == 2,
+        "Equivalent composed and decomposed Unicode game folders must collapse into one Gallery group.");
+
+    var linkedArchiveRoot = Path.Combine(temporaryRoot, "gallery-linked-archive-root");
+    var linkedArchiveTarget = Directory.CreateDirectory(Path.Combine(temporaryRoot, "gallery-linked-archive-target")).FullName;
+    var linkedArchivePayload = Path.Combine(linkedArchiveTarget, "outside.mp4");
+    await File.WriteAllBytesAsync(linkedArchivePayload, [2, 7, 1, 8]);
+    Directory.CreateDirectory(linkedArchiveRoot);
+    var linkedUploadedArchive = Path.Combine(linkedArchiveRoot, "Uploaded");
+    CreateDirectoryJunction(linkedUploadedArchive, linkedArchiveTarget);
+    var healthyLocalArchive = Directory.CreateDirectory(
+        Path.Combine(linkedArchiveRoot, "Local-Only", "Healthy game")).FullName;
+    await File.WriteAllBytesAsync(Path.Combine(healthyLocalArchive, "healthy.mp4"), [2, 8, 1, 8]);
+    try
+    {
+        var linkedArchiveSnapshot = GalleryCatalog.Scan(linkedArchiveRoot, CancellationToken.None);
+        Assert(linkedArchiveSnapshot.TotalClips == 1 &&
+               linkedArchiveSnapshot.LocalOnlyCount == 1 &&
+               linkedArchiveSnapshot.Warnings.Count == 1,
+            "A linked uploaded archive root must be skipped without hiding a healthy local-only archive.");
+        Assert(linkedArchiveSnapshot.Warnings.All(warning =>
+                !warning.Contains(linkedArchiveRoot, StringComparison.OrdinalIgnoreCase) &&
+                !warning.Contains(linkedArchiveTarget, StringComparison.OrdinalIgnoreCase)),
+            "Gallery warnings shown in the UI must not expose local filesystem paths.");
+    }
+    finally
+    {
+        Directory.Delete(linkedUploadedArchive);
+    }
+    Assert(File.Exists(linkedArchivePayload),
+        "Rejecting a linked archive root must not modify its external target.");
+
+    using (var cancelledGalleryScan = new CancellationTokenSource())
+    {
+        cancelledGalleryScan.Cancel();
+        var cancellationPropagated = false;
+        try
+        {
+            GalleryCatalog.Scan(gameArchiveRoot, cancelledGalleryScan.Token);
+        }
+        catch (OperationCanceledException) when (cancelledGalleryScan.IsCancellationRequested)
+        {
+            cancellationPropagated = true;
+        }
+        Assert(cancellationPropagated,
+            "Gallery cancellation must propagate instead of becoming an unreadable-folder warning.");
+    }
+
+    var disappearingArchiveRoot = Path.Combine(temporaryRoot, "gallery-disappearing-folder");
+    var disappearingUploaded = Directory.CreateDirectory(Path.Combine(disappearingArchiveRoot, "uploaded")).FullName;
+    var doomedGameFolder = Directory.CreateDirectory(Path.Combine(disappearingUploaded, "AAA doomed")).FullName;
+    var healthyGameFolder = Directory.CreateDirectory(Path.Combine(disappearingUploaded, "Zulu healthy")).FullName;
+    await File.WriteAllBytesAsync(Path.Combine(doomedGameFolder, "doomed.mp4"), [1]);
+    await File.WriteAllBytesAsync(Path.Combine(healthyGameFolder, "healthy.mp4"), [2]);
+    var disappearingSnapshot = GalleryCatalog.Scan(
+        disappearingArchiveRoot,
+        CancellationToken.None,
+        directory =>
+        {
+            if (directory.Equals(doomedGameFolder, StringComparison.OrdinalIgnoreCase) && Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        });
+    Assert(disappearingSnapshot.TotalClips == 1 &&
+           disappearingSnapshot.Games.Single().Name == "Zulu healthy" &&
+           disappearingSnapshot.Warnings.Count == 1,
+        "A game folder that disappears mid-scan must not hide later healthy game folders.");
 
     var gameBaselineStateDirectory = Path.Combine(temporaryRoot, "game-baseline-state");
     Directory.CreateDirectory(gameBaselineStateDirectory);
@@ -234,10 +375,12 @@ try
     }
     Assert(ReferenceEquals(ClipCordTheme.InterfaceFont(10f), ClipCordTheme.InterfaceFont(10f)),
         "ClipCord fonts must be cached instead of allocating GDI font handles for every control.");
-    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Activity, 144) == new Size(1564, 1156),
-        "The Activity window must use the user-approved 1043x771 design size at 150% scaling.");
-    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, 96) == new Size(1080, 820),
-        "The Settings page must retain its approved 1080x820 design size.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Activity, 144) == new Size(1564, 1256),
+        "Activity must preserve its approved width and add only the top-navigation height.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, 96) == new Size(1080, 886),
+        "Settings must preserve its approved width and add only the top-navigation height.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Gallery, 96) == new Size(1100, 890),
+        "The Gallery page must share the expanded top-navigation design size.");
     Assert(SettingsForm.GetScaledMinimumSize(144) == new Size(1350, 975),
         "The resize floor must scale with the active Windows DPI.");
     AssertBrandedActivityScrollHost();
@@ -623,6 +766,17 @@ static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string 
     {
         if (DateTime.UtcNow >= deadline) throw new InvalidOperationException(failureMessage);
         await Task.Delay(TimeSpan.FromMilliseconds(10));
+    }
+}
+
+static void WaitForUiCondition(Func<bool> condition, TimeSpan timeout, string failureMessage)
+{
+    var deadline = DateTime.UtcNow.Add(timeout);
+    while (!condition())
+    {
+        if (DateTime.UtcNow >= deadline) throw new InvalidOperationException(failureMessage);
+        Application.DoEvents();
+        Thread.Sleep(10);
     }
 }
 
@@ -1065,6 +1219,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
+            AssertGalleryPreHandleLifecycle(settings);
             using (var activityOnly = new SettingsForm(
                        settings,
                        checkForUpdatesAsync: _ => Task.CompletedTask,
@@ -1226,6 +1381,61 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 "Activity must expose uploaded-folder, log, and per-clip location actions.");
             AssertControlsFit(form);
             AssertCriticalTextFits(form);
+
+            form.ShowPage(SettingsPage.Gallery);
+            WaitForUiCondition(
+                () => EnumerateControls(form).Count(control => control.Name == "GalleryGameCard") == 2,
+                TimeSpan.FromSeconds(5),
+                "Gallery did not finish its on-demand archive scan.");
+            Assert(form.Text.EndsWith("Gallery", StringComparison.Ordinal) &&
+                   EnumerateControls(form).Single(control => control.Name == "GalleryView").Visible,
+                "Gallery navigation must activate the branded Gallery page.");
+            var galleryView = EnumerateControls(form).OfType<GalleryView>().Single();
+            var galleryGridForDisposal = (GalleryGridPanel)typeof(GalleryView).GetField(
+                    "_gameGrid",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(galleryView)!;
+            var galleryListForDisposal = (ActivityListPanel)typeof(GalleryView).GetField(
+                    "_clipList",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(galleryView)!;
+            var topNavigation = EnumerateControls(form).Single(control => control.Name == "TopNavigation");
+            var pageHost = EnumerateControls(form).Single(control => control.Name == "PageHost");
+            Assert(topNavigation.Bottom <= pageHost.Top,
+                "The primary navigation must remain above the page content instead of using a sidebar.");
+            Assert(EnumerateControls(form).Single(control => control.Name == "GalleryNavItem").TabStop,
+                "Gallery must be keyboard reachable from the top navigation.");
+            var gameCard = EnumerateControls(form)
+                .OfType<GalleryGameCard>()
+                .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+            gameCard.Focus();
+            Assert(gameCard.Focused, "The Gallery game card must accept keyboard focus.");
+            typeof(Control).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(gameCard, [new KeyEventArgs(Keys.Enter)]);
+            Application.DoEvents();
+            Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2 &&
+                   EnumerateControls(form).OfType<Button>().Any(button => button.Name == "PlayGalleryClipButton") &&
+                   EnumerateControls(form).OfType<Button>().Any(button => button.Name == "ShowGalleryClipButton"),
+                "Enter must open a Gallery game and expose uploaded and local-only clip actions.");
+            EnumerateControls(form).OfType<Button>()
+                .Single(button => button.Name == "GalleryBackButton")
+                .PerformClick();
+            Application.DoEvents();
+            gameCard = EnumerateControls(form)
+                .OfType<GalleryGameCard>()
+                .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+            gameCard.Focus();
+            typeof(Control).GetMethod(
+                    "OnKeyDown",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(gameCard, [new KeyEventArgs(Keys.Space)]);
+            Application.DoEvents();
+            Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2,
+                "Space must open a focused Gallery game card through its keyboard handler.");
+            AssertControlsFit(form);
+            AssertCriticalTextFits(form);
             form.ShowPage(SettingsPage.Settings);
             Application.DoEvents();
             Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Local only"),
@@ -1291,6 +1501,19 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertSettingsRoundTrip(settings);
             AssertManualCheckCloseProtection(settings);
             form.Dispose();
+            Assert(galleryGridForDisposal.IsDisposed && galleryListForDisposal.IsDisposed,
+                "Both Gallery content panels must be disposed, including the one detached from the scroll host.");
+            AssertGalleryScaledLayout(settings, 1.5f);
+            AssertGalleryScaledLayout(settings, 2f);
+            using (var emptyGalleryGrid = new GalleryGridPanel { Size = new Size(1024, 400) })
+            using (var emptyGalleryState = new Panel { Name = "GalleryEmptyState", Height = 160 })
+            {
+                emptyGalleryGrid.Controls.Add(emptyGalleryState);
+                emptyGalleryGrid.Reflow();
+                Assert(emptyGalleryState.Width == emptyGalleryGrid.ClientSize.Width &&
+                       emptyGalleryGrid.MeasureContentHeight() == 160,
+                    "The Gallery empty state must span the viewport and report its actual content height.");
+            }
             Assert(activityHistory.SubscriptionCount == 0,
                 "Closing the Settings/Activity window must detach its live-history subscription.");
         }
@@ -1347,6 +1570,76 @@ static void AssertManualCheckCloseProtection(AppSettings settings)
 
     form.ShowDialog();
     Assert(checkedBusyState, "The manual update-check close-protection test did not run.");
+}
+
+static void AssertGalleryScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask);
+        form.Show();
+        form.ShowPage(SettingsPage.Gallery);
+        WaitForUiCondition(
+            () => EnumerateControls(form).Any(control => control.Name == "GalleryGameCard"),
+            TimeSpan.FromSeconds(5),
+            $"Gallery did not populate before the {scale:F1}x layout check.");
+        form.Scale(new SizeF(scale, scale));
+        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * scale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+        form.PerformLayout();
+        Application.DoEvents();
+        AssertControlsFit(form);
+        AssertCriticalTextFits(form);
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+    }
+}
+
+static void AssertGalleryPreHandleLifecycle(AppSettings settings)
+{
+    using var gallery = new GalleryView(settings.ClipsFolder);
+    Assert(!gallery.IsHandleCreated && gallery.Parent is null,
+        "The pre-handle Gallery lifecycle test must begin before the view is parented or shown.");
+    gallery.Activate(settings.ClipsFolder);
+    gallery.Deactivate();
+    Thread.Sleep(50);
+    Application.DoEvents();
+    var refresh = EnumerateControls(gallery)
+        .OfType<Button>()
+        .Single(button => button.Name == "RefreshGalleryButton");
+    Assert(refresh.Enabled &&
+           EnumerateControls(gallery).All(control => control.Name != "GalleryGameCard"),
+        "Deactivate must cancel a pre-handle scan, restore Refresh, and reject its late completion.");
+
+    gallery.Activate(settings.ClipsFolder);
+    WaitForUiCondition(
+        () => EnumerateControls(gallery).Any(control => control.Name == "GalleryGameCard"),
+        TimeSpan.FromSeconds(5),
+        "Activate must populate Gallery even before its control handle is created.");
+    Assert(!gallery.IsHandleCreated,
+        "On-demand Gallery scanning must not require an invisible native window handle.");
+    gallery.Deactivate();
+    var cardsBeforeInactiveRefresh = EnumerateControls(gallery)
+        .Count(control => control.Name == "GalleryGameCard");
+    gallery.RefreshCatalog(settings.ClipsFolder);
+    Application.DoEvents();
+    Assert(refresh.Enabled &&
+           EnumerateControls(gallery).Count(control => control.Name == "GalleryGameCard") == cardsBeforeInactiveRefresh,
+        "RefreshCatalog must remain a no-op while Gallery is inactive.");
 }
 
 static void AssertControlsFit(Form form)
@@ -1466,6 +1759,14 @@ static void AssertCriticalTextFits(Form form)
         "Open uploaded folder",
         "Open logs",
         "Show in folder",
+        "Settings",
+        "Activity",
+        "Gallery",
+        "About",
+        "Refresh",
+        "Open clips folder",
+        "All games",
+        "Play clip",
         "Close"
     };
     foreach (var control in EnumerateControls(form).Where(control => control.Visible && criticalText.Contains(control.Text)))
@@ -1517,7 +1818,9 @@ static void AssertAccessibility(Form form)
     Assert(EnumerateControls(form).Single(control => control.Name == "AboutNavItem").TabStop,
         "About must be keyboard reachable.");
     Assert(EnumerateControls(form).Single(control => control.Name == "SettingsNavItem").TabStop,
-        "The current Settings navigation item must participate in the sidebar keyboard order.");
+        "The current Settings navigation item must participate in the top navigation keyboard order.");
+    Assert(EnumerateControls(form).Single(control => control.Name == "GalleryNavItem").TabStop,
+        "Gallery must be keyboard reachable from the top navigation.");
 }
 
 static void AssertOpaqueCustomControlsPaintEveryPixel(Form form)

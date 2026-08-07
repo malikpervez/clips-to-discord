@@ -35,6 +35,8 @@ SHA-256 hashing and FFmpeg compression are performed locally. Clip content and h
 
 The Activity Center reads only the local bounded activity history. It never stores or displays the Discord webhook, and its text fields pass through the same webhook redactor before atomic persistence. Closing the Activity window does not affect clip watching or uploads.
 
+The Gallery reads the local `uploaded` and `local-only` archives only while its page is open. It does not build a background media index, contact an artwork service, upload local-only clips, or send clip names and paths over the network. Playing a clip asks Windows to open the exact local file with the user's default video application.
+
 ## File handling
 
 - Existing clips are ignored during the initial baseline.

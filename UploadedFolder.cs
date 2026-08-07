@@ -32,6 +32,9 @@ public static class UploadedFolder
     public static string GetOrCreate(string clipsFolder) =>
         GetOrCreateCaseInsensitiveChild(clipsFolder, FolderName);
 
+    internal static string? FindExistingUploaded(string clipsFolder) =>
+        FindCaseInsensitiveChild(clipsFolder, FolderName);
+
     public static string GetOrCreateForClip(string clipsFolder, string clipFileName)
     {
         var uploadedFolder = GetOrCreate(clipsFolder);
