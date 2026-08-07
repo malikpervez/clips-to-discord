@@ -7,13 +7,15 @@ namespace ClipsToDiscord;
 internal enum SettingsPage
 {
     Settings,
-    Activity
+    Activity,
+    Gallery
 }
 
 internal sealed class SettingsForm : Form
 {
-    internal static readonly Size SettingsDesignedClientSize = new(1080, 820);
-    internal static readonly Size ActivityDesignedClientSize = new(1043, 771);
+    internal static readonly Size SettingsDesignedClientSize = new(1080, 886);
+    internal static readonly Size ActivityDesignedClientSize = new(1043, 837);
+    internal static readonly Size GalleryDesignedClientSize = new(1100, 890);
     internal static readonly Size MinimumDesignedClientSize = new(900, 650);
     private static readonly Regex CompressionTargetPattern = new(
         @"^\s*(?<value>\d{1,3})\s*(?:MB)?\s*$",
@@ -131,8 +133,10 @@ internal sealed class SettingsForm : Form
     private readonly bool _ownsActivityHistory;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _activityNavigationItem;
+    private RoundedPanel? _galleryNavigationItem;
     private Control? _settingsPage;
     private ActivityView? _activityPage;
+    private GalleryView? _galleryPage;
     private bool _busy;
     private string? _lastWatcherFullStatus;
     private Size _lastWindowRegionSize = Size.Empty;
@@ -161,9 +165,7 @@ internal sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.None;
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = initialPage == SettingsPage.Activity
-            ? ActivityDesignedClientSize
-            : SettingsDesignedClientSize;
+        ClientSize = GetDesignedClientSize(initialPage);
         MinimumSize = MinimumDesignedClientSize;
         BackColor = ClipCordTheme.Header;
         Padding = new Padding(ResizeGrip);
@@ -219,18 +221,20 @@ internal sealed class SettingsForm : Form
             Name = "RootLayout",
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = ClipCordTheme.Shell
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
         root.Controls.Add(BuildHeader(), 0, 0);
-        root.Controls.Add(BuildBody(), 0, 1);
-        root.Controls.Add(BuildFooter(), 0, 2);
+        root.Controls.Add(BuildNavigation(), 0, 1);
+        root.Controls.Add(BuildBody(), 0, 2);
+        root.Controls.Add(BuildFooter(), 0, 3);
         return root;
     }
 
@@ -365,19 +369,6 @@ internal sealed class SettingsForm : Form
 
     private Control BuildBody()
     {
-        var body = new BufferedTableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            Margin = Padding.Empty,
-            Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Shell
-        };
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 245));
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        body.Controls.Add(BuildNavigation(), 0, 0);
         var pageHost = new Panel
         {
             Name = "PageHost",
@@ -387,27 +378,30 @@ internal sealed class SettingsForm : Form
         };
         _settingsPage = BuildCards();
         _activityPage = new ActivityView(_activityHistory, _folderText.Text);
+        _galleryPage = new GalleryView(_folderText.Text);
         pageHost.Controls.Add(_settingsPage);
         pageHost.Controls.Add(_activityPage);
-        body.Controls.Add(pageHost, 1, 0);
-        return body;
+        pageHost.Controls.Add(_galleryPage);
+        return pageHost;
     }
 
     private Control BuildNavigation()
     {
         var navigation = new BufferedTableLayoutPanel
         {
+            Name = "TopNavigation",
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 4,
+            ColumnCount = 4,
+            RowCount = 1,
             Margin = Padding.Empty,
-            Padding = new Padding(16, 24, 16, 0),
+            Padding = new Padding(20, 7, 20, 7),
             BackColor = ClipCordTheme.Sidebar
         };
-        navigation.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
-        navigation.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
-        navigation.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
         navigation.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        for (var index = 0; index < navigation.ColumnCount; index++)
+        {
+            navigation.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        }
 
         var settingsItem = CreateNavigationItem("Settings", BrandGlyph.Settings, selected: true);
         settingsItem.Name = "SettingsNavItem";
@@ -430,6 +424,15 @@ internal sealed class SettingsForm : Form
         WireClick(activityItem, () => ShowPage(SettingsPage.Activity));
         _activityNavigationItem = activityItem;
 
+        var galleryItem = CreateNavigationItem("Gallery", BrandGlyph.Gallery, selected: false);
+        galleryItem.Name = "GalleryNavItem";
+        galleryItem.AccessibleName = "Gallery";
+        galleryItem.AccessibleDescription = "Browse uploaded and local-only clips";
+        galleryItem.AccessibleRole = AccessibleRole.MenuItem;
+        galleryItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.Gallery));
+        WireClick(galleryItem, () => ShowPage(SettingsPage.Gallery));
+        _galleryNavigationItem = galleryItem;
+
         var aboutItem = CreateNavigationItem("About", BrandGlyph.About, selected: false);
         aboutItem.Name = "AboutNavItem";
         aboutItem.AccessibleName = "About ClipCord";
@@ -438,34 +441,63 @@ internal sealed class SettingsForm : Form
         WireClick(aboutItem, ShowAbout);
 
         navigation.Controls.Add(settingsItem, 0, 0);
-        navigation.Controls.Add(activityItem, 0, 1);
-        navigation.Controls.Add(aboutItem, 0, 2);
+        navigation.Controls.Add(activityItem, 1, 0);
+        navigation.Controls.Add(galleryItem, 2, 0);
+        navigation.Controls.Add(aboutItem, 3, 0);
         return navigation;
     }
 
     internal void ShowPage(SettingsPage page)
     {
-        if (_settingsPage is null || _activityPage is null) return;
+        if (_settingsPage is null || _activityPage is null || _galleryPage is null) return;
 
+        var showSettings = page == SettingsPage.Settings;
         var showActivity = page == SettingsPage.Activity;
-        _settingsPage.Visible = !showActivity;
+        var showGallery = page == SettingsPage.Gallery;
+        _settingsPage.Visible = showSettings;
         _activityPage.Visible = showActivity;
-        if (showActivity) _activityPage.BringToFront();
-        else _settingsPage.BringToFront();
-        if (showActivity) _activityPage.RefreshViewport();
-        else _settingsPage.PerformLayout();
+        _galleryPage.Visible = showGallery;
+        if (showSettings)
+        {
+            _galleryPage.Deactivate();
+            _settingsPage.BringToFront();
+            _settingsPage.PerformLayout();
+        }
+        else if (showActivity)
+        {
+            _galleryPage.Deactivate();
+            _activityPage.BringToFront();
+            _activityPage.RefreshViewport();
+        }
+        else
+        {
+            _galleryPage.BringToFront();
+            _galleryPage.Activate(_folderText.Text);
+        }
 
-        UpdateNavigationSelection(_settingsNavigationItem, !showActivity);
+        UpdateNavigationSelection(_settingsNavigationItem, showSettings);
         UpdateNavigationSelection(_activityNavigationItem, showActivity);
-        _saveButton.Visible = !showActivity;
-        _cancelButton.Text = showActivity ? "Close" : "Cancel";
-        AcceptButton = showActivity ? null : _saveButton;
-        Text = showActivity ? "ClipCord — Activity" : "ClipCord — Settings";
+        UpdateNavigationSelection(_galleryNavigationItem, showGallery);
+        _saveButton.Visible = showSettings;
+        _cancelButton.Text = showSettings ? "Cancel" : "Close";
+        AcceptButton = showSettings ? _saveButton : null;
+        Text = page switch
+        {
+            SettingsPage.Activity => "ClipCord — Activity",
+            SettingsPage.Gallery => "ClipCord — Gallery",
+            _ => "ClipCord — Settings"
+        };
         if (showActivity)
         {
             _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
             _statusLabel.Text = "Recent activity is stored locally and never includes your webhook.";
             _privacySummaryLabel.Text = "Closing this window does not stop clip processing.";
+        }
+        else if (showGallery)
+        {
+            _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
+            _statusLabel.Text = "Gallery reads uploaded and local-only archives only while this page is open.";
+            _privacySummaryLabel.Text = "Playing or browsing a local-only clip never uploads it.";
         }
         else
         {
@@ -514,33 +546,33 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             BackColor = selected ? ClipCordTheme.VioletMuted : ClipCordTheme.Sidebar,
             BorderColor = selected ? Color.FromArgb(73, 62, 107) : Color.Transparent,
-            CornerRadius = 12,
-            Margin = new Padding(0, 0, 0, 10),
+            CornerRadius = 10,
+            Margin = new Padding(4, 0, 4, 0),
             Padding = Padding.Empty
         };
         var layout = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 4,
-            RowCount = 1,
+            ColumnCount = 2,
+            RowCount = 2,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = Color.Transparent
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 5));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 4));
         var selectionStrip = new GradientStrip
         {
             Name = "NavigationSelectionStrip",
             Dock = DockStyle.Fill,
             Margin = Padding.Empty,
-            Visible = selected
+            Visible = selected,
+            Horizontal = true
         };
-        layout.Controls.Add(selectionStrip, 0, 0);
-        const int iconColumn = 1;
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.Controls.Add(selectionStrip, 0, 1);
+        layout.SetColumnSpan(selectionStrip, 2);
 
         var icon = new BrandGlyphControl
         {
@@ -551,7 +583,7 @@ internal sealed class SettingsForm : Form
                 : selected ? ClipCordTheme.Violet : ClipCordTheme.ShellMutedText,
             StrokeWidth = 1.9f,
             Dock = DockStyle.Fill,
-            Margin = new Padding(12, 10, 6, 10),
+            Margin = new Padding(12, 8, 5, 8),
             Enabled = !unavailable
         };
         var label = new Label
@@ -563,25 +595,14 @@ internal sealed class SettingsForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Font = ClipCordTheme.InterfaceFont(11f, selected ? FontStyle.Bold : FontStyle.Regular),
             Enabled = !unavailable,
-            Margin = Padding.Empty,
+            Margin = new Padding(0, 0, 10, 0),
             BackColor = Color.Transparent
         };
-        layout.Controls.Add(icon, iconColumn, 0);
-        layout.Controls.Add(label, iconColumn + 1, 0);
+        layout.Controls.Add(icon, 0, 0);
+        layout.Controls.Add(label, 1, 0);
         if (!string.IsNullOrWhiteSpace(badgeText))
         {
-            var badge = new Label
-            {
-                Text = badgeText,
-                AutoSize = true,
-                ForeColor = Color.FromArgb(116, 124, 143),
-                BackColor = Color.Transparent,
-                Font = ClipCordTheme.InterfaceFont(7.5f, FontStyle.Bold),
-                TextAlign = ContentAlignment.MiddleCenter,
-                Enabled = false,
-                Margin = new Padding(5, 20, 12, 0)
-            };
-            layout.Controls.Add(badge, iconColumn + 2, 0);
+            surface.AccessibleDescription = badgeText;
         }
         surface.Controls.Add(layout);
         return surface;
@@ -1285,14 +1306,19 @@ internal sealed class SettingsForm : Form
 
     internal static Size GetDesignedOpeningSize(SettingsPage page, int dpi)
     {
-        var clientSize = page == SettingsPage.Activity
-            ? ActivityDesignedClientSize
-            : SettingsDesignedClientSize;
+        var clientSize = GetDesignedClientSize(page);
         var scale = Math.Max(96, dpi) / 96d;
         return new Size(
             (int)Math.Round(clientSize.Width * scale),
             (int)Math.Round(clientSize.Height * scale));
     }
+
+    private static Size GetDesignedClientSize(SettingsPage page) => page switch
+    {
+        SettingsPage.Activity => ActivityDesignedClientSize,
+        SettingsPage.Gallery => GalleryDesignedClientSize,
+        _ => SettingsDesignedClientSize
+    };
 
     internal static Size GetScaledMinimumSize(int dpi)
     {

@@ -34,6 +34,8 @@ flowchart LR
 - `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two clip consumers that either upload or archive locally according to the persisted setting.
 - `ActivityHistoryStore` accepts thread-safe immutable lifecycle updates from both workers, retains at most 100 redacted metadata entries with atomic persistence, and posts snapshots to non-blocking UI subscribers.
 - `ActivityView` renders those snapshots independently of the watcher and provides valid local file, uploaded-folder, and diagnostic-log actions.
+- `GalleryCatalog` performs a bounded, one-level scan of the existing uploaded and local-only archives on demand, skips reparse points, preserves each clip's route, and groups clips case-insensitively by game. Parseable legacy clips left at an archive root join their inferred game; unrecognized names remain under `Uncategorized`.
+- `GalleryView` renders deterministic local gradient cards and clip actions only while its page is active; it has no timer, file watcher, artwork request, or persistent media index.
 - `DiscordWebhookClient` sends multipart attachments with uploader/game attribution, disabled mentions, separate connection and total deadlines, and progressively smaller compression retries.
 - `FfmpegCompressor` performs local two-pass H.264/AAC compression to a requested target.
 - `SettingsStore` encrypts the webhook with DPAPI and performs staged legacy migration.
@@ -65,6 +67,7 @@ flowchart LR
 - Controller disposal waits at most ten seconds on the UI thread, while any slower worker cleanup remains observed in the background.
 - Every runtime access to mutable watch-state collections is serialized through one gate shared by the scanner and both upload workers.
 - Activity subscribers receive immutable snapshots through their synchronization context; closing the Activity window detaches the subscription without stopping or reconfiguring the worker.
+- Gallery archive discovery runs on demand off the UI thread, is cancelled when the page closes, traverses only the archive root and one game-directory level, and never follows a symbolic link or junction.
 - Version 1.1+ copies compatible settings from the former Moments to Discord data directory without deleting the original files.
 - Stable update discovery accepts only a newer semantic version with exact official GitHub release/asset paths and a SHA-256 asset digest or bounded checksum-manifest entry.
 - Update installation remains user-initiated. Downloads have visible progress and cancellation, are limited to 512 MiB, follow at most one allow-listed redirect, and are deleted if their length or digest fails verification.

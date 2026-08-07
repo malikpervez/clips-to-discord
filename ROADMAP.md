@@ -22,6 +22,7 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 - [#32 Local-only mode](https://github.com/malikpervez/clips-to-discord/issues/32) — shipped in ClipCord v1.6.0 with durable routing, restart recovery, and no webhook requirement while uploads are disabled.
 - ClipCord v1.6.1 polished the Settings opening size and aligned the primary text fields.
 - [#18 Activity center](https://github.com/malikpervez/clips-to-discord/issues/18) — shipped in ClipCord v1.7.0 with bounded local history, live upload/compression status, and branded accessible scrolling.
+- ClipCord v1.8.0 adds permanent top navigation and an on-demand local Gallery for uploaded and local-only clips without background indexing or artwork-network dependencies.
 
 ## Planned milestones
 

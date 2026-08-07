@@ -372,6 +372,10 @@ internal sealed class BrandedScrollHost : Panel
         {
             return activityList.MeasureContentHeight();
         }
+        if (_content is GalleryGridPanel galleryGrid)
+        {
+            return galleryGrid.MeasureContentHeight();
+        }
         _content.PerformLayout();
         var preferred = _content.GetPreferredSize(new Size(Math.Max(1, ClientSize.Width), int.MaxValue));
         return Math.Max(_content.MinimumSize.Height, preferred.Height);
@@ -479,6 +483,7 @@ internal enum BrandGlyph
 {
     Settings,
     Activity,
+    Gallery,
     About,
     Folder,
     Destination,
@@ -862,6 +867,14 @@ internal class BrandGlyphControl : Control
                     new PointF(box.Right, box.Top + box.Height * .42f)
                 ]);
                 break;
+            case BrandGlyph.Gallery:
+                var cellWidth = Math.Max(2, (box.Width - 3) / 2);
+                var cellHeight = Math.Max(2, (box.Height - 3) / 2);
+                graphics.DrawRectangle(pen, box.Left, box.Top, cellWidth, cellHeight);
+                graphics.DrawRectangle(pen, box.Right - cellWidth, box.Top, cellWidth, cellHeight);
+                graphics.DrawRectangle(pen, box.Left, box.Bottom - cellHeight, cellWidth, cellHeight);
+                graphics.DrawRectangle(pen, box.Right - cellWidth, box.Bottom - cellHeight, cellWidth, cellHeight);
+                break;
             case BrandGlyph.About:
                 graphics.DrawEllipse(pen, box);
                 graphics.DrawLine(pen, box.Left + box.Width / 2f, box.Top + box.Height * .45f,
@@ -1122,6 +1135,8 @@ internal sealed class ClipCordLogoControl : Control
 
 internal sealed class GradientStrip : Control
 {
+    public bool Horizontal { get; set; }
+
     public GradientStrip()
     {
         DoubleBuffered = true;
@@ -1137,7 +1152,7 @@ internal sealed class GradientStrip : Control
             ClientRectangle,
             ClipCordTheme.Coral,
             ClipCordTheme.Violet,
-            LinearGradientMode.Vertical);
+            Horizontal ? LinearGradientMode.Horizontal : LinearGradientMode.Vertical);
         eventArgs.Graphics.FillRectangle(brush, ClientRectangle);
     }
 }

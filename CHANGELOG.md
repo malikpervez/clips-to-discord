@@ -4,6 +4,13 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.8.0 — 2026-08-07
+
+- Replace the Settings sidebar with persistent top navigation for Settings, Activity, Gallery, and About.
+- Preserve the approved Settings and Activity widths while adding only the vertical space required by the new top navigation.
+- Add an on-demand local Gallery that groups both uploaded and local-only clips by game, uses deterministic branded gradients, preserves each clip's route, and provides playback and file-location actions.
+- Keep Gallery idle when it is closed: archive discovery runs only while the Gallery page is open and performs no network requests.
+
 ## 1.7.0 — 2026-08-06
 
 - Activate the branded Activity page and add a tray shortcut for live, bounded clip history without coupling the window to the uploader lifecycle.
