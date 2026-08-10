@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$PreviousInstallerPath,
-    [string]$ExpectedVersion = '1.8.0',
+    [string]$ExpectedVersion = '1.8.1',
     [string]$PreviousVersion = '1.3.5'
 )
 
