@@ -2111,6 +2111,7 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         form.TopLevel = false;
         form.Dock = DockStyle.Fill;
         host.Controls.Add(form);
+        form.Bounds = host.ClientRectangle;
         host.CreateControl();
         form.CreateControl();
         form.Scale(new SizeF(scale, scale));
@@ -2127,6 +2128,7 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         }
         // Keep this synthetic DPI test independent of the CI runner's desktop size.
         // OnShown separately verifies that real constrained screens are fitted and scroll safely.
+        form.Bounds = host.ClientRectangle;
         host.PerformLayout();
         form.PerformLayout();
         Application.DoEvents();
