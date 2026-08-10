@@ -2107,6 +2107,7 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         var scaledDesignedOpeningSize = new Size(
             (int)Math.Round(designedOpeningSize.Width * scale),
             (int)Math.Round(designedOpeningSize.Height * scale));
+        form.TopLevel = false;
         form.CreateControl();
         form.Scale(new SizeF(scale, scale));
         foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
