@@ -2103,7 +2103,7 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         using var form = new SettingsForm(
             settings,
             checkForUpdatesAsync: _ => Task.CompletedTask);
-        var designedOpeningSize = form.Size;
+        var designedOpeningSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, 96);
         var scaledDesignedOpeningSize = new Size(
             (int)Math.Round(designedOpeningSize.Width * scale),
             (int)Math.Round(designedOpeningSize.Height * scale));
