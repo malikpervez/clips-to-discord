@@ -459,6 +459,10 @@ internal sealed class ActivityView : UserControl
     internal static ProcessStartInfo CreateSelectFileStartInfo(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (path.Contains('"'))
+        {
+            throw new ArgumentException("Path cannot contain a double quote.", nameof(path));
+        }
         // Explorer uses a legacy command-line parser for /select. ArgumentList
         // quotes a space-containing combined token as "/select,C:\\some path",
         // which Explorer can mistake for a folder and then fall back to Documents.

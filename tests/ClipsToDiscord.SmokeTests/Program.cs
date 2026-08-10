@@ -902,13 +902,24 @@ static void AssertActivityHistory(string root)
            openFolderStart.UseShellExecute &&
            openFolderStart.ArgumentList.SequenceEqual([spacedFolder]),
         "Opening a folder must pass a space-containing path as one Explorer argument.");
-    var spacedFile = Path.Combine(spacedFolder, "Battlefield 6", "clip one.mp4");
+    var spacedFile = Path.Combine(spacedFolder, "Battlefield™-6", "clip, 日本語 one.mp4");
     var selectFileStart = ActivityView.CreateSelectFileStartInfo(spacedFile);
     Assert(selectFileStart.FileName == "explorer.exe" &&
            selectFileStart.UseShellExecute &&
            selectFileStart.ArgumentList.Count == 0 &&
            selectFileStart.Arguments == $"/select,\"{spacedFile}\"",
-        "Showing a clip must keep Explorer's /select switch outside the quoted space-containing path.");
+        "Showing a clip must preserve spaces, commas, and Unicode while keeping Explorer's /select switch outside the quoted path.");
+    var rejectedQuotedSelectPath = false;
+    try
+    {
+        ActivityView.CreateSelectFileStartInfo(spacedFile + "\" /root,C:\\Windows");
+    }
+    catch (ArgumentException)
+    {
+        rejectedQuotedSelectPath = true;
+    }
+    Assert(rejectedQuotedSelectPath,
+        "The Explorer selection helper must reject an embedded quote even if a future caller omits its File.Exists gate.");
 
     var historyPath = Path.Combine(root, "activity.json");
     var sourcePath = Path.Combine(root, "Battlefield™-6__2026-08-06__14-37-13.mp4");
