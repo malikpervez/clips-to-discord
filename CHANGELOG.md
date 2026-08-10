@@ -4,6 +4,8 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- Fix Activity and Gallery **Show in folder** actions for clip paths containing spaces so Explorer selects the exact file instead of falling back to Documents.
+
 ## 1.8.0 — 2026-08-07
 
 - Replace the Settings sidebar with persistent top navigation for Settings, Activity, Gallery, and About.

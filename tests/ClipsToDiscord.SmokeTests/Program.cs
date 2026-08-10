@@ -906,8 +906,9 @@ static void AssertActivityHistory(string root)
     var selectFileStart = ActivityView.CreateSelectFileStartInfo(spacedFile);
     Assert(selectFileStart.FileName == "explorer.exe" &&
            selectFileStart.UseShellExecute &&
-           selectFileStart.ArgumentList.SequenceEqual([$"/select,{spacedFile}"]),
-        "Showing a clip must pass Explorer's /select switch and path as one argument token.");
+           selectFileStart.ArgumentList.Count == 0 &&
+           selectFileStart.Arguments == $"/select,\"{spacedFile}\"",
+        "Showing a clip must keep Explorer's /select switch outside the quoted space-containing path.");
 
     var historyPath = Path.Combine(root, "activity.json");
     var sourcePath = Path.Combine(root, "Battlefield™-6__2026-08-06__14-37-13.mp4");

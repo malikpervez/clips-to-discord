@@ -459,9 +459,14 @@ internal sealed class ActivityView : UserControl
     internal static ProcessStartInfo CreateSelectFileStartInfo(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        var start = new ProcessStartInfo("explorer.exe") { UseShellExecute = true };
-        start.ArgumentList.Add($"/select,{path}");
-        return start;
+        // Explorer uses a legacy command-line parser for /select. ArgumentList
+        // quotes a space-containing combined token as "/select,C:\\some path",
+        // which Explorer can mistake for a folder and then fall back to Documents.
+        // Keep the switch outside the quotes and quote only the exact file path.
+        return new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
+        {
+            UseShellExecute = true
+        };
     }
 
     protected override void Dispose(bool disposing)
