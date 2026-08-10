@@ -2104,8 +2104,10 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
             settings,
             checkForUpdatesAsync: _ => Task.CompletedTask);
         var designedOpeningSize = form.Size;
-        form.Show();
-        form.Hide();
+        var scaledDesignedOpeningSize = new Size(
+            (int)Math.Round(designedOpeningSize.Width * scale),
+            (int)Math.Round(designedOpeningSize.Height * scale));
+        form.CreateControl();
         form.Scale(new SizeF(scale, scale));
         foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
         {
@@ -2118,16 +2120,13 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
             }
             control.Font = scaledFont;
         }
+        // Keep this synthetic DPI test independent of the CI runner's desktop size.
+        // OnShown separately verifies that real constrained screens are fitted and scroll safely.
+        form.Size = scaledDesignedOpeningSize;
         form.PerformLayout();
         Application.DoEvents();
         AssertControlsFit(form);
-        if (scale <= 1.5f)
-        {
-            var scaledDesignedOpeningSize = new Size(
-                (int)Math.Round(designedOpeningSize.Width * scale),
-                (int)Math.Round(designedOpeningSize.Height * scale));
-            AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, scaledDesignedOpeningSize);
-        }
+        if (scale <= 1.5f) AssertSettingsCardsOpenWithoutScrolling(form);
         AssertCriticalTextFits(form);
 
         var hotkeyField = EnumerateControls(form)
