@@ -42,6 +42,12 @@ Folder matching is case-insensitive: `uploaded`, `Uploaded`, and `UPLOADED` are 
 
 When **Upload new clips to Discord** is off, ClipCord makes no webhook request. After the normal readiness checks, it moves each new clip into `local-only\<game name>` and shows **Local only** in the status area. Turning uploads back on does not scan or upload anything already inside `local-only`; post those files manually if desired.
 
+## The mode shortcut does not work
+
+The global shortcut works only while ClipCord is running in the Windows notification area. Its default is **Ctrl + Alt + L**. Open Settings to view, replace, restore, or disable it.
+
+If Windows or another application already owns the selected combination, ClipCord keeps the previous working shortcut and asks you to choose another one. The shortcut is intentionally ignored while Settings, an update dialog, or another mode change is active. Enabling Discord uploads also requires a valid saved webhook; if none is available, the mode stays local-only and ClipCord shows a notification.
+
 ## Multiple people share one webhook
 
 Open **Settings** on each computer and give every installation a different **Uploader name**, normally that person's Discord display name. Each upload is posted as visible text and attachment description, for example `Malik uploaded a clip from Battlefield™-6.` Existing installations upgrading from an earlier release initially use the Windows account name and can change it at any time.

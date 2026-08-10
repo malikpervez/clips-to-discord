@@ -83,6 +83,8 @@ internal sealed class SettingsForm : Form
         MaxDropDownItems = 7,
         AccessibleName = "Compression target in megabytes"
     };
+    private readonly TextBox _modeToggleHotkeyText = CreateTextBox("Global upload-mode shortcut");
+    private readonly OutlineButton _modeToggleHotkeyAction = CreateSecondaryButton("Disable", 92);
     private readonly ToggleSwitch _startWithWindows = new() { Text = "Start with Windows" };
     private readonly ToggleSwitch _uploadToDiscord = new()
     {
@@ -178,6 +180,14 @@ internal sealed class SettingsForm : Form
         _uploaderNameText.Text = AppSettings.NormalizeUploaderName(settings.UploaderName);
         _compressionTarget.Items.AddRange(["5 MB", "10 MB", "25 MB", "50 MB", "75 MB", "95 MB", "100 MB"]);
         _compressionTarget.Text = $"{Math.Clamp(settings.CompressionTargetMb, 1, 100)} MB";
+        _modeToggleHotkeyText.ReadOnly = true;
+        _modeToggleHotkeyText.ShortcutsEnabled = false;
+        _modeToggleHotkeyText.Text = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
+        _modeToggleHotkeyText.KeyDown += CaptureModeToggleHotkey;
+        _modeToggleHotkeyText.Enter += (_, _) => _modeToggleHotkeyText.SelectAll();
+        _modeToggleHotkeyText.Leave += (_, _) => UpdateModeToggleHotkeyEditor();
+        _modeToggleHotkeyAction.Click += (_, _) => ToggleModeHotkeyEnabled();
+        UpdateModeToggleHotkeyEditor();
         _startWithWindows.Checked = settings.StartWithWindows;
         _uploadToDiscord.Checked = settings.UploadToDiscord;
         _uploadModeHelper.Name = "UploadModeHelperLabel";
@@ -679,8 +689,8 @@ internal sealed class SettingsForm : Form
         var layout = CreateCardContent(5);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -712,7 +722,7 @@ internal sealed class SettingsForm : Form
         compression.Controls.Add(compressionLabel);
         compression.Controls.Add(compressionHost);
         layout.Controls.Add(compression, 0, 1);
-        layout.SetColumnSpan(compression, 2);
+        layout.Controls.Add(BuildModeHotkeyEditor(), 1, 1);
         _uploadToDiscord.Margin = new Padding(0, 4, 0, 0);
         layout.Controls.Add(_uploadToDiscord, 0, 2);
         layout.SetColumnSpan(_uploadToDiscord, 2);
@@ -725,6 +735,39 @@ internal sealed class SettingsForm : Form
         _startWithWindows.Margin = new Padding(0, 2, 0, 0);
         layout.Controls.Add(_startWithWindows, 0, 4);
         return CreateCard(BrandGlyph.Sliders, "Upload preferences", layout, Padding.Empty);
+    }
+
+    private Control BuildModeHotkeyEditor()
+    {
+        var editor = new FlowLayoutPanel
+        {
+            Name = "ModeHotkeyEditor",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = Padding.Empty,
+            BackColor = ClipCordTheme.Card
+        };
+        editor.Controls.Add(new Label
+        {
+            Text = "Mode shortcut",
+            AutoSize = true,
+            ForeColor = ClipCordTheme.Text,
+            Font = ClipCordTheme.InterfaceFont(10f),
+            Margin = new Padding(0, 11, 14, 0)
+        });
+        var host = CreateFieldHost(_modeToggleHotkeyText);
+        host.Dock = DockStyle.None;
+        host.Width = 175;
+        host.MinimumSize = new Size(175, host.MinimumSize.Height);
+        host.MaximumSize = new Size(175, host.MaximumSize.Height);
+        host.Margin = new Padding(0, 2, 0, 0);
+        editor.Controls.Add(host);
+        _modeToggleHotkeyAction.Margin = new Padding(8, 2, 0, 0);
+        editor.Controls.Add(_modeToggleHotkeyAction);
+        return editor;
     }
 
     private static RoundedPanel CreateCard(BrandGlyph glyph, string accessibleName, Control content, Padding margin)
@@ -1136,6 +1179,46 @@ internal sealed class SettingsForm : Form
             MessageBoxIcon.Information);
     }
 
+    private void CaptureModeToggleHotkey(object? sender, KeyEventArgs eventArgs)
+    {
+        if (eventArgs.KeyCode == Keys.Tab) return;
+        eventArgs.Handled = true;
+        eventArgs.SuppressKeyPress = true;
+
+        if (eventArgs.Modifiers == Keys.None && eventArgs.KeyCode is Keys.Back or Keys.Delete)
+        {
+            _modeToggleHotkeyText.Text = string.Empty;
+            UpdateModeToggleHotkeyEditor();
+            return;
+        }
+
+        if (!GlobalHotkeyBinding.TryFromKeyData(eventArgs.KeyData, out var binding)) return;
+        _modeToggleHotkeyText.Text = binding.DisplayText;
+        UpdateModeToggleHotkeyEditor();
+    }
+
+    private void ToggleModeHotkeyEnabled()
+    {
+        _modeToggleHotkeyText.Text = string.IsNullOrWhiteSpace(_modeToggleHotkeyText.Text)
+            ? GlobalHotkeyBinding.DefaultDisplayText
+            : string.Empty;
+        UpdateModeToggleHotkeyEditor();
+    }
+
+    private void UpdateModeToggleHotkeyEditor()
+    {
+        var disabled = string.IsNullOrWhiteSpace(_modeToggleHotkeyText.Text);
+        _modeToggleHotkeyAction.Text = disabled ? "Use default" : "Disable";
+        var guidance = disabled
+            ? "The global mode shortcut is disabled. Use the default or focus this field and press a new shortcut."
+            : "Works while ClipCord is running. Focus this field and press a new shortcut; Backspace disables it.";
+        _modeToggleHotkeyText.AccessibleDescription = guidance;
+        _toolTip.SetToolTip(_modeToggleHotkeyText, guidance);
+        _toolTip.SetToolTip(_modeToggleHotkeyAction, disabled
+            ? $"Restore {GlobalHotkeyBinding.DefaultDisplayText}."
+            : "Disable the global mode shortcut.");
+    }
+
     private bool TryValidate([NotNullWhen(true)] out AppSettings? settings)
     {
         if (!TryParseCompressionTarget(_compressionTarget.Text, out var compressionTargetMb))
@@ -1150,13 +1233,30 @@ internal sealed class SettingsForm : Form
             return false;
         }
 
+        var modeToggleHotkey = _modeToggleHotkeyText.Text.Trim();
+        GlobalHotkeyBinding parsedHotkey = default;
+        if (!string.IsNullOrWhiteSpace(modeToggleHotkey) &&
+            !GlobalHotkeyBinding.TryParse(modeToggleHotkey, out parsedHotkey))
+        {
+            settings = null;
+            MessageBox.Show(
+                this,
+                "Choose a shortcut containing Ctrl or Alt plus a letter, number, or F-key.",
+                "Invalid mode shortcut",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return false;
+        }
+        if (!string.IsNullOrWhiteSpace(modeToggleHotkey)) modeToggleHotkey = parsedHotkey.DisplayText;
+
         settings = new AppSettings(
             _folderText.Text.Trim(),
             _webhookText.Text.Trim(),
             _startWithWindows.Checked,
             compressionTargetMb,
             AppSettings.NormalizeUploaderName(_uploaderNameText.Text),
-            _uploadToDiscord.Checked);
+            _uploadToDiscord.Checked,
+            modeToggleHotkey);
 
         if (_uploadToDiscord.Checked && string.IsNullOrWhiteSpace(_uploaderNameText.Text))
         {
@@ -1221,6 +1321,8 @@ internal sealed class SettingsForm : Form
         _browseButton.Enabled = !busy;
         _testButton.Enabled = !busy;
         _checkUpdatesButton.Enabled = !busy && _checkForUpdatesAsync is not null;
+        _modeToggleHotkeyText.Enabled = !busy;
+        _modeToggleHotkeyAction.Enabled = !busy;
         _uploadToDiscord.Enabled = !busy;
         _saveButton.Enabled = !busy;
         _cancelButton.Enabled = !busy;

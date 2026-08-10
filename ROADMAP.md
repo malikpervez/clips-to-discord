@@ -23,6 +23,8 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 - ClipCord v1.6.1 polished the Settings opening size and aligned the primary text fields.
 - [#18 Activity center](https://github.com/malikpervez/clips-to-discord/issues/18) — shipped in ClipCord v1.7.0 with bounded local history, live upload/compression status, and branded accessible scrolling.
 - ClipCord v1.8.0 adds permanent top navigation and an on-demand local Gallery for uploaded and local-only clips without background indexing or artwork-network dependencies.
+- ClipCord v1.8.1 fixes exact Explorer selection for clip paths containing spaces, commas, and Unicode characters.
+- ClipCord v1.9.0 adds a configurable global upload-mode shortcut, defaulting to **Ctrl + Alt + L**, with safe watcher handoff, conflict recovery, rebinding, disabling, and visible mode confirmation.
 
 ## Planned milestones
 

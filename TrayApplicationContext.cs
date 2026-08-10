@@ -2,6 +2,14 @@ using System.Diagnostics;
 
 namespace ClipsToDiscord;
 
+internal enum ModeHotkeyBlockReason
+{
+    None,
+    ShuttingDown,
+    DialogOpen,
+    ReconfigurationInProgress
+}
+
 internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly SynchronizationContext _uiContext;
@@ -14,6 +22,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly UpdateCoordinator _updateCoordinator;
     private readonly IUpdateDownloadService _updateDownloadService;
     private readonly ActivityHistoryStore _activityHistory;
+    private readonly GlobalHotkeyManager _globalHotkey;
     private AppSettings _settings;
     private DiscordAwareController? _controller;
     private bool _settingsOpen;
@@ -31,6 +40,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _applicationIcon = LoadApplicationIcon();
         _settings = SettingsStore.Load();
         _activityHistory = new ActivityHistoryStore();
+        _globalHotkey = new GlobalHotkeyManager();
+        _globalHotkey.Pressed += ModeToggleHotkeyPressed;
         var assemblyVersion = typeof(TrayApplicationContext).Assembly.GetName().Version ?? new Version(0, 0, 0);
         _updateCoordinator = new UpdateCoordinator(
             GitHubUpdateChecker.Create(),
@@ -76,6 +87,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         if (_settings.IsValid)
         {
+            if (!TryApplyModeToggleHotkey(_settings, out var hotkeyError))
+            {
+                Log.Error($"Could not register the global mode shortcut. Windows error {hotkeyError}.");
+                _uiContext.Post(_ => ShowHotkeyNotification(
+                    "Shortcut unavailable",
+                    $"{AppSettings.NormalizeModeToggleHotkey(_settings.ModeToggleHotkey)} is already in use. Choose another shortcut in Settings.",
+                    ToolTipIcon.Warning), null);
+            }
             StartController(_settings);
         }
         else
@@ -192,12 +211,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
             {
                 _uploadToDiscordItem.Checked = _settings.UploadToDiscord;
                 _uploadToDiscordItem.Enabled = _settings.IsValid;
+                UpdateModeToggleHotkeyDisplay(_settings);
             }
         }
     }
 
     private async Task ApplySettingsAsync(AppSettings settings)
     {
+        if (!TryApplyModeToggleHotkey(settings, out var hotkeyError))
+        {
+            Log.Error($"Could not register the requested global mode shortcut. Windows error {hotkeyError}.");
+            throw new InvalidOperationException(
+                $"Windows could not register {AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey)}. " +
+                "It may already be used by another application. Choose a different shortcut.");
+        }
+
         var previousController = _controller;
         _controller = null;
         if (previousController is not null)
@@ -235,11 +263,64 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private async void ToggleUploadModeFromTray()
     {
+        await ChangeUploadModeAsync(_uploadToDiscordItem.Checked, invokedByHotkey: false);
+    }
+
+    private async void ModeToggleHotkeyPressed(object? sender, EventArgs eventArgs)
+    {
+        switch (GetModeHotkeyBlockReason(
+                    _shutdownScheduled,
+                    _settingsOpen,
+                    _updateDialogOpen,
+                    _reconfigurationInProgress))
+        {
+            case ModeHotkeyBlockReason.ShuttingDown:
+                return;
+            case ModeHotkeyBlockReason.DialogOpen:
+                ShowHotkeyNotification(
+                    "Mode unchanged",
+                    "Close the open ClipCord dialog before using the mode shortcut.",
+                    ToolTipIcon.Info);
+                return;
+            case ModeHotkeyBlockReason.ReconfigurationInProgress:
+                ShowHotkeyNotification(
+                    "Mode change in progress",
+                    "ClipCord is still finishing the previous settings change.",
+                    ToolTipIcon.Info);
+                return;
+        }
+
+        await ChangeUploadModeAsync(!_settings.UploadToDiscord, invokedByHotkey: true);
+    }
+
+    internal static ModeHotkeyBlockReason GetModeHotkeyBlockReason(
+        bool shutdownScheduled,
+        bool settingsOpen,
+        bool updateDialogOpen,
+        bool reconfigurationInProgress)
+    {
+        if (shutdownScheduled) return ModeHotkeyBlockReason.ShuttingDown;
+        if (settingsOpen || updateDialogOpen) return ModeHotkeyBlockReason.DialogOpen;
+        return reconfigurationInProgress
+            ? ModeHotkeyBlockReason.ReconfigurationInProgress
+            : ModeHotkeyBlockReason.None;
+    }
+
+    private async Task ChangeUploadModeAsync(bool uploadToDiscord, bool invokedByHotkey)
+    {
         var previousSettings = _settings;
-        var updated = previousSettings with { UploadToDiscord = _uploadToDiscordItem.Checked };
+        var updated = previousSettings with { UploadToDiscord = uploadToDiscord };
         if (!updated.IsValid)
         {
             _uploadToDiscordItem.Checked = previousSettings.UploadToDiscord;
+            if (invokedByHotkey)
+            {
+                ShowHotkeyNotification(
+                    "Discord setup required",
+                    "Add a valid Discord webhook in Settings before enabling uploads.",
+                    ToolTipIcon.Warning);
+                return;
+            }
             MessageBox.Show(
                 "Open Settings and enter a valid Discord webhook before enabling uploads.",
                 "Discord setup required",
@@ -253,8 +334,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             await PersistAndApplySettingsAsync(updated);
             if (_shutdownScheduled) return;
-            _trayIcon.ShowBalloonTip(
-                2500,
+            ShowHotkeyNotification(
                 "ClipCord",
                 updated.UploadToDiscord
                     ? "Discord uploads enabled. New clips will be sent automatically."
@@ -265,12 +345,51 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _uploadToDiscordItem.Checked = _settings.UploadToDiscord;
             Log.Error("Could not change the clip upload mode.", exception);
+            if (invokedByHotkey)
+            {
+                ShowHotkeyNotification(
+                    "Could not change upload mode",
+                    "ClipCord could not save the upload-mode setting.",
+                    ToolTipIcon.Error);
+                return;
+            }
             MessageBox.Show(
                 "ClipCord could not save the upload-mode setting.",
                 "Could not change upload mode",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
+    }
+
+    private bool TryApplyModeToggleHotkey(AppSettings settings, out int errorCode)
+    {
+        var normalized = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
+        GlobalHotkeyBinding? binding = null;
+        if (!string.IsNullOrWhiteSpace(normalized))
+        {
+            if (!GlobalHotkeyBinding.TryParse(normalized, out var parsed))
+            {
+                errorCode = 0;
+                return false;
+            }
+            binding = parsed;
+        }
+
+        var applied = _globalHotkey.TrySetBinding(binding, out errorCode);
+        if (applied) UpdateModeToggleHotkeyDisplay(settings);
+        return applied;
+    }
+
+    private void UpdateModeToggleHotkeyDisplay(AppSettings settings)
+    {
+        _uploadToDiscordItem.ShortcutKeyDisplayString =
+            AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
+    }
+
+    private void ShowHotkeyNotification(string title, string message, ToolTipIcon icon)
+    {
+        if (_shutdownScheduled || !_trayIcon.Visible) return;
+        _trayIcon.ShowBalloonTip(2500, title, message, icon);
     }
 
     private void StartUpdateChecks()
@@ -483,6 +602,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _updateTimer.Stop();
         _updateTimer.Dispose();
         _lifetimeCancellation.Cancel();
+        _globalHotkey.Pressed -= ModeToggleHotkeyPressed;
+        _globalHotkey.Dispose();
         _controller?.Dispose();
         _updateCoordinator.Dispose();
         _updateDownloadService.Dispose();

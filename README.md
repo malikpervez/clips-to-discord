@@ -16,6 +16,7 @@ A Windows tray app that can upload new MP4 clips from any chosen folder to Disco
 - Starts the folder watcher when Discord opens and stops it when Discord closes.
 - Uploads only new `.mp4` files from the top level of the selected folder.
 - Offers a persistent local-only mode that skips Discord and moves new clips into `local-only\<game name>`.
+- Provides a configurable global shortcut, defaulting to **Ctrl + Alt + L**, for switching future clips between Discord uploads and local-only routing while ClipCord is running.
 - Confirms file length and timestamp stability across multiple observations before queueing a clip.
 - Uses SHA-256 content identity so folder renames and timestamp rewrites do not cause duplicate uploads.
 - Keeps scanning with two upload workers, a short connection timeout, and a bounded per-upload deadline.
@@ -44,7 +45,7 @@ ClipCord is not affiliated with Discord or any recording-software vendor.
 
 Each release includes `SHA256SUMS.txt` so the installer or portable ZIP can be verified with `Get-FileHash` before it is opened.
 
-The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord desktop is running, then organized beneath `uploaded` by game name. Turn off **Upload new clips to Discord** in Settings or the tray menu to keep future clips on this PC beneath `local-only` instead.
+The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord desktop is running, then organized beneath `uploaded` by game name. Turn off **Upload new clips to Discord** in Settings or the tray menu—or press the configured global shortcut, **Ctrl + Alt + L** by default—to keep future clips on this PC beneath `local-only` instead.
 
 The installer and executable are not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign both with a trusted code-signing certificate.
 

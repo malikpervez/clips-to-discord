@@ -14,6 +14,7 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
 - The uploader name shown with clips in Discord
 - The start-with-Windows preference
 - Whether new clips should upload to Discord or remain local-only
+- The optional global shortcut used to switch between upload and local-only routing
 - The Discord webhook URL encrypted with Windows DPAPI for the current user
 - Path/length/timestamp keys used only to preserve the initial do-not-upload baseline
 - SHA-256 hashes of clip contents used for stable duplicate detection
@@ -32,6 +33,8 @@ Normal upload operation connects only to the validated Discord webhook URL suppl
 The app also makes an anonymous HTTPS request to the fixed official `malikpervez/clips-to-discord` GitHub Releases API no more than once every 24 hours, or when the user explicitly selects **Check for updates**. If GitHub's installer metadata lacks its own digest, the app may fetch the release's small checksum file through the validated GitHub URL and at most one allow-listed GitHub asset-CDN redirect. These requests do not contain the webhook, uploader name, clip names or paths, settings, or a project account identifier. **View changes** opens the official release page. If the user explicitly chooses **Install update**, ClipCord downloads the verified installer directly from GitHub's allow-listed release-asset host, stages it locally, and starts it only after length and SHA-256 verification.
 
 SHA-256 hashing and FFmpeg compression are performed locally. Clip content and hashes are not sent to a project-operated server. Operational log messages pass through a webhook-URL redactor before being written.
+
+The global mode shortcut is registered locally with Windows only while ClipCord is running. Pressing it uses the same persisted settings and watcher-reconfiguration path as the notification-area toggle; it does not create a network request by itself.
 
 The Activity Center reads only the local bounded activity history. It never stores or displays the Discord webhook, and its text fields pass through the same webhook redactor before atomic persistence. Closing the Activity window does not affect clip watching or uploads.
 

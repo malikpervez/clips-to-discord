@@ -51,8 +51,9 @@ Treat the webhook URL like a password. Anyone who has it can post through that w
 1. Leave **Start with Windows** selected if the app should be available after each sign-in.
 2. Set the compression target. New settings default to 95 MB to leave headroom beneath a 100 MB upload limit. If the destination only accepts the standard 10 MiB limit, set this to 9 MB to avoid unnecessary larger compression attempts. Updating the app preserves an existing saved value.
 3. Leave **Upload new clips to Discord** on for automatic posting, or turn it off to move new clips into `local-only\<game name>` without a Discord request.
-4. Select **Save**.
-5. The app moves to the Windows notification area.
+4. Keep the default **Ctrl + Alt + L** mode shortcut, focus its field and press another supported combination, or disable it. A shortcut must contain Ctrl or Alt, may also contain Shift, and must end with a letter, number, or F-key.
+5. Select **Save**.
+6. The app moves to the Windows notification area.
 
 The first scan records existing clips as a baseline and does not upload them. After setup:
 
@@ -65,7 +66,7 @@ The first scan records existing clips as a baseline and does not upload them. Af
 - Discord closes → the clip watcher stops.
 - Discord reopens → watching resumes automatically.
 
-Right-click the notification-area icon to view status, toggle Discord uploads, reopen settings, open the clips folder, or exit. Clips already moved into `local-only` are not uploaded when the toggle is turned back on.
+Right-click the notification-area icon to view status, toggle Discord uploads, reopen settings, open the clips folder, or exit. The configured global shortcut performs the same durable mode change and shows a Windows notification confirming the new route. It works only while ClipCord is running and is ignored while a ClipCord dialog or another settings change is active. Clips already moved into `local-only` are not uploaded when the toggle is turned back on.
 
 Discord documents a default 10 MiB per-file limit, with potentially higher limits depending on the user or server. See Discord's official [Uploading Files reference](https://docs.discord.com/developers/reference#uploading-files). If Discord still rejects a compressed result, the app automatically tries progressively smaller targets.
 
