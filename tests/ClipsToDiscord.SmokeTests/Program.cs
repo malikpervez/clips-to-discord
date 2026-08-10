@@ -2103,6 +2103,7 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         using var form = new SettingsForm(
             settings,
             checkForUpdatesAsync: _ => Task.CompletedTask);
+        var designedOpeningSize = form.Size;
         form.Show();
         form.Hide();
         form.Scale(new SizeF(scale, scale));
@@ -2120,7 +2121,13 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         form.PerformLayout();
         Application.DoEvents();
         AssertControlsFit(form);
-        if (scale <= 1.5f) AssertSettingsCardsOpenWithoutScrolling(form);
+        if (scale <= 1.5f)
+        {
+            var scaledDesignedOpeningSize = new Size(
+                (int)Math.Round(designedOpeningSize.Width * scale),
+                (int)Math.Round(designedOpeningSize.Height * scale));
+            AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, scaledDesignedOpeningSize);
+        }
         AssertCriticalTextFits(form);
 
         var hotkeyField = EnumerateControls(form)
