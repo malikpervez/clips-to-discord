@@ -2107,12 +2107,6 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         var scaledDesignedOpeningSize = new Size(
             (int)Math.Round(designedOpeningSize.Width * scale),
             (int)Math.Round(designedOpeningSize.Height * scale));
-        using var host = new Panel { Size = scaledDesignedOpeningSize };
-        form.TopLevel = false;
-        form.Dock = DockStyle.Fill;
-        host.Controls.Add(form);
-        form.Bounds = host.ClientRectangle;
-        host.CreateControl();
         form.CreateControl();
         form.Scale(new SizeF(scale, scale));
         foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
@@ -2128,8 +2122,11 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         }
         // Keep this synthetic DPI test independent of the CI runner's desktop size.
         // OnShown separately verifies that real constrained screens are fitted and scroll safely.
-        form.Bounds = host.ClientRectangle;
-        host.PerformLayout();
+        form.AutoScroll = true;
+        var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = scaledDesignedOpeningSize;
+        rootLayout.PerformLayout();
         form.PerformLayout();
         Application.DoEvents();
         AssertControlsFit(form);
