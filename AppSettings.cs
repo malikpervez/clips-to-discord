@@ -11,7 +11,8 @@ internal sealed record AppSettings(
     bool StartWithWindows,
     int CompressionTargetMb,
     string UploaderName,
-    bool UploadToDiscord)
+    bool UploadToDiscord,
+    string ModeToggleHotkey = GlobalHotkeyBinding.DefaultDisplayText)
 {
     public const int DefaultCompressionTargetMb = 95;
     public const int MaximumUploaderNameLength = 80;
@@ -22,7 +23,8 @@ internal sealed record AppSettings(
         true,
         DefaultCompressionTargetMb,
         DefaultUploaderName,
-        true);
+        true,
+        GlobalHotkeyBinding.DefaultDisplayText);
 
     public bool IsValid =>
         Directory.Exists(ClipsFolder) &&
@@ -45,6 +47,15 @@ internal sealed record AppSettings(
         var safeLength = MaximumUploaderNameLength;
         if (char.IsHighSurrogate(normalized[safeLength - 1])) safeLength--;
         return normalized[..safeLength];
+    }
+
+    public static string NormalizeModeToggleHotkey(string? value)
+    {
+        if (value is null) return GlobalHotkeyBinding.DefaultDisplayText;
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        return GlobalHotkeyBinding.TryParse(value, out var binding)
+            ? binding.DisplayText
+            : GlobalHotkeyBinding.DefaultDisplayText;
     }
 }
 
@@ -89,7 +100,8 @@ internal static class SettingsStore
                 stored.StartWithWindows,
                 NormalizeCompressionTarget(stored.CompressionTargetMb),
                 AppSettings.NormalizeUploaderName(stored.UploaderName),
-                stored.UploadToDiscord);
+                stored.UploadToDiscord,
+                AppSettings.NormalizeModeToggleHotkey(stored.ModeToggleHotkey));
         }
         catch (Exception exception)
         {
@@ -169,7 +181,8 @@ internal static class SettingsStore
             StartWithWindows = settings.StartWithWindows,
             CompressionTargetMb = settings.CompressionTargetMb,
             UploaderName = AppSettings.NormalizeUploaderName(settings.UploaderName),
-            UploadToDiscord = settings.UploadToDiscord
+            UploadToDiscord = settings.UploadToDiscord,
+            ModeToggleHotkey = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey)
         };
 
         var temporaryPath = SettingsPath + ".tmp";
@@ -185,6 +198,7 @@ internal static class SettingsStore
         public int CompressionTargetMb { get; set; } = AppSettings.DefaultCompressionTargetMb;
         public string? UploaderName { get; set; } = AppSettings.DefaultUploaderName;
         public bool UploadToDiscord { get; set; } = true;
+        public string? ModeToggleHotkey { get; set; } = GlobalHotkeyBinding.DefaultDisplayText;
     }
 
     private static int NormalizeCompressionTarget(int value) =>

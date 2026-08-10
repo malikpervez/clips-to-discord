@@ -321,7 +321,41 @@ try
     Assert(
         !(localOnlySettings with { UploadToDiscord = true }).IsValid,
         "Enabling Discord uploads must still require a valid webhook.");
+    Assert((localOnlySettings with { ModeToggleHotkey = "malformed cosmetic value" }).IsValid,
+        "A malformed cosmetic shortcut value must never stop otherwise-valid clip watching.");
     Assert(AppSettings.Empty.UploadToDiscord, "New installations must default to Discord uploads enabled.");
+    Assert(AppSettings.Empty.ModeToggleHotkey == GlobalHotkeyBinding.DefaultDisplayText,
+        "New installations must default the global mode shortcut to Ctrl + Alt + L.");
+    Assert(AppSettings.NormalizeModeToggleHotkey(null) == GlobalHotkeyBinding.DefaultDisplayText &&
+           AppSettings.NormalizeModeToggleHotkey(string.Empty) == string.Empty &&
+           AppSettings.NormalizeModeToggleHotkey("control+alt+l") == GlobalHotkeyBinding.DefaultDisplayText,
+        "Hotkey migration must default missing values, preserve an intentional disable, and normalize valid values.");
+    Assert(GlobalHotkeyBinding.TryParse("Ctrl + Alt + L", out var defaultHotkey) &&
+           defaultHotkey == GlobalHotkeyBinding.Default &&
+           defaultHotkey.DisplayText == GlobalHotkeyBinding.DefaultDisplayText,
+        "The default global mode shortcut must parse and format deterministically.");
+    Assert(GlobalHotkeyBinding.TryParse("Alt+Shift+9", out var numericHotkey) &&
+           numericHotkey.DisplayText == "Alt + Shift + 9" &&
+           GlobalHotkeyBinding.TryParse("Ctrl + F24", out var functionHotkey) &&
+           functionHotkey.DisplayText == "Ctrl + F24" &&
+           GlobalHotkeyBinding.TryFromKeyData(Keys.Control | Keys.Alt | Keys.U, out var capturedHotkey) &&
+           capturedHotkey.DisplayText == "Ctrl + Alt + U",
+        "Supported letter, number, function-key, and captured shortcuts must normalize consistently.");
+    foreach (var invalidHotkey in new[]
+             {
+                 "", "L", "Shift + L", "Alt + F4", "Ctrl + Alt", "Ctrl + Ctrl + L", "Ctrl ++ L",
+                 "Win + L", "Ctrl + Delete", "Ctrl + Alt + Space"
+             })
+    {
+        Assert(!GlobalHotkeyBinding.TryParse(invalidHotkey, out _),
+            $"Unsafe or ambiguous global shortcut '{invalidHotkey}' must be rejected.");
+    }
+    AssertGlobalHotkeyLifecycle();
+    AssertRealGlobalHotkeyRegistration();
+    Assert(GlobalHotkeyManager.GetNativeModifiers(GlobalHotkeyBinding.Default) ==
+           ((uint)GlobalHotkeyBinding.Default.Modifiers | GlobalHotkeyManager.ModNoRepeat),
+        "Every native registration must include MOD_NOREPEAT with the configured modifiers.");
+    AssertModeHotkeyGuardPolicy();
 
     Assert(
         AppSettings.NormalizeUploaderName("  Malik   Pervez  ") == "Malik Pervez",
@@ -1352,6 +1386,14 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .Single(checkBox => checkBox.Text == "Start with Windows");
             Assert(startupCheckbox.Width > 0 && startupCheckbox.Height > 0,
                 "The Start with Windows checkbox must occupy visible layout space.");
+            var modeHotkey = EnumerateControls(form)
+                .OfType<TextBox>()
+                .Single(textBox => textBox.AccessibleName == "Global upload-mode shortcut");
+            Assert(modeHotkey.ReadOnly && modeHotkey.Text == GlobalHotkeyBinding.DefaultDisplayText &&
+                   modeHotkey.Width > 0 && modeHotkey.Height > 0,
+                "The global mode shortcut must show its saved binding in a visible capture field.");
+            Assert(EnumerateControls(form).OfType<Button>().Any(button => button.Text == "Disable"),
+                "The global shortcut must offer a discoverable disable action.");
             var uploadToggle = EnumerateControls(form)
                 .OfType<CheckBox>()
                 .Single(checkBox => checkBox.Name == "UploadToDiscordToggle");
@@ -1520,6 +1562,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.Dispose();
             Assert(galleryGridForDisposal.IsDisposed && galleryListForDisposal.IsDisposed,
                 "Both Gallery content panels must be disposed, including the one detached from the scroll host.");
+            TraceSmokeStep("Settings layout: Settings 150% scaling");
+            AssertSettingsScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Settings 200% scaling");
+            AssertSettingsScaledLayout(settings, 2f);
             TraceSmokeStep("Settings layout: Gallery 150% scaling");
             AssertGalleryScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Gallery 200% scaling");
@@ -1770,6 +1816,8 @@ static void AssertSettingsRoundTrip(AppSettings original)
     ((TextBox)controls.Single(control => control.AccessibleName == "Discord webhook URL")).Text = changedWebhook;
     ((TextBox)controls.Single(control => control.AccessibleName == "Uploader name")).Text = "Round Trip User";
     ((ComboBox)controls.Single(control => control.AccessibleName == "Compression target in megabytes")).Text = "37 MB";
+    ((TextBox)controls.Single(control => control.AccessibleName == "Global upload-mode shortcut")).Text =
+        "Ctrl + Shift + U";
     var startup = controls.OfType<CheckBox>().Single(control => control.Text == "Start with Windows");
     startup.Checked = !original.StartWithWindows;
     var uploadToDiscord = controls.OfType<CheckBox>()
@@ -1783,7 +1831,8 @@ static void AssertSettingsRoundTrip(AppSettings original)
            form.SavedSettings.UploaderName == "Round Trip User" &&
            form.SavedSettings.StartWithWindows == !original.StartWithWindows &&
            form.SavedSettings.CompressionTargetMb == 37 &&
-           form.SavedSettings.UploadToDiscord == !original.UploadToDiscord,
+           form.SavedSettings.UploadToDiscord == !original.UploadToDiscord &&
+           form.SavedSettings.ModeToggleHotkey == "Ctrl + Shift + U",
         "Every settings value must survive the branded form save round trip.");
 }
 
@@ -1798,6 +1847,7 @@ static void AssertCriticalTextFits(Form form)
         "Webhook URL",
         "Upload preferences",
         "Compression target",
+        "Mode shortcut",
         "Upload new clips to Discord",
         "Local only",
         "Start with Windows",
@@ -1965,6 +2015,164 @@ static void AssertOfficialLogoArtworkPainted(ClipCordLogoControl logo)
 static bool IsAutoScrollViewport(Control control) =>
     control is ScrollableControl scrollable && scrollable.AutoScroll;
 
+static void AssertGlobalHotkeyLifecycle()
+{
+    var registrar = new FakeGlobalHotkeyRegistrar();
+    var manager = new GlobalHotkeyManager(registrar);
+    try
+    {
+        Assert(manager.TrySetBinding(GlobalHotkeyBinding.Default, out var initialError) &&
+               initialError == 0 &&
+               manager.RegisteredBinding == GlobalHotkeyBinding.Default &&
+               registrar.RegisterCalls.Count == 1,
+            "The global shortcut manager must register the initial binding exactly once.");
+
+        Assert(manager.TrySetBinding(GlobalHotkeyBinding.Default, out _) &&
+               registrar.RegisterCalls.Count == 1,
+            "Reapplying the active global shortcut must not churn its Windows registration.");
+
+        var presses = 0;
+        manager.Pressed += (_, _) => presses++;
+        Assert(!manager.HandleHotkeyMessage(GlobalHotkeyManager.HotkeyIdentifier + 1) && presses == 0 &&
+               manager.HandleHotkeyMessage(GlobalHotkeyManager.HotkeyIdentifier) && presses == 1,
+            "Only the registered ClipCord hotkey identifier may dispatch a mode toggle.");
+
+        Assert(GlobalHotkeyBinding.TryParse("Ctrl + Shift + U", out var replacement),
+            "The lifecycle test replacement shortcut must be valid.");
+        registrar.RegisterResults.Enqueue(false);
+        registrar.RegisterResults.Enqueue(true);
+        Assert(!manager.TrySetBinding(replacement, out var conflictError) &&
+               conflictError == FakeGlobalHotkeyRegistrar.ConflictError &&
+               manager.RegisteredBinding == GlobalHotkeyBinding.Default &&
+               registrar.UnregisterCount == 1,
+            "A conflicting replacement must atomically restore the previous working shortcut.");
+
+        registrar.UnregisterResults.Enqueue(false);
+        Assert(!manager.TrySetBinding(replacement, out var unregisterError) &&
+               unregisterError == FakeGlobalHotkeyRegistrar.ConflictError &&
+               manager.RegisteredBinding == GlobalHotkeyBinding.Default,
+            "An unregister failure must preserve the manager's previous binding instead of reporting it inactive.");
+
+        Assert(manager.TrySetBinding(null, out _) &&
+               manager.RegisteredBinding is null &&
+               registrar.UnregisterCount == 3 &&
+               !manager.HandleHotkeyMessage(GlobalHotkeyManager.HotkeyIdentifier),
+            "Disabling the shortcut must unregister it and reject stale hotkey messages.");
+    }
+    finally
+    {
+        manager.Dispose();
+        manager.Dispose();
+    }
+
+    var disposeRegistrar = new FakeGlobalHotkeyRegistrar();
+    var disposableManager = new GlobalHotkeyManager(disposeRegistrar);
+    Assert(disposableManager.TrySetBinding(GlobalHotkeyBinding.Default, out _),
+        "The explicit-disposal probe must begin with an active registration.");
+    disposableManager.Dispose();
+    Assert(disposeRegistrar.UnregisterCount == 1,
+        "Disposing an active manager must explicitly unregister its shortcut before destroying the handle.");
+    disposableManager.Dispose();
+    Assert(disposeRegistrar.UnregisterCount == 1,
+        "Repeated disposal must not attempt to unregister the shortcut again.");
+}
+
+static void AssertModeHotkeyGuardPolicy()
+{
+    Assert(TrayApplicationContext.GetModeHotkeyBlockReason(false, false, false, false) ==
+           ModeHotkeyBlockReason.None,
+        "An idle ClipCord instance must allow the global mode shortcut.");
+    Assert(TrayApplicationContext.GetModeHotkeyBlockReason(false, true, false, false) ==
+           ModeHotkeyBlockReason.DialogOpen &&
+           TrayApplicationContext.GetModeHotkeyBlockReason(false, false, true, false) ==
+           ModeHotkeyBlockReason.DialogOpen,
+        "Settings and update dialogs must both block global mode changes.");
+    Assert(TrayApplicationContext.GetModeHotkeyBlockReason(false, false, false, true) ==
+           ModeHotkeyBlockReason.ReconfigurationInProgress,
+        "An active watcher reconfiguration must block another global mode change.");
+    Assert(TrayApplicationContext.GetModeHotkeyBlockReason(true, true, true, true) ==
+           ModeHotkeyBlockReason.ShuttingDown,
+        "Shutdown must dominate every other global-shortcut guard state.");
+}
+
+static void AssertSettingsScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask);
+        var designedOpeningSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, 96);
+        var scaledDesignedOpeningSize = new Size(
+            (int)Math.Round(designedOpeningSize.Width * scale),
+            (int)Math.Round(designedOpeningSize.Height * scale));
+        form.CreateControl();
+        form.Scale(new SizeF(scale, scale));
+        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * scale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+        // Keep this synthetic DPI test independent of the CI runner's desktop size.
+        // OnShown separately verifies that real constrained screens are fitted and scroll safely.
+        form.AutoScroll = true;
+        var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = scaledDesignedOpeningSize;
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        Application.DoEvents();
+        AssertControlsFit(form);
+        if (scale <= 1.5f) AssertSettingsCardsOpenWithoutScrolling(form);
+        AssertCriticalTextFits(form);
+
+        var hotkeyField = EnumerateControls(form)
+            .OfType<TextBox>()
+            .Single(control => control.AccessibleName == "Global upload-mode shortcut");
+        var disable = EnumerateControls(form).OfType<Button>().Single(control => control.Text == "Disable");
+        var fieldBounds = new Rectangle(hotkeyField.PointToScreen(Point.Empty), hotkeyField.Size);
+        var actionBounds = new Rectangle(disable.PointToScreen(Point.Empty), disable.Size);
+        var minimumUsableFieldWidth = (int)Math.Round(140 * scale);
+        Assert(hotkeyField.Width >= minimumUsableFieldWidth &&
+               disable.Width > 0 &&
+               fieldBounds.Right <= actionBounds.Left,
+            $"The shortcut editor overlaps at {scale:F1}x: field={fieldBounds}, action={actionBounds}.");
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+    }
+}
+
+static void AssertRealGlobalHotkeyRegistration()
+{
+    Assert(GlobalHotkeyBinding.TryParse("Ctrl + Alt + Shift + F24", out var probeBinding),
+        "The native registration probe must use a valid shortcut.");
+    var first = new GlobalHotkeyManager();
+    using var second = new GlobalHotkeyManager();
+    try
+    {
+        Assert(first.TrySetBinding(probeBinding, out var firstError),
+            $"Windows rejected the isolated global-shortcut probe with error {firstError}.");
+        Assert(!second.TrySetBinding(probeBinding, out var conflictError) && conflictError != 0,
+            "Windows must prevent two live ClipCord windows from owning the same global shortcut.");
+        first.Dispose();
+        Assert(second.TrySetBinding(probeBinding, out var replacementError),
+            $"Disposal must release the Windows shortcut registration; retry error {replacementError}.");
+    }
+    finally
+    {
+        first.Dispose();
+    }
+}
+
 static bool HasAutoScrollAncestor(Control control)
 {
     for (var parent = control.Parent; parent is not null; parent = parent.Parent)
@@ -2127,4 +2335,27 @@ internal sealed class FailingUpdateDownloadService : IUpdateDownloadService
     public void Dispose()
     {
     }
+}
+
+internal sealed class FakeGlobalHotkeyRegistrar : IGlobalHotkeyRegistrar
+{
+    public const int ConflictError = 1409;
+    public Queue<bool> RegisterResults { get; } = new();
+    public Queue<bool> UnregisterResults { get; } = new();
+    public List<GlobalHotkeyBinding> RegisterCalls { get; } = [];
+    public int UnregisterCount { get; private set; }
+
+    public bool Register(IntPtr windowHandle, int identifier, GlobalHotkeyBinding binding)
+    {
+        RegisterCalls.Add(binding);
+        return RegisterResults.Count == 0 || RegisterResults.Dequeue();
+    }
+
+    public bool Unregister(IntPtr windowHandle, int identifier)
+    {
+        UnregisterCount++;
+        return UnregisterResults.Count == 0 || UnregisterResults.Dequeue();
+    }
+
+    public int GetLastError() => ConflictError;
 }

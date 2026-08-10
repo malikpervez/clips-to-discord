@@ -22,6 +22,8 @@ Discord must be absent for three consecutive two-second polls before the worker 
 
 Settings changes and tray upload-mode changes use a stricter handoff than application exit: the app disables another reconfiguration, cancels the current controller, awaits its complete watcher cleanup without the exit timeout, and only then constructs the replacement. This prevents independent workers from saving stale copies of the same watch state. If applying the new configuration fails, ClipCord attempts to restore both the previous persisted settings and controller before reporting the error.
 
+The global mode shortcut enters the same serialized handoff instead of mutating watcher state directly. Windows registration is replaced atomically: if a requested combination is already owned, ClipCord attempts to restore the previous working shortcut before rejecting the settings change. Key-repeat messages, stale messages after disable, presses during an open ClipCord dialog, and presses during another reconfiguration do not start a second transition.
+
 The scanner and both clip consumers share mutable watch state. Every runtime collection read, mutation, enumeration, and save is serialized through the same semaphore. Baseline construction happens before the consumers start.
 
 ## Successful-upload ordering

@@ -29,6 +29,7 @@ flowchart LR
 ## Components
 
 - `TrayApplicationContext` owns the notification-area UI, settings dialog, startup registration, and controller lifecycle.
+- `GlobalHotkeyManager` owns one message-only Windows handle, atomically replaces the configured mode shortcut, suppresses key-repeat dispatch, and unregisters it on disable or application exit.
 - `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes, debounces brief absences, and exposes an awaitable stop that Settings and tray reconfiguration must complete before starting a replacement worker.
 - `FileReadinessTracker` requires stable metadata across multiple observations and exponentially backs off unreadable files.
 - `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two clip consumers that either upload or archive locally according to the persisted setting.
@@ -64,6 +65,7 @@ flowchart LR
 - A named mutex prevents multiple tray-app instances.
 - Three consecutive two-second Discord-absence polls are required before watcher cancellation; a brief updater relaunch therefore does not churn the worker.
 - Settings and tray mode changes disable concurrent reconfiguration and await complete shutdown of the old controller before creating the new one, so two workers cannot save independent stale state snapshots.
+- Global-shortcut mode changes use that same serialized persist-and-reconfigure path; registration conflicts restore the previous binding, and presses are ignored while a ClipCord dialog or reconfiguration is active.
 - Controller disposal waits at most ten seconds on the UI thread, while any slower worker cleanup remains observed in the background.
 - Every runtime access to mutable watch-state collections is serialized through one gate shared by the scanner and both upload workers.
 - Activity subscribers receive immutable snapshots through their synchronization context; closing the Activity window detaches the subscription without stopping or reconfiguring the worker.
