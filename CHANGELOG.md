@@ -4,6 +4,10 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.9.1 — 2026-08-13
+
+- Show a branded, non-activating on-screen confirmation when the global mode shortcut changes ClipCord between Discord uploads and Local only, so feedback remains visible when Windows suppresses tray balloons during games.
+
 ## 1.9.0 — 2026-08-10
 
 - Add a configurable global upload-mode shortcut, defaulting to **Ctrl + Alt + L**, that safely switches future clips between Discord uploads and local-only routing and confirms the new mode through Windows notifications.

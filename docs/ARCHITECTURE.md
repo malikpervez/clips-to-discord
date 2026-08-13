@@ -30,6 +30,7 @@ flowchart LR
 
 - `TrayApplicationContext` owns the notification-area UI, settings dialog, startup registration, and controller lifecycle.
 - `GlobalHotkeyManager` owns one message-only Windows handle, atomically replaces the configured mode shortcut, suppresses key-repeat dispatch, and unregisters it on disable or application exit.
+- `ModeFeedbackOverlay` owns one reusable, non-activating topmost window that confirms shortcut outcomes on the monitor containing the active application without hooking or injecting into it.
 - `DiscordAwareController` starts and cancels the uploader worker based on Discord desktop processes, debounces brief absences, and exposes an awaitable stop that Settings and tray reconfiguration must complete before starting a replacement worker.
 - `FileReadinessTracker` requires stable metadata across multiple observations and exponentially backs off unreadable files.
 - `UploaderWorker` discovers clips, computes content identity, feeds a bounded queue, and runs two clip consumers that either upload or archive locally according to the persisted setting.

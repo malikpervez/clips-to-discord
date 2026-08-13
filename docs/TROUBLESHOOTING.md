@@ -48,6 +48,8 @@ The global shortcut works only while ClipCord is running in the Windows notifica
 
 If Windows or another application already owns the selected combination, ClipCord keeps the previous working shortcut and asks you to choose another one. The shortcut is intentionally ignored while Settings, an update dialog, or another mode change is active. Enabling Discord uploads also requires a valid saved webhook; if none is available, the mode stays local-only and ClipCord shows a notification.
 
+When a shortcut change succeeds, ClipCord shows a brief top-center indicator on the monitor containing the active game. It is click-through and does not take keyboard focus. Borderless and Windows fullscreen-optimized games can display it above gameplay; a game using true exclusive fullscreen can remain above all ordinary desktop windows, so switch that game to borderless fullscreen if the indicator is still hidden.
+
 ## Multiple people share one webhook
 
 Open **Settings** on each computer and give every installation a different **Uploader name**, normally that person's Discord display name. Each upload is posted as visible text and attachment description, for example `Malik uploaded a clip from Battlefield™-6.` Existing installations upgrading from an earlier release initially use the Windows account name and can change it at any time.

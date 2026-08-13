@@ -66,7 +66,7 @@ The first scan records existing clips as a baseline and does not upload them. Af
 - Discord closes → the clip watcher stops.
 - Discord reopens → watching resumes automatically.
 
-Right-click the notification-area icon to view status, toggle Discord uploads, reopen settings, open the clips folder, or exit. The configured global shortcut performs the same durable mode change and shows a Windows notification confirming the new route. It works only while ClipCord is running and is ignored while a ClipCord dialog or another settings change is active. Clips already moved into `local-only` are not uploaded when the toggle is turned back on.
+Right-click the notification-area icon to view status, toggle Discord uploads, reopen settings, open the clips folder, or exit. The configured global shortcut performs the same durable mode change and briefly shows a branded, non-activating indicator on the monitor containing the active game. It works only while ClipCord is running and is ignored while a ClipCord dialog or another settings change is active. Clips already moved into `local-only` are not uploaded when the toggle is turned back on.
 
 Discord documents a default 10 MiB per-file limit, with potentially higher limits depending on the user or server. See Discord's official [Uploading Files reference](https://docs.discord.com/developers/reference#uploading-files). If Discord still rejects a compressed result, the app automatically tries progressively smaller targets.
 

@@ -16,7 +16,7 @@ A Windows tray app that can upload new MP4 clips from any chosen folder to Disco
 - Starts the folder watcher when Discord opens and stops it when Discord closes.
 - Uploads only new `.mp4` files from the top level of the selected folder.
 - Offers a persistent local-only mode that skips Discord and moves new clips into `local-only\<game name>`.
-- Provides a configurable global shortcut, defaulting to **Ctrl + Alt + L**, for switching future clips between Discord uploads and local-only routing while ClipCord is running.
+- Provides a configurable global shortcut, defaulting to **Ctrl + Alt + L**, for switching future clips between Discord uploads and local-only routing while ClipCord is running, with a brief in-game mode indicator that does not take focus.
 - Confirms file length and timestamp stability across multiple observations before queueing a clip.
 - Uses SHA-256 content identity so folder renames and timestamp rewrites do not cause duplicate uploads.
 - Keeps scanning with two upload workers, a short connection timeout, and a bounded per-upload deadline.

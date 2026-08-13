@@ -8,6 +8,12 @@ Application.SetHighDpiMode(HighDpiMode.SystemAware);
 Application.EnableVisualStyles();
 Application.SetCompatibleTextRenderingDefault(false);
 
+if (args.Length == 2 && args[0].Equals("--render-mode-feedback", StringComparison.Ordinal))
+{
+    RenderModeFeedbackPreviews(args[1]);
+    return;
+}
+
 var temporaryRoot = Path.Combine(Path.GetTempPath(), "ClipsToDiscordTests", Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temporaryRoot);
 
@@ -356,6 +362,9 @@ try
            ((uint)GlobalHotkeyBinding.Default.Modifiers | GlobalHotkeyManager.ModNoRepeat),
         "Every native registration must include MOD_NOREPEAT with the configured modifiers.");
     AssertModeHotkeyGuardPolicy();
+    AssertModeFeedbackOverlayContract();
+    TraceSmokeStep("Mode feedback overlay behavior");
+    AssertModeFeedbackOverlayBehavior();
 
     Assert(
         AppSettings.NormalizeUploaderName("  Malik   Pervez  ") == "Malik Pervez",
@@ -428,6 +437,7 @@ try
         "Malik",
         true));
 
+    TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
     var recoveryClips = Path.Combine(recoveryRoot, "clips");
     var recoveryStateDirectory = Path.Combine(recoveryRoot, "state");
@@ -546,6 +556,7 @@ try
     var renamedHash = await ContentIdentity.ComputeSha256Async(renamedIdentityPath, CancellationToken.None);
     Assert(originalHash == renamedHash, "Content identity must survive path and timestamp changes.");
 
+    TraceSmokeStep("Webhook validation and redaction");
     var apiRoot = "https://discord.com/api/";
     var unversionedWebhook = apiRoot + "webhooks/" + "123456" + "/test-token";
     var versionedWebhook = apiRoot + "v10/webhooks/" + "123456" + "/test-token";
@@ -599,6 +610,7 @@ try
         redactedVersionedSecret.Contains("[REDACTED DISCORD WEBHOOK]"),
         "Webhook redaction must leave a useful placeholder.");
 
+    TraceSmokeStep("Compression planning");
     var compressionTargets = CompressionTargetPlanner.Build(25);
     Assert(compressionTargets[0] == 25, "Compression fallback must begin at the configured target.");
     Assert(compressionTargets.Contains(9), "Compression fallback must include the lower-limit target.");
@@ -654,6 +666,7 @@ try
         Environment.SetEnvironmentVariable("PATH", originalPath);
     }
 
+    TraceSmokeStep("Discord-aware controller lifecycle");
     var detectorResponses = new ConcurrentQueue<bool>(
         [true, false, false, true, false, false, false, true]);
     var watcherStarts = 0;
@@ -750,9 +763,12 @@ try
     await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
     delayedCleanupController.Dispose();
 
+    TraceSmokeStep("Local-only worker lifecycle");
     await AssertLocalOnlyWorkerAsync(temporaryRoot);
 
+    TraceSmokeStep("Update checker");
     await UpdateCheckerTests.RunAsync(temporaryRoot);
+    TraceSmokeStep("Update download service");
     await UpdateDownloadServiceTests.RunAsync(temporaryRoot);
 
     Console.WriteLine("All smoke tests passed.");
@@ -2095,6 +2111,188 @@ static void AssertModeHotkeyGuardPolicy()
         "Shutdown must dominate every other global-shortcut guard state.");
 }
 
+static void AssertModeFeedbackOverlayContract()
+{
+    var uploads = ModeFeedbackPresentation.ForUploadMode(true);
+    var localOnly = ModeFeedbackPresentation.ForUploadMode(false);
+    Assert(uploads == new ModeFeedbackPresentation(
+               "DISCORD UPLOADS ON",
+               "New clips will be sent automatically.",
+               ModeFeedbackTone.UploadsEnabled) &&
+           localOnly == new ModeFeedbackPresentation(
+               "LOCAL ONLY ON",
+               "New clips will stay on this PC.",
+               ModeFeedbackTone.LocalOnlyEnabled),
+        "Shortcut feedback must identify the confirmed route unambiguously.");
+
+    Assert(ModeFeedbackOverlay.RequiredExtendedStyles == 0x080000A0,
+        "The in-game mode indicator must retain the non-activating, tool-window, and click-through styles.");
+    var displayDuration = ModeFeedbackOverlay.DisplayDurationMilliseconds;
+    Assert(displayDuration == 1500,
+        "The in-game indicator must dismiss after the approved 1.5-second duration.");
+
+    var primary = new Rectangle(0, 0, 1920, 1080);
+    var secondary = new Rectangle(-2560, -240, 2560, 1440);
+    var compact = new Rectangle(3000, 500, 360, 240);
+    var normalBounds = ModeFeedbackOverlay.CalculateBounds(primary, 96);
+    var oneHundredFiftyPercentBounds = ModeFeedbackOverlay.CalculateBounds(primary, 144);
+    var scaledBounds = ModeFeedbackOverlay.CalculateBounds(secondary, 192);
+    var compactBounds = ModeFeedbackOverlay.CalculateBounds(compact, 192);
+    Assert(primary.Contains(normalBounds) &&
+           primary.Contains(oneHundredFiftyPercentBounds) &&
+           secondary.Contains(scaledBounds) &&
+           compact.Contains(compactBounds),
+        "The in-game indicator must stay inside primary, negative-coordinate, and compact monitor work areas.");
+    Assert(Math.Abs(normalBounds.Left + normalBounds.Width / 2 - (primary.Left + primary.Width / 2)) <= 1 &&
+           Math.Abs(oneHundredFiftyPercentBounds.Left + oneHundredFiftyPercentBounds.Width / 2 -
+                    (primary.Left + primary.Width / 2)) <= 1 &&
+           Math.Abs(scaledBounds.Left + scaledBounds.Width / 2 -
+                    (secondary.Left + secondary.Width / 2)) <= 1,
+        "The in-game indicator must be centered on the monitor containing the active game.");
+    Assert(scaledBounds.Width > normalBounds.Width && scaledBounds.Height > normalBounds.Height,
+        "The in-game indicator must scale for high-DPI displays.");
+}
+
+static void AssertModeFeedbackOverlayBehavior()
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            using var overlay = new ModeFeedbackOverlay();
+            Assert(overlay.IsHandleCreated,
+                "The mode indicator must establish UI-thread ownership before background feedback can be queued.");
+            overlay.ApplyPresentation(
+                ModeFeedbackPresentation.ForUploadMode(true),
+                new Rectangle(0, 0, 1920, 1080),
+                96);
+
+            var extendedStyle = ModeFeedbackNativeProbe.GetExtendedStyle(overlay.Handle);
+            Assert((extendedStyle & ModeFeedbackOverlay.RequiredExtendedStyles) ==
+                   ModeFeedbackOverlay.RequiredExtendedStyles,
+                $"The real mode-indicator HWND is missing required extended styles: 0x{extendedStyle:X}.");
+            Assert(ModeFeedbackNativeProbe.SendWindowMessage(overlay.Handle, 0x0084).ToInt64() == -1,
+                "WM_NCHITTEST must return HTTRANSPARENT so the indicator cannot consume game input.");
+            Assert(ModeFeedbackNativeProbe.SendWindowMessage(overlay.Handle, 0x0021).ToInt64() == 3,
+                "WM_MOUSEACTIVATE must return MA_NOACTIVATE so the indicator cannot take focus.");
+            var showWithoutActivation = typeof(ModeFeedbackOverlay).GetProperty(
+                "ShowWithoutActivation",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert(showWithoutActivation?.GetValue(overlay) is true &&
+                   !overlay.ShowInTaskbar && overlay.TopMost,
+                "The mode indicator must be topmost and shown outside taskbar/activation flows.");
+
+            var timerField = typeof(ModeFeedbackOverlay).GetField(
+                "_dismissTimer",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var dismissTimer = timerField?.GetValue(overlay) as System.Windows.Forms.Timer;
+            Assert(dismissTimer?.Interval == ModeFeedbackOverlay.DisplayDurationMilliseconds,
+                "The real dismissal timer must use the approved 1.5-second interval.");
+
+            var initialHandle = overlay.Handle;
+            var backgroundShow = Task.Run(() =>
+                overlay.ShowFeedback(ModeFeedbackPresentation.ForUploadMode(true)));
+            PumpWindowsMessagesUntil(
+                () => backgroundShow.IsCompleted && overlay.Visible,
+                "Background feedback was not marshaled to the overlay's UI thread.");
+            backgroundShow.GetAwaiter().GetResult();
+            Assert(overlay.Handle == initialHandle,
+                "Showing feedback must reuse the overlay's original HWND.");
+
+            PumpWindowsMessagesFor(TimeSpan.FromMilliseconds(900));
+            var resetWatch = Stopwatch.StartNew();
+            overlay.ShowFeedback(ModeFeedbackPresentation.ForUploadMode(false));
+            PumpWindowsMessagesFor(TimeSpan.FromMilliseconds(900));
+            Assert(overlay.Visible,
+                "A repeated shortcut press must restart, not inherit, the previous dismissal countdown.");
+            PumpWindowsMessagesUntil(
+                () => !overlay.Visible,
+                "The mode indicator did not dismiss after the latest shortcut feedback.");
+            resetWatch.Stop();
+            Assert(resetWatch.Elapsed >= TimeSpan.FromMilliseconds(1200) &&
+                   resetWatch.Elapsed <= TimeSpan.FromMilliseconds(2600),
+                $"The mode indicator dismissed {resetWatch.Elapsed.TotalMilliseconds:F0} ms after the latest feedback.");
+
+            overlay.ShowFeedback(ModeFeedbackPresentation.ForUploadMode(true));
+            Application.DoEvents();
+            Assert(overlay.Visible && overlay.Handle == initialHandle,
+                "A dismissed mode indicator must be reusable without creating another HWND.");
+            overlay.Dispose();
+            overlay.Dispose();
+            Task.Run(() => overlay.ShowFeedback(ModeFeedbackPresentation.ForUploadMode(false)))
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    if (!thread.Join(TimeSpan.FromSeconds(12)))
+    {
+        throw new TimeoutException("Mode feedback overlay behavior validation did not finish within 12 seconds.");
+    }
+    if (failure is not null)
+    {
+        throw new InvalidOperationException("Mode feedback overlay behavior validation failed.", failure);
+    }
+}
+
+static void RenderModeFeedbackPreviews(string outputDirectory)
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            using var overlay = new ModeFeedbackOverlay();
+            var presentations = new[]
+            {
+                ("discord-uploads-on.png", ModeFeedbackPresentation.ForUploadMode(true)),
+                ("local-only-on.png", ModeFeedbackPresentation.ForUploadMode(false)),
+                ("dialog-open.png", ModeFeedbackPresentation.DialogOpen),
+                ("mode-change-in-progress.png", ModeFeedbackPresentation.ReconfigurationInProgress),
+                ("discord-setup-required.png", ModeFeedbackPresentation.DiscordSetupRequired),
+                ("mode-change-failed.png", ModeFeedbackPresentation.SaveFailed)
+            };
+            foreach (var dpi in new[] { 96, 144, 192 })
+            {
+                var dpiDirectory = Path.Combine(outputDirectory, $"dpi-{dpi}");
+                Directory.CreateDirectory(dpiDirectory);
+                foreach (var (name, presentation) in presentations)
+                {
+                    overlay.ApplyPresentation(presentation, new Rectangle(0, 0, 1920, 1080), dpi);
+                    overlay.PerformLayout();
+                    using var bitmap = new Bitmap(overlay.Width, overlay.Height);
+                    overlay.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                    bitmap.Save(Path.Combine(dpiDirectory, name), System.Drawing.Imaging.ImageFormat.Png);
+                    if (dpi == 96)
+                    {
+                        bitmap.Save(Path.Combine(outputDirectory, name), System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    if (!thread.Join(TimeSpan.FromSeconds(15)))
+    {
+        throw new TimeoutException("Mode feedback preview rendering did not finish within 15 seconds.");
+    }
+    if (failure is not null) throw new InvalidOperationException("Mode feedback preview rendering failed.", failure);
+}
+
 static void AssertSettingsScaledLayout(AppSettings settings, float scale)
 {
     var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
@@ -2285,6 +2483,38 @@ static void PumpWindowsMessagesUntil(Func<bool> condition, string failureMessage
         Thread.Sleep(5);
     }
     Application.DoEvents();
+}
+
+static void PumpWindowsMessagesFor(TimeSpan duration)
+{
+    var watch = Stopwatch.StartNew();
+    while (watch.Elapsed < duration)
+    {
+        Application.DoEvents();
+        Thread.Sleep(5);
+    }
+    Application.DoEvents();
+}
+
+internal static class ModeFeedbackNativeProbe
+{
+    private const int ExtendedStyleIndex = -20;
+
+    internal static int GetExtendedStyle(IntPtr windowHandle) =>
+        GetWindowLong(windowHandle, ExtendedStyleIndex);
+
+    internal static IntPtr SendWindowMessage(IntPtr windowHandle, int message) =>
+        SendMessage(windowHandle, message, IntPtr.Zero, IntPtr.Zero);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong(IntPtr windowHandle, int index);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static extern IntPtr SendMessage(
+        IntPtr windowHandle,
+        int message,
+        IntPtr wordParameter,
+        IntPtr longParameter);
 }
 
 internal sealed class NeverCalledUpdateDownloadService : IUpdateDownloadService
