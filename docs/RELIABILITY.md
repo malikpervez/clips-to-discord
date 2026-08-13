@@ -24,6 +24,8 @@ Settings changes and tray upload-mode changes use a stricter handoff than applic
 
 The global mode shortcut enters the same serialized handoff instead of mutating watcher state directly. Windows registration is replaced atomically: if a requested combination is already owned, ClipCord attempts to restore the previous working shortcut before rejecting the settings change. Key-repeat messages, stale messages after disable, presses during an open ClipCord dialog, and presses during another reconfiguration do not start a second transition.
 
+Shortcut feedback is emitted only after the new setting and watcher handoff succeed. It uses one temporary topmost Windows Forms window on the active monitor, resets its dismissal timer on repeated presses, and is marked non-activating, tool-window, and click-through so it cannot take keyboard or mouse input from a game. The app does not inject into, hook, or inspect the game process. True exclusive fullscreen can render above ordinary desktop windows; borderless fullscreen and Windows fullscreen optimizations do not have that limitation.
+
 The scanner and both clip consumers share mutable watch state. Every runtime collection read, mutation, enumeration, and save is serialized through the same semaphore. Baseline construction happens before the consumers start.
 
 ## Successful-upload ordering

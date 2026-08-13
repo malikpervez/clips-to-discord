@@ -23,6 +23,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly IUpdateDownloadService _updateDownloadService;
     private readonly ActivityHistoryStore _activityHistory;
     private readonly GlobalHotkeyManager _globalHotkey;
+    private readonly ModeFeedbackOverlay _modeFeedbackOverlay;
     private AppSettings _settings;
     private DiscordAwareController? _controller;
     private bool _settingsOpen;
@@ -42,6 +43,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _activityHistory = new ActivityHistoryStore();
         _globalHotkey = new GlobalHotkeyManager();
         _globalHotkey.Pressed += ModeToggleHotkeyPressed;
+        _modeFeedbackOverlay = new ModeFeedbackOverlay();
         var assemblyVersion = typeof(TrayApplicationContext).Assembly.GetName().Version ?? new Version(0, 0, 0);
         _updateCoordinator = new UpdateCoordinator(
             GitHubUpdateChecker.Create(),
@@ -277,16 +279,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             case ModeHotkeyBlockReason.ShuttingDown:
                 return;
             case ModeHotkeyBlockReason.DialogOpen:
-                ShowHotkeyNotification(
-                    "Mode unchanged",
-                    "Close the open ClipCord dialog before using the mode shortcut.",
-                    ToolTipIcon.Info);
+                ShowModeFeedback(ModeFeedbackPresentation.DialogOpen);
                 return;
             case ModeHotkeyBlockReason.ReconfigurationInProgress:
-                ShowHotkeyNotification(
-                    "Mode change in progress",
-                    "ClipCord is still finishing the previous settings change.",
-                    ToolTipIcon.Info);
+                ShowModeFeedback(ModeFeedbackPresentation.ReconfigurationInProgress);
                 return;
         }
 
@@ -315,10 +311,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _uploadToDiscordItem.Checked = previousSettings.UploadToDiscord;
             if (invokedByHotkey)
             {
-                ShowHotkeyNotification(
-                    "Discord setup required",
-                    "Add a valid Discord webhook in Settings before enabling uploads.",
-                    ToolTipIcon.Warning);
+                ShowModeFeedback(ModeFeedbackPresentation.DiscordSetupRequired);
                 return;
             }
             MessageBox.Show(
@@ -334,12 +327,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             await PersistAndApplySettingsAsync(updated);
             if (_shutdownScheduled) return;
-            ShowHotkeyNotification(
-                "ClipCord",
-                updated.UploadToDiscord
-                    ? "Discord uploads enabled. New clips will be sent automatically."
-                    : "Local-only mode enabled. New clips will not be sent to Discord.",
-                ToolTipIcon.Info);
+            if (invokedByHotkey)
+            {
+                ShowModeFeedback(ModeFeedbackPresentation.ForUploadMode(updated.UploadToDiscord));
+            }
+            else
+            {
+                ShowHotkeyNotification(
+                    "ClipCord",
+                    updated.UploadToDiscord
+                        ? "Discord uploads enabled. New clips will be sent automatically."
+                        : "Local-only mode enabled. New clips will not be sent to Discord.",
+                    ToolTipIcon.Info);
+            }
         }
         catch (Exception exception)
         {
@@ -347,10 +347,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Log.Error("Could not change the clip upload mode.", exception);
             if (invokedByHotkey)
             {
-                ShowHotkeyNotification(
-                    "Could not change upload mode",
-                    "ClipCord could not save the upload-mode setting.",
-                    ToolTipIcon.Error);
+                ShowModeFeedback(ModeFeedbackPresentation.SaveFailed);
                 return;
             }
             MessageBox.Show(
@@ -390,6 +387,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (_shutdownScheduled || !_trayIcon.Visible) return;
         _trayIcon.ShowBalloonTip(2500, title, message, icon);
+    }
+
+    private void ShowModeFeedback(ModeFeedbackPresentation presentation)
+    {
+        if (_shutdownScheduled) return;
+        _modeFeedbackOverlay.ShowFeedback(presentation);
     }
 
     private void StartUpdateChecks()
@@ -604,6 +607,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _lifetimeCancellation.Cancel();
         _globalHotkey.Pressed -= ModeToggleHotkeyPressed;
         _globalHotkey.Dispose();
+        _modeFeedbackOverlay.Dispose();
         _controller?.Dispose();
         _updateCoordinator.Dispose();
         _updateDownloadService.Dispose();
