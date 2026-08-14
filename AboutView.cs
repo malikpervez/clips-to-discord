@@ -6,6 +6,7 @@ namespace ClipsToDiscord;
 internal sealed class AboutView : UserControl
 {
     internal const int FeatureIconLogicalSize = 48;
+    internal const int ReleaseIconLogicalSize = 44;
 
     private readonly AppSettings _settings;
     private readonly Func<string>? _watcherStatusProvider;
@@ -282,7 +283,8 @@ internal sealed class AboutView : UserControl
         releaseLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         releaseLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         releaseLayout.SetLogicalRowHeight(1, 36);
-        var releaseIcon = CreateSectionIcon(BrandGlyph.Shield, FeatureIconLogicalSize);
+        var releaseIcon = CreateSectionIcon(BrandGlyph.Shield, ReleaseIconLogicalSize);
+        releaseIcon.Name = "AboutReleaseIcon";
         releaseIcon.Margin = new Padding(0, 0, 8, 0);
         releaseLayout.Controls.Add(releaseIcon, 0, 0);
         var releaseCopy = new BufferedTableLayoutPanel
@@ -533,6 +535,7 @@ internal sealed class AboutView : UserControl
         heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         heading.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var icon = CreateSectionIcon(glyph, FeatureIconLogicalSize);
+        icon.Name = "AboutFeatureIcon";
         icon.Margin = new Padding(0, 0, 10, 0);
         heading.Controls.Add(icon, 0, 0);
         var copy = new BufferedTableLayoutPanel

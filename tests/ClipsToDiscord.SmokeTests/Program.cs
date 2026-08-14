@@ -2242,15 +2242,29 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         .Select(icon => icon.Width)
         .Distinct()
         .ToArray();
-    var aboutIconSides = sectionIcons.Select(icon => icon.Width).Distinct().ToArray();
-    Assert(settingsIconSides.Length == 1 && aboutIconSides.Length == 1 &&
-           sectionIcons.All(icon => Math.Abs(icon.Width - icon.Height) <= 1) &&
-           aboutIconSides[0] >= AboutView.FeatureIconLogicalSize &&
-           aboutIconSides[0] >= (int)Math.Floor(settingsIconSides[0] * 0.72f) &&
-           aboutIconSides[0] <= (int)Math.Ceiling(settingsIconSides[0] * 1.05f),
-        $"About feature icons must stay uniformly enlarged and visually comparable to Settings: " +
-        $"About={string.Join(", ", sectionIcons.Select(icon => $"{icon.Glyph}={icon.Size}"))}; " +
+    var featureIcons = sectionIcons.Where(icon => icon.Name == "AboutFeatureIcon").ToArray();
+    var featureIconSides = featureIcons.Select(icon => icon.Width).Distinct().ToArray();
+    var releaseIcon = sectionIcons.Single(icon => icon.Name == "AboutReleaseIcon");
+    Assert(AboutView.ReleaseIconLogicalSize == 44 && AboutView.FeatureIconLogicalSize == 48,
+        "The approved About icon hierarchy must remain 44px for the compact release badge and 48px for feature cards.");
+    Assert(featureIcons.Length == 4 &&
+           settingsIconSides.Length == 1 && featureIconSides.Length == 1 &&
+           featureIcons.All(icon => Math.Abs(icon.Width - icon.Height) <= 1) &&
+           featureIconSides[0] >= AboutView.FeatureIconLogicalSize &&
+           featureIconSides[0] >= (int)Math.Floor(settingsIconSides[0] * 0.72f) &&
+           featureIconSides[0] <= (int)Math.Ceiling(settingsIconSides[0] * 1.05f),
+        $"The four About feature-card icons must stay uniformly enlarged and visually comparable to Settings: " +
+        $"About={string.Join(", ", featureIcons.Select(icon => $"{icon.Glyph}={icon.Size}"))}; " +
         $"Settings side={string.Join(", ", settingsIconSides)}.");
+    var expectedReleaseIconSide = (int)Math.Round(
+        featureIconSides[0] * AboutView.ReleaseIconLogicalSize / (double)AboutView.FeatureIconLogicalSize);
+    Assert(Math.Abs(releaseIcon.Width - releaseIcon.Height) <= 1 &&
+           Math.Abs(releaseIcon.Width - expectedReleaseIconSide) <= 1 &&
+           releaseIcon.Width < featureIconSides[0],
+        $"The compact About release icon must retain its {AboutView.ReleaseIconLogicalSize}:" +
+        $"{AboutView.FeatureIconLogicalSize} scale ratio as a square " +
+        $"without competing with the feature-card icons: release={releaseIcon.Size}, " +
+        $"features={string.Join(", ", featureIconSides)}, expected side={expectedReleaseIconSide}px.");
     var expectedAvatarSide = (int)Math.Round(34 * effectiveScale);
     foreach (var avatarName in new[] { "AboutDixonCreditAvatar", "AboutPapiCreditAvatar" })
     {
