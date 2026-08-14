@@ -503,7 +503,14 @@ internal enum BrandGlyph
     Maximize,
     Restore,
     Close,
-    Shield
+    Shield,
+    AppStatus,
+    Diagnostics,
+    Credits,
+    FileText,
+    Copy,
+    FolderOpen,
+    ReportProblem
 }
 
 internal sealed class RoundedPanel : Panel
@@ -689,6 +696,7 @@ internal sealed class GradientButton : Button
 
 internal sealed class OutlineButton : Button
 {
+    public BrandGlyph? LeadingGlyph { get; set; }
     public Color SurfaceColor { get; set; } = Color.White;
     public Color OutlineColor { get; set; } = ClipCordTheme.CardBorder;
     public Color HoverColor { get; set; } = Color.FromArgb(244, 241, 252);
@@ -732,13 +740,39 @@ internal sealed class OutlineButton : Button
         eventArgs.Graphics.FillRectangle(fill, ClientRectangle);
         eventArgs.Graphics.FillPath(fill, path);
         eventArgs.Graphics.DrawPath(outline, path);
-        TextRenderer.DrawText(
-            eventArgs.Graphics,
-            Text,
-            Font,
-            ClientRectangle,
-            Enabled ? ForeColor : DisabledTextColor,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        var textColor = Enabled ? ForeColor : DisabledTextColor;
+        if (LeadingGlyph is { } glyph)
+        {
+            var glyphSize = Math.Max(16, Font.Height - 2);
+            var gap = Math.Max(5, (int)Math.Round(6 * DeviceDpi / 96d));
+            var measured = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            var combinedWidth = glyphSize + gap + measured.Width;
+            var left = Math.Max(6, (Width - combinedWidth) / 2);
+            var glyphBounds = new Rectangle(left, (Height - glyphSize) / 2, glyphSize, glyphSize);
+            BrandGlyphControl.DrawGlyph(eventArgs.Graphics, glyphBounds, glyph, textColor, Math.Max(1.3f, glyphSize / 12f));
+            var textBounds = new Rectangle(
+                glyphBounds.Right + gap,
+                0,
+                Math.Max(0, Width - glyphBounds.Right - gap - 4),
+                Height);
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                Text,
+                Font,
+                textBounds,
+                textColor,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
+        else
+        {
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                Text,
+                Font,
+                ClientRectangle,
+                textColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
         if (Focused && ShowFocusCues)
         {
             ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
@@ -996,7 +1030,114 @@ internal class BrandGlyphControl : Control
                     new PointF(box.Left + box.Width / 2f, box.Top)
                 ]);
                 break;
+            case BrandGlyph.AppStatus:
+                graphics.DrawRectangle(pen, box.Left, box.Top, box.Width - 1, box.Height * .68f);
+                graphics.DrawLine(pen, box.Left + box.Width * .34f, box.Bottom, box.Right - box.Width * .34f, box.Bottom);
+                graphics.DrawLine(pen, box.Left + box.Width * .5f, box.Top + box.Height * .68f, box.Left + box.Width * .5f, box.Bottom);
+                graphics.DrawLines(pen,
+                [
+                    new PointF(box.Left + box.Width * .62f, box.Top + box.Height * .36f),
+                    new PointF(box.Left + box.Width * .72f, box.Top + box.Height * .47f),
+                    new PointF(box.Left + box.Width * .9f, box.Top + box.Height * .22f)
+                ]);
+                break;
+            case BrandGlyph.Diagnostics:
+                graphics.DrawEllipse(pen, box);
+                graphics.DrawEllipse(
+                    pen,
+                    box.Left + box.Width * .32f,
+                    box.Top + box.Height * .32f,
+                    box.Width * .36f,
+                    box.Height * .36f);
+                graphics.DrawLine(pen, box.Left + box.Width * .18f, box.Top + box.Height * .18f,
+                    box.Left + box.Width * .36f, box.Top + box.Height * .36f);
+                graphics.DrawLine(pen, box.Right - box.Width * .18f, box.Top + box.Height * .18f,
+                    box.Right - box.Width * .36f, box.Top + box.Height * .36f);
+                graphics.DrawLine(pen, box.Left + box.Width * .18f, box.Bottom - box.Height * .18f,
+                    box.Left + box.Width * .36f, box.Bottom - box.Height * .36f);
+                graphics.DrawLine(pen, box.Right - box.Width * .18f, box.Bottom - box.Height * .18f,
+                    box.Right - box.Width * .36f, box.Bottom - box.Height * .36f);
+                break;
+            case BrandGlyph.Credits:
+                DrawSparkle(graphics, pen, box.Left + box.Width * .48f, box.Top + box.Height * .45f, box.Width * .28f);
+                DrawSparkle(graphics, pen, box.Left + box.Width * .8f, box.Top + box.Height * .2f, box.Width * .12f);
+                DrawSparkle(graphics, pen, box.Left + box.Width * .18f, box.Top + box.Height * .78f, box.Width * .1f);
+                break;
+            case BrandGlyph.FileText:
+                graphics.DrawLines(pen,
+                [
+                    new PointF(box.Left + box.Width * .15f, box.Top),
+                    new PointF(box.Left + box.Width * .68f, box.Top),
+                    new PointF(box.Right - box.Width * .05f, box.Top + box.Height * .25f),
+                    new PointF(box.Right - box.Width * .05f, box.Bottom),
+                    new PointF(box.Left + box.Width * .15f, box.Bottom),
+                    new PointF(box.Left + box.Width * .15f, box.Top)
+                ]);
+                graphics.DrawLine(pen, box.Left + box.Width * .32f, box.Top + box.Height * .5f, box.Right - box.Width * .2f, box.Top + box.Height * .5f);
+                graphics.DrawLine(pen, box.Left + box.Width * .32f, box.Top + box.Height * .7f, box.Right - box.Width * .3f, box.Top + box.Height * .7f);
+                break;
+            case BrandGlyph.Copy:
+                graphics.DrawRectangle(pen, box.Left + box.Width * .27f, box.Top + box.Height * .25f, box.Width * .65f, box.Height * .68f);
+                graphics.DrawLines(pen,
+                [
+                    new PointF(box.Left + box.Width * .72f, box.Top + box.Height * .08f),
+                    new PointF(box.Left + box.Width * .08f, box.Top + box.Height * .08f),
+                    new PointF(box.Left + box.Width * .08f, box.Top + box.Height * .72f)
+                ]);
+                break;
+            case BrandGlyph.FolderOpen:
+                graphics.DrawLines(pen,
+                [
+                    new PointF(box.Left, box.Top + box.Height * .38f),
+                    new PointF(box.Left + box.Width * .12f, box.Top + box.Height * .15f),
+                    new PointF(box.Left + box.Width * .42f, box.Top + box.Height * .15f),
+                    new PointF(box.Left + box.Width * .52f, box.Top + box.Height * .3f),
+                    new PointF(box.Right, box.Top + box.Height * .3f)
+                ]);
+                graphics.DrawLines(pen,
+                [
+                    new PointF(box.Left, box.Top + box.Height * .38f),
+                    new PointF(box.Left + box.Width * .13f, box.Bottom),
+                    new PointF(box.Right - box.Width * .08f, box.Bottom),
+                    new PointF(box.Right, box.Top + box.Height * .38f),
+                    new PointF(box.Left, box.Top + box.Height * .38f)
+                ]);
+                break;
+            case BrandGlyph.ReportProblem:
+                using (var reportPath = RoundedPanel.CreateRoundedPath(
+                           new Rectangle(box.Left, box.Top, box.Width, (int)(box.Height * .72f)), 4))
+                {
+                    graphics.DrawPath(pen, reportPath);
+                }
+                graphics.DrawLines(pen,
+                [
+                    new PointF(box.Left + box.Width * .25f, box.Top + box.Height * .72f),
+                    new PointF(box.Left + box.Width * .18f, box.Bottom),
+                    new PointF(box.Left + box.Width * .48f, box.Top + box.Height * .72f)
+                ]);
+                graphics.DrawLine(pen, box.Left + box.Width * .5f, box.Top + box.Height * .2f, box.Left + box.Width * .5f, box.Top + box.Height * .43f);
+                using (var reportDot = new SolidBrush(color))
+                {
+                    graphics.FillEllipse(reportDot, box.Left + box.Width * .46f, box.Top + box.Height * .53f, box.Width * .08f, box.Width * .08f);
+                }
+                break;
         }
+    }
+
+    private static void DrawSparkle(Graphics graphics, Pen pen, float centerX, float centerY, float radius)
+    {
+        graphics.DrawLines(pen,
+        [
+            new PointF(centerX, centerY - radius),
+            new PointF(centerX + radius * .28f, centerY - radius * .28f),
+            new PointF(centerX + radius, centerY),
+            new PointF(centerX + radius * .28f, centerY + radius * .28f),
+            new PointF(centerX, centerY + radius),
+            new PointF(centerX - radius * .28f, centerY + radius * .28f),
+            new PointF(centerX - radius, centerY),
+            new PointF(centerX - radius * .28f, centerY - radius * .28f),
+            new PointF(centerX, centerY - radius)
+        ]);
     }
 
     private static void DrawGear(Graphics graphics, Rectangle box, Pen pen)
