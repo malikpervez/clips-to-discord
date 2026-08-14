@@ -8,7 +8,8 @@ internal enum SettingsPage
 {
     Settings,
     Activity,
-    Gallery
+    Gallery,
+    About
 }
 
 internal sealed class SettingsForm : Form
@@ -16,6 +17,7 @@ internal sealed class SettingsForm : Form
     internal static readonly Size SettingsDesignedClientSize = new(1080, 886);
     internal static readonly Size ActivityDesignedClientSize = new(1043, 837);
     internal static readonly Size GalleryDesignedClientSize = new(1100, 890);
+    internal static readonly Size AboutDesignedClientSize = new(1100, 890);
     internal static readonly Size MinimumDesignedClientSize = new(900, 650);
     private static readonly Regex CompressionTargetPattern = new(
         @"^\s*(?<value>\d{1,3})\s*(?:MB)?\s*$",
@@ -151,15 +153,20 @@ internal sealed class SettingsForm : Form
         Font = ClipCordTheme.InterfaceFont(9.5f)
     };
     private readonly Func<IWin32Window, Task>? _checkForUpdatesAsync;
+    private readonly AppSettings _appliedSettings;
     private readonly ActivityHistoryStore _activityHistory;
     private readonly SettingsPage _openingPage;
     private readonly bool _ownsActivityHistory;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _activityNavigationItem;
     private RoundedPanel? _galleryNavigationItem;
+    private RoundedPanel? _aboutNavigationItem;
+    private BufferedTableLayoutPanel? _rootLayout;
+    private Control? _footer;
     private Control? _settingsPage;
     private ActivityView? _activityPage;
     private GalleryView? _galleryPage;
+    private AboutView? _aboutPage;
     private bool _busy;
     private string? _lastWatcherFullStatus;
     private Size _lastWindowRegionSize = Size.Empty;
@@ -177,6 +184,7 @@ internal sealed class SettingsForm : Form
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
+        _appliedSettings = settings;
         _checkForUpdatesAsync = checkForUpdatesAsync;
         _watcherStatusProvider = watcherStatusProvider;
         _activityHistory = activityHistory ?? new ActivityHistoryStore(string.Empty);
@@ -218,6 +226,7 @@ internal sealed class SettingsForm : Form
         _browseButton.Click += BrowseClicked;
         _testButton.Click += TestClicked;
         _checkUpdatesButton.Click += CheckUpdatesClicked;
+        _checkUpdatesButton.Name = "SettingsCheckUpdatesButton";
         _checkUpdatesButton.Enabled = _checkForUpdatesAsync is not null;
         _saveButton.Click += SaveClicked;
         _minimizeButton.Click += (_, _) => WindowState = FormWindowState.Minimized;
@@ -265,7 +274,9 @@ internal sealed class SettingsForm : Form
         root.Controls.Add(BuildHeader(), 0, 0);
         root.Controls.Add(BuildNavigation(), 0, 1);
         root.Controls.Add(BuildBody(), 0, 2);
-        root.Controls.Add(BuildFooter(), 0, 3);
+        _footer = BuildFooter();
+        root.Controls.Add(_footer, 0, 3);
+        _rootLayout = root;
         return root;
     }
 
@@ -410,9 +421,13 @@ internal sealed class SettingsForm : Form
         _settingsPage = BuildCards();
         _activityPage = new ActivityView(_activityHistory, _folderText.Text);
         _galleryPage = new GalleryView(_folderText.Text);
+        _aboutPage = new AboutView(_appliedSettings, _watcherStatusProvider);
+        _aboutPage.CheckUpdatesRequested += CheckUpdatesClicked;
+        _aboutPage.SetBusy(false, _checkForUpdatesAsync is not null);
         pageHost.Controls.Add(_settingsPage);
         pageHost.Controls.Add(_activityPage);
         pageHost.Controls.Add(_galleryPage);
+        pageHost.Controls.Add(_aboutPage);
         return pageHost;
     }
 
@@ -467,9 +482,11 @@ internal sealed class SettingsForm : Form
         var aboutItem = CreateNavigationItem("About", BrandGlyph.About, selected: false);
         aboutItem.Name = "AboutNavItem";
         aboutItem.AccessibleName = "About ClipCord";
+        aboutItem.AccessibleDescription = "About ClipCord, privacy, diagnostics, and project credits";
         aboutItem.AccessibleRole = AccessibleRole.MenuItem;
-        aboutItem.EnableKeyboardAccess(ShowAbout);
-        WireClick(aboutItem, ShowAbout);
+        aboutItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.About));
+        WireClick(aboutItem, () => ShowPage(SettingsPage.About));
+        _aboutNavigationItem = aboutItem;
 
         navigation.Controls.Add(settingsItem, 0, 0);
         navigation.Controls.Add(activityItem, 1, 0);
@@ -480,14 +497,16 @@ internal sealed class SettingsForm : Form
 
     internal void ShowPage(SettingsPage page)
     {
-        if (_settingsPage is null || _activityPage is null || _galleryPage is null) return;
+        if (_settingsPage is null || _activityPage is null || _galleryPage is null || _aboutPage is null) return;
 
         var showSettings = page == SettingsPage.Settings;
         var showActivity = page == SettingsPage.Activity;
         var showGallery = page == SettingsPage.Gallery;
+        var showAbout = page == SettingsPage.About;
         _settingsPage.Visible = showSettings;
         _activityPage.Visible = showActivity;
         _galleryPage.Visible = showGallery;
+        _aboutPage.Visible = showAbout;
         if (showSettings)
         {
             _galleryPage.Deactivate();
@@ -500,22 +519,39 @@ internal sealed class SettingsForm : Form
             _activityPage.BringToFront();
             _activityPage.RefreshViewport();
         }
-        else
+        else if (showGallery)
         {
             _galleryPage.BringToFront();
             _galleryPage.Activate(_folderText.Text);
+        }
+        else
+        {
+            _galleryPage.Deactivate();
+            _aboutPage.BringToFront();
+            _aboutPage.RefreshStatus();
+            _aboutPage.RefreshViewport();
         }
 
         UpdateNavigationSelection(_settingsNavigationItem, showSettings);
         UpdateNavigationSelection(_activityNavigationItem, showActivity);
         UpdateNavigationSelection(_galleryNavigationItem, showGallery);
+        UpdateNavigationSelection(_aboutNavigationItem, showAbout);
         _saveButton.Visible = showSettings;
         _cancelButton.Text = showSettings ? "Cancel" : "Close";
         AcceptButton = showSettings ? _saveButton : null;
+        if (_rootLayout is not null && _rootLayout.RowStyles.Count > 3)
+        {
+            _rootLayout.RowStyles[3].SizeType = SizeType.Absolute;
+            _rootLayout.RowStyles[3].Height = showAbout
+                ? 0
+                : (float)Math.Round(90 * Math.Max(96, DeviceDpi) / 96d);
+        }
+        if (_footer is not null) _footer.Visible = !showAbout;
         Text = page switch
         {
             SettingsPage.Activity => "ClipCord — Activity",
             SettingsPage.Gallery => "ClipCord — Gallery",
+            SettingsPage.About => "ClipCord — About",
             _ => "ClipCord — Settings"
         };
         if (showActivity)
@@ -530,7 +566,7 @@ internal sealed class SettingsForm : Form
             _statusLabel.Text = "Gallery reads uploaded and local-only archives only while this page is open.";
             _privacySummaryLabel.Text = "Playing or browsing a local-only clip never uploads it.";
         }
-        else
+        else if (!showAbout)
         {
             _statusLabel.Text = string.Empty;
             UpdateUploadModeText();
@@ -1224,6 +1260,7 @@ internal sealed class SettingsForm : Form
     {
         if (IsDisposed || Disposing) return;
         var fullStatus = _watcherStatusProvider?.Invoke() ?? "Settings";
+        if (_aboutPage is { Visible: true }) _aboutPage.UpdateWatcherStatus(fullStatus);
         var conciseStatus = fullStatus switch
         {
             var value when value.Contains("closed", StringComparison.OrdinalIgnoreCase) ||
@@ -1314,6 +1351,7 @@ internal sealed class SettingsForm : Form
         {
             await _checkForUpdatesAsync(this);
             if (IsDisposed || Disposing) return;
+            _aboutPage?.SetUpdateState("Update check finished");
             _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
             _statusLabel.Text = "Update check finished.";
         }
@@ -1323,6 +1361,7 @@ internal sealed class SettingsForm : Form
             if (IsDisposed || Disposing) return;
             _statusLabel.ForeColor = ClipCordTheme.Coral;
             _statusLabel.Text = "Update check failed.";
+            _aboutPage?.SetUpdateState("Update check unavailable");
             MessageBox.Show(
                 this,
                 "The update check could not be completed.",
@@ -1334,19 +1373,6 @@ internal sealed class SettingsForm : Form
         {
             SetBusy(false);
         }
-    }
-
-    private void ShowAbout()
-    {
-        var version = typeof(SettingsForm).Assembly.GetName().Version ?? new Version(0, 0, 0);
-        MessageBox.Show(
-            this,
-            $"ClipCord {version.Major}.{version.Minor}.{version.Build}\n\n" +
-            "Automatically relay completed gaming clips to Discord.\n\n" +
-            "ClipCord is not affiliated with Discord or any recording-software vendor.",
-            "About ClipCord",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
     }
 
     private void CaptureModeToggleHotkey(object? sender, KeyEventArgs eventArgs)
@@ -1491,6 +1517,7 @@ internal sealed class SettingsForm : Form
         _browseButton.Enabled = !busy;
         _testButton.Enabled = !busy;
         _checkUpdatesButton.Enabled = !busy && _checkForUpdatesAsync is not null;
+        _aboutPage?.SetBusy(busy, _checkForUpdatesAsync is not null);
         _modeToggleHotkeyText.Enabled = !busy;
         _modeToggleHotkeyAction.Enabled = !busy;
         _uploadToDiscord.Enabled = !busy;
@@ -1576,10 +1603,31 @@ internal sealed class SettingsForm : Form
         base.OnShown(eventArgs);
     }
 
+    protected override bool ProcessDialogKey(Keys keyData)
+    {
+        if (keyData == Keys.Escape && _aboutPage is { Visible: true } && !_busy)
+        {
+            Close();
+            return true;
+        }
+        return base.ProcessDialogKey(keyData);
+    }
+
     internal static Size GetDesignedOpeningSize(SettingsPage page, int dpi)
     {
         var clientSize = GetDesignedClientSize(page);
         var scale = Math.Max(96, dpi) / 96d;
+        if (page == SettingsPage.About)
+        {
+            // The shared title/navigation chrome uses fixed physical rows. Scale only the
+            // About content portion so high-DPI openings stay compact like the approved
+            // mockup instead of growing a large empty tail below the legal notice.
+            const int fixedChromeHeight = 198;
+            var scalableContentHeight = clientSize.Height - fixedChromeHeight;
+            return new Size(
+                (int)Math.Round(clientSize.Width * scale),
+                fixedChromeHeight + (int)Math.Round(scalableContentHeight * scale));
+        }
         return new Size(
             (int)Math.Round(clientSize.Width * scale),
             (int)Math.Round(clientSize.Height * scale));
@@ -1589,6 +1637,7 @@ internal sealed class SettingsForm : Form
     {
         SettingsPage.Activity => ActivityDesignedClientSize,
         SettingsPage.Gallery => GalleryDesignedClientSize,
+        SettingsPage.About => AboutDesignedClientSize,
         _ => SettingsDesignedClientSize
     };
 

@@ -4,6 +4,12 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.11.0 — 2026-08-14
+
+- Replace the About pop-up with a full branded page for live app status, safe diagnostics, privacy details, project links, and credits.
+- Keep copied diagnostics allowlisted and redacted so webhook values, paths, uploader names, clip names, and logs are never included.
+- Enlarge the About section artwork to match the visual weight of the branded Settings cards while preserving compact DPI-safe layouts.
+
 ## 1.10.0 — 2026-08-14
 
 - Refine Settings into a balanced dark four-card layout, with matching full-width Clip source and Discord destination cards plus compact Upload behavior and App preferences cards.

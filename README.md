@@ -26,6 +26,7 @@ A Windows tray app that can upload new MP4 clips from any chosen folder to Disco
 - Shows bounded recent discovery, upload, compression, retry, and archive history in the local Activity Center.
 - Browses uploaded and local-only archives together in a game-organized Gallery with deterministic gradient cards, route labels, playback, and file-location actions.
 - Keeps Gallery work on demand: it scans local archive folders only while the Gallery page is open and never downloads game artwork.
+- Includes a branded About page with live app status, privacy-safe copied diagnostics, documentation links, and project credits.
 - Identifies who uploaded each clip and, when recognized, which game it came from—even when friends share one webhook.
 - Redacts Discord webhook URLs from all application log messages.
 - Checks the official GitHub Releases API at most once per day and, only after you choose **Install update**, downloads, verifies, installs, and reopens the newer stable version in app.

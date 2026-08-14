@@ -40,6 +40,8 @@ The Activity Center reads only the local bounded activity history. It never stor
 
 The Gallery reads the local `uploaded` and `local-only` archives only while its page is open. It does not build a background media index, contact an artwork service, upload local-only clips, or send clip names and paths over the network. Playing a clip asks Windows to open the exact local file with the user's default video application.
 
+The About page computes its status locally. **Copy diagnostics** places a fixed, allowlisted summary on the Windows clipboard only when the user selects it. The summary can include the ClipCord, Windows, and .NET versions; operating-system and process architecture; installed or portable state; normalized watcher and routing states; Discord, startup, and FFmpeg availability; and a UTC timestamp. It excludes the webhook, uploader name, Windows user and machine names, clip and application-data paths, clip names, raw watcher text, activity history, and logs. Nothing is submitted automatically; project and documentation actions open fixed HTTPS pages in the official GitHub repository.
+
 ## File handling
 
 - Existing clips are ignored during the initial baseline.
