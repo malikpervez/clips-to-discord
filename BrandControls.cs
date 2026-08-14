@@ -17,6 +17,13 @@ internal static class ClipCordTheme
     public static readonly Color MutedText = Color.FromArgb(101, 108, 122);
     public static readonly Color ShellText = Color.FromArgb(245, 247, 252);
     public static readonly Color ShellMutedText = Color.FromArgb(166, 175, 194);
+    public static readonly Color SettingsCard = Color.FromArgb(21, 31, 49);
+    public static readonly Color SettingsCardBorder = Color.FromArgb(45, 58, 80);
+    public static readonly Color SettingsField = Color.FromArgb(16, 27, 45);
+    public static readonly Color SettingsFieldBorder = Color.FromArgb(53, 66, 88);
+    public static readonly Color SettingsButton = Color.FromArgb(24, 35, 55);
+    public static readonly Color SettingsButtonHover = Color.FromArgb(34, 47, 71);
+    public static readonly Color SettingsMutedText = Color.FromArgb(159, 170, 189);
 
     private static readonly Lazy<string> InterfaceFontName = new(() =>
     {
@@ -488,6 +495,10 @@ internal enum BrandGlyph
     Folder,
     Destination,
     Sliders,
+    ClipSource,
+    DiscordDestination,
+    UploadBehavior,
+    AppPreferences,
     Minimize,
     Maximize,
     Restore,
@@ -681,6 +692,8 @@ internal sealed class OutlineButton : Button
     public Color SurfaceColor { get; set; } = Color.White;
     public Color OutlineColor { get; set; } = ClipCordTheme.CardBorder;
     public Color HoverColor { get; set; } = Color.FromArgb(244, 241, 252);
+    public Color DisabledSurfaceColor { get; set; } = Color.FromArgb(230, 231, 235);
+    public Color DisabledTextColor { get; set; } = Color.FromArgb(140, 144, 153);
     private bool _hovered;
     private Size _lastRegionSize = Size.Empty;
 
@@ -713,7 +726,7 @@ internal sealed class OutlineButton : Button
         var bounds = new Rectangle(0, 0, Math.Max(1, Width - 1), Math.Max(1, Height - 1));
         using var path = RoundedPanel.CreateRoundedPath(bounds, 8);
         using var fill = new SolidBrush(!Enabled
-            ? Color.FromArgb(230, 231, 235)
+            ? DisabledSurfaceColor
             : _hovered ? HoverColor : SurfaceColor);
         using var outline = new Pen(OutlineColor);
         eventArgs.Graphics.FillRectangle(fill, ClientRectangle);
@@ -724,7 +737,7 @@ internal sealed class OutlineButton : Button
             Text,
             Font,
             ClientRectangle,
-            Enabled ? ForeColor : Color.FromArgb(140, 144, 153),
+            Enabled ? ForeColor : DisabledTextColor,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         if (Focused && ShowFocusCues)
         {
@@ -951,6 +964,12 @@ internal class BrandGlyphControl : Control
             case BrandGlyph.Sliders:
                 DrawSliders(graphics, box, pen, color);
                 break;
+            case BrandGlyph.ClipSource:
+            case BrandGlyph.DiscordDestination:
+            case BrandGlyph.UploadBehavior:
+            case BrandGlyph.AppPreferences:
+                DrawFeatureGlyph(graphics, bounds, glyph, color);
+                break;
             case BrandGlyph.Minimize:
                 graphics.DrawLine(pen, box.Left, box.Bottom - 2, box.Right, box.Bottom - 2);
                 break;
@@ -1011,35 +1030,263 @@ internal class BrandGlyphControl : Control
             graphics.FillEllipse(fill, x - 3, y - 3, 6, 6);
         }
     }
+
+    internal static void DrawFeatureGlyph(
+        Graphics graphics,
+        Rectangle bounds,
+        BrandGlyph glyph,
+        Color color)
+    {
+        var side = Math.Min(bounds.Width, bounds.Height);
+        if (side <= 0) return;
+
+        var state = graphics.Save();
+        try
+        {
+            graphics.TranslateTransform(
+                bounds.Left + (bounds.Width - side) / 2f,
+                bounds.Top + (bounds.Height - side) / 2f);
+            graphics.ScaleTransform(side / 64f, side / 64f);
+            graphics.TranslateTransform(8f, 8f);
+
+            using var fill = new SolidBrush(Color.FromArgb(34, color));
+            using var stroke = new Pen(color, 2.15f)
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round,
+                LineJoin = LineJoin.Round
+            };
+            using var detail = new Pen(color, 1.55f)
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round,
+                LineJoin = LineJoin.Round
+            };
+            using var solid = new SolidBrush(color);
+
+            switch (glyph)
+            {
+                case BrandGlyph.ClipSource:
+                    DrawClipSourceFeature(graphics, fill, stroke, detail, solid);
+                    break;
+                case BrandGlyph.DiscordDestination:
+                    DrawDiscordDestinationFeature(graphics, fill, stroke, detail, solid);
+                    break;
+                case BrandGlyph.UploadBehavior:
+                    DrawUploadBehaviorFeature(graphics, fill, stroke, detail, solid);
+                    break;
+                case BrandGlyph.AppPreferences:
+                    DrawAppPreferencesFeature(graphics, fill, stroke, detail, solid);
+                    break;
+            }
+        }
+        finally
+        {
+            graphics.Restore(state);
+        }
+    }
+
+    private static void DrawClipSourceFeature(
+        Graphics graphics,
+        Brush fill,
+        Pen stroke,
+        Pen detail,
+        Brush solid)
+    {
+        using var folder = RoundedPanel.CreateRoundedPath(new Rectangle(2, 11, 44, 31), 5);
+        graphics.FillPath(fill, folder);
+        graphics.DrawPath(stroke, folder);
+        graphics.DrawLines(stroke,
+        [
+            new PointF(3, 14),
+            new PointF(3, 8.5f),
+            new PointF(15, 8.5f),
+            new PointF(19, 13),
+            new PointF(40, 13)
+        ]);
+
+        using var film = RoundedPanel.CreateRoundedPath(new Rectangle(10, 18, 28, 18), 3);
+        graphics.DrawPath(detail, film);
+        graphics.DrawLine(detail, 14, 18, 14, 36);
+        graphics.DrawLine(detail, 34, 18, 34, 36);
+        graphics.DrawLine(detail, 10.5f, 23, 14, 23);
+        graphics.DrawLine(detail, 10.5f, 31, 14, 31);
+        graphics.DrawLine(detail, 34, 23, 37.5f, 23);
+        graphics.DrawLine(detail, 34, 31, 37.5f, 31);
+        graphics.FillPolygon(solid,
+        [
+            new PointF(21, 22.5f),
+            new PointF(30, 27),
+            new PointF(21, 31.5f)
+        ]);
+    }
+
+    private static void DrawDiscordDestinationFeature(
+        Graphics graphics,
+        Brush fill,
+        Pen stroke,
+        Pen detail,
+        Brush solid)
+    {
+        using var discord = new GraphicsPath();
+        discord.StartFigure();
+        discord.AddBezier(12.7f, 13.8f, 20.2f, 10.4f, 27.8f, 10.4f, 35.3f, 13.8f);
+        discord.AddBezier(35.3f, 13.8f, 39.5f, 19.7f, 41.8f, 26.4f, 42.3f, 33.9f);
+        discord.AddBezier(42.3f, 33.9f, 38.5f, 37.3f, 34.9f, 39.4f, 31.3f, 40.5f);
+        discord.AddLine(31.3f, 40.5f, 28.6f, 36.4f);
+        discord.AddBezier(28.6f, 36.4f, 30.6f, 35.8f, 32.4f, 35f, 34.1f, 33.9f);
+        discord.AddBezier(34.1f, 33.9f, 27.4f, 37f, 20.6f, 37f, 13.9f, 33.9f);
+        discord.AddBezier(13.9f, 33.9f, 15.6f, 35f, 17.4f, 35.8f, 19.4f, 36.4f);
+        discord.AddLine(19.4f, 36.4f, 16.7f, 40.5f);
+        discord.AddBezier(16.7f, 40.5f, 13.1f, 39.4f, 9.5f, 37.3f, 5.7f, 33.9f);
+        discord.AddBezier(5.7f, 33.9f, 6.2f, 26.4f, 8.5f, 19.7f, 12.7f, 13.8f);
+        discord.CloseFigure();
+        graphics.FillPath(fill, discord);
+
+        using var outline = new GraphicsPath();
+        outline.StartFigure();
+        outline.AddBezier(13.1f, 14.4f, 20.3f, 11.2f, 27.7f, 11.2f, 34.9f, 14.4f);
+        outline.AddBezier(34.9f, 14.4f, 38.8f, 20.1f, 41f, 26.4f, 41.5f, 33.6f);
+        outline.AddBezier(41.5f, 33.6f, 37.9f, 36.6f, 34.5f, 38.6f, 31.4f, 39.6f);
+        outline.AddLine(31.4f, 39.6f, 28.7f, 35.6f);
+        outline.AddBezier(28.7f, 35.6f, 30.6f, 35.1f, 32.4f, 34.3f, 34.1f, 33.3f);
+        outline.AddBezier(34.1f, 33.3f, 27.4f, 36.3f, 20.6f, 36.3f, 13.9f, 33.3f);
+        outline.AddBezier(13.9f, 33.3f, 15.6f, 34.3f, 17.4f, 35.1f, 19.3f, 35.6f);
+        outline.AddLine(19.3f, 35.6f, 16.6f, 39.6f);
+        outline.AddBezier(16.6f, 39.6f, 13.5f, 38.6f, 10.1f, 36.6f, 6.5f, 33.6f);
+        outline.AddBezier(6.5f, 33.6f, 7f, 26.4f, 9.2f, 20.1f, 13.1f, 14.4f);
+        outline.CloseFigure();
+        graphics.DrawPath(stroke, outline);
+
+        graphics.DrawBezier(detail, 16.4f, 17.3f, 18.5f, 16.5f, 20.6f, 16f, 22.7f, 15.9f);
+        graphics.DrawBezier(detail, 25.3f, 15.9f, 27.4f, 16f, 29.5f, 16.5f, 31.6f, 17.3f);
+        graphics.FillEllipse(solid, 16f, 23.3f, 4.8f, 4.8f);
+        graphics.FillEllipse(solid, 27.2f, 23.3f, 4.8f, 4.8f);
+        graphics.DrawBezier(detail, 18.2f, 30.6f, 22f, 32.6f, 26f, 32.6f, 29.8f, 30.6f);
+    }
+
+    private static void DrawUploadBehaviorFeature(
+        Graphics graphics,
+        Brush fill,
+        Pen stroke,
+        Pen detail,
+        Brush solid)
+    {
+        using var cloud = new GraphicsPath();
+        cloud.StartFigure();
+        cloud.AddBezier(11, 35, 4, 35, 3, 28, 6, 23);
+        cloud.AddBezier(6, 23, 8, 19, 11, 18, 15, 18);
+        cloud.AddBezier(15, 18, 18, 9, 26, 6, 33, 11);
+        cloud.AddBezier(33, 11, 36, 13, 38, 16, 38.5f, 20);
+        cloud.AddBezier(38.5f, 20, 44, 21, 46, 25, 45, 29.5f);
+        cloud.AddBezier(45, 29.5f, 44, 33, 41, 35, 37, 35);
+        cloud.CloseFigure();
+        graphics.FillPath(fill, cloud);
+        graphics.DrawPath(stroke, cloud);
+        graphics.DrawLine(stroke, 24, 34, 24, 16);
+        graphics.DrawLines(stroke,
+        [
+            new PointF(17.5f, 22.5f),
+            new PointF(24, 16),
+            new PointF(30.5f, 22.5f)
+        ]);
+        graphics.DrawLine(detail, 6, 40, 42, 40);
+        graphics.DrawLine(detail, 11, 44, 37, 44);
+        graphics.FillEllipse(solid, 5, 24, 3, 3);
+    }
+
+    private static void DrawAppPreferencesFeature(
+        Graphics graphics,
+        Brush fill,
+        Pen stroke,
+        Pen detail,
+        Brush solid)
+    {
+        using var window = RoundedPanel.CreateRoundedPath(new Rectangle(4, 6, 40, 33), 5);
+        graphics.FillPath(fill, window);
+        graphics.DrawPath(stroke, window);
+        graphics.DrawLine(detail, 4, 16, 44, 16);
+        graphics.FillEllipse(solid, 9, 10, 2.5f, 2.5f);
+        graphics.FillEllipse(solid, 14, 10, 2.5f, 2.5f);
+        graphics.DrawLine(detail, 10, 23, 38, 23);
+        graphics.DrawLine(detail, 10, 31, 38, 31);
+        graphics.DrawLine(detail, 19, 19, 19, 27);
+        graphics.DrawLine(detail, 30, 27, 30, 35);
+        graphics.FillEllipse(solid, 16.2f, 20.2f, 5.6f, 5.6f);
+        graphics.FillEllipse(solid, 27.2f, 28.2f, 5.6f, 5.6f);
+        graphics.DrawLine(detail, 18, 44, 30, 44);
+        graphics.DrawLine(detail, 24, 39, 24, 44);
+    }
 }
 
 internal sealed class BrandIconTile : Control
 {
-    public BrandGlyph Glyph { get; set; }
+    private BrandGlyph _glyph;
+
+    public BrandGlyph Glyph
+    {
+        get => _glyph;
+        set
+        {
+            if (_glyph == value) return;
+            _glyph = value;
+            Invalidate();
+        }
+    }
 
     public BrandIconTile()
     {
         DoubleBuffered = true;
+        ResizeRedraw = true;
         TabStop = false;
         SetStyle(ControlStyles.Selectable, false);
-        Size = new Size(52, 52);
+        Size = new Size(64, 64);
+        BackColor = ClipCordTheme.SettingsCard;
         AccessibleRole = AccessibleRole.Graphic;
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         if (Width <= 1 || Height <= 1) return;
+        eventArgs.Graphics.Clear(BackColor);
         eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
         var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
-        using var path = RoundedPanel.CreateRoundedPath(bounds, 11);
-        using var fill = new LinearGradientBrush(bounds, ClipCordTheme.Coral, Color.FromArgb(255, 111, 82), 45f);
+        var cornerRadius = Math.Max(8, Math.Min(14, Math.Min(Width, Height) / 4));
+        using var path = RoundedPanel.CreateRoundedPath(bounds, cornerRadius);
+        var (start, end) = GetPalette(Glyph);
+        using var fill = new LinearGradientBrush(bounds, start, end, 45f);
         eventArgs.Graphics.FillPath(fill, path);
-        BrandGlyphControl.DrawGlyph(
+        using var sheen = new LinearGradientBrush(
+            bounds,
+            Color.FromArgb(50, Color.White),
+            Color.FromArgb(0, Color.White),
+            120f);
+        eventArgs.Graphics.FillPath(sheen, path);
+        using var border = new Pen(Color.FromArgb(72, Color.White), Math.Max(1f, Math.Min(Width, Height) / 64f));
+        eventArgs.Graphics.DrawPath(border, path);
+        BrandGlyphControl.DrawFeatureGlyph(
             eventArgs.Graphics,
-            Rectangle.Inflate(bounds, -9, -9),
+            bounds,
             Glyph,
-            Color.White,
-            2.1f);
+            SystemInformation.HighContrast ? SystemColors.HighlightText : Color.White);
+    }
+
+    private static (Color Start, Color End) GetPalette(BrandGlyph glyph)
+    {
+        if (SystemInformation.HighContrast)
+        {
+            return (SystemColors.Highlight, SystemColors.Highlight);
+        }
+
+        return glyph switch
+        {
+            BrandGlyph.ClipSource => (Color.FromArgb(243, 96, 84), Color.FromArgb(220, 69, 105)),
+            BrandGlyph.DiscordDestination => (Color.FromArgb(88, 101, 242), Color.FromArgb(143, 66, 245)),
+            BrandGlyph.UploadBehavior => (Color.FromArgb(76, 115, 241), Color.FromArgb(153, 71, 236)),
+            BrandGlyph.AppPreferences => (Color.FromArgb(239, 91, 84), Color.FromArgb(148, 68, 238)),
+            _ => (ClipCordTheme.Coral, Color.FromArgb(255, 111, 82))
+        };
     }
 }
 

@@ -4,21 +4,37 @@ using System.Text.Json;
 using System.Windows.Forms;
 using ClipsToDiscord;
 
-Application.SetHighDpiMode(HighDpiMode.SystemAware);
-Application.EnableVisualStyles();
-Application.SetCompatibleTextRenderingDefault(false);
-
-if (args.Length == 2 && args[0].Equals("--render-mode-feedback", StringComparison.Ordinal))
+try
 {
-    RenderModeFeedbackPreviews(args[1]);
+    Application.SetHighDpiMode(HighDpiMode.SystemAware);
+    Application.EnableVisualStyles();
+    Application.SetCompatibleTextRenderingDefault(false);
+
+    if (args.Length == 2 && args[0].Equals("--render-mode-feedback", StringComparison.Ordinal))
+    {
+        RenderModeFeedbackPreviews(args[1]);
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-settings", StringComparison.Ordinal))
+    {
+        RenderSettingsPreview(args[1]);
+        return;
+    }
+}
+catch (Exception exception)
+{
+    Console.Error.WriteLine(exception);
+    Environment.ExitCode = 1;
     return;
 }
 
-var temporaryRoot = Path.Combine(Path.GetTempPath(), "ClipsToDiscordTests", Guid.NewGuid().ToString("N"));
-Directory.CreateDirectory(temporaryRoot);
+string? temporaryRoot = null;
 
 try
 {
+    temporaryRoot = Path.Combine(Path.GetTempPath(), "ClipsToDiscordTests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(temporaryRoot);
     var existingCaseRoot = Path.Combine(temporaryRoot, "existing-case");
     Directory.CreateDirectory(existingCaseRoot);
     var capitalizedFolder = Directory.CreateDirectory(Path.Combine(existingCaseRoot, "Uploaded")).FullName;
@@ -773,9 +789,25 @@ try
 
     Console.WriteLine("All smoke tests passed.");
 }
+catch (Exception exception)
+{
+    Console.Error.WriteLine(exception);
+    Environment.ExitCode = 1;
+}
 finally
 {
-    Directory.Delete(temporaryRoot, recursive: true);
+    try
+    {
+        if (temporaryRoot is not null && Directory.Exists(temporaryRoot))
+        {
+            Directory.Delete(temporaryRoot, recursive: true);
+        }
+    }
+    catch (Exception exception)
+    {
+        Console.Error.WriteLine($"Smoke-test cleanup failed: {exception}");
+        Environment.ExitCode = 1;
+    }
 }
 
 static void Assert(bool condition, string message)
@@ -1346,6 +1378,9 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertControlsFit(form);
             AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, designedOpeningSize);
             AssertSettingsTextFieldsAligned(form);
+            AssertSettingsCardGrid(form);
+            AssertSettingsFeatureIcons(form);
+            AssertCompressionTargetPickerInteraction(form);
             AssertCriticalTextFits(form);
             AssertAccessibility(form);
             AssertOpaqueCustomControlsPaintEveryPixel(form);
@@ -1387,6 +1422,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.Show();
             Application.DoEvents();
             AssertControlsFit(form);
+            AssertSettingsCardGrid(form);
+            AssertSettingsTextFieldsAligned(form);
             AssertCriticalTextFits(form);
             form.Hide();
 
@@ -1818,6 +1855,226 @@ static void AssertSettingsTextFieldsAligned(SettingsForm form)
     Assert(screenBounds.Select(bounds => bounds.Left).Distinct().Count() == 1 &&
            screenBounds.Select(bounds => bounds.Height).Distinct().Count() == 1,
         $"Clip source and Discord destination fields must share one left edge and height: {string.Join(", ", screenBounds)}.");
+    Assert(screenBounds.All(bounds => bounds.Width >= 240),
+        $"Every primary Settings field must remain usable rather than merely unclipped: {string.Join(", ", screenBounds)}.");
+}
+
+static void AssertSettingsCardGrid(SettingsForm form)
+{
+    var cards = new[]
+    {
+        "ClipSourceCard",
+        "DiscordDestinationCard",
+        "UploadBehaviorCard",
+        "AppPreferencesCard"
+    }.ToDictionary(
+        name => name,
+        name => EnumerateControls(form).Single(control => control.Name == name),
+        StringComparer.Ordinal);
+
+    var bounds = cards.ToDictionary(
+        pair => pair.Key,
+        pair => new Rectangle(pair.Value.PointToScreen(Point.Empty), pair.Value.Size),
+        StringComparer.Ordinal);
+    var source = bounds["ClipSourceCard"];
+    var discord = bounds["DiscordDestinationCard"];
+    var upload = bounds["UploadBehaviorCard"];
+    var preferences = bounds["AppPreferencesCard"];
+
+    Assert(source.Left == discord.Left && source.Right == discord.Right && source.Width == discord.Width,
+        $"Clip source and Discord destination cards must have identical full-width bounds: source={source}, discord={discord}.");
+    Assert(Math.Abs(upload.Width - preferences.Width) <= 1 &&
+           Math.Abs(upload.Top - preferences.Top) <= 1 &&
+           Math.Abs(upload.Bottom - preferences.Bottom) <= 1,
+        $"Upload behavior and App preferences must form one equal-height, equal-width row: upload={upload}, preferences={preferences}.");
+    Assert(upload.Right < preferences.Left &&
+           upload.Left == source.Left &&
+           Math.Abs(preferences.Right - source.Right) <= 1,
+        $"The lower Settings cards must divide the same width as the full cards with a positive gap: source={source}, upload={upload}, preferences={preferences}.");
+
+    var uploadTail = GetUnpaintedCardTail(cards["UploadBehaviorCard"]);
+    var preferencesTail = GetUnpaintedCardTail(cards["AppPreferencesCard"]);
+    var uploadTailLimit = GetMaximumCardTail(cards["UploadBehaviorCard"]);
+    var preferencesTailLimit = GetMaximumCardTail(cards["AppPreferencesCard"]);
+    Assert(uploadTail <= uploadTailLimit && uploadTail <= (int)Math.Ceiling(upload.Height * .20) &&
+           preferencesTail <= preferencesTailLimit && preferencesTail <= (int)Math.Ceiling(preferences.Height * .20),
+        $"The lower Settings cards must hug their painted content instead of stretching into empty panels: uploadTail={uploadTail}/{upload.Height}, preferencesTail={preferencesTail}/{preferences.Height}.");
+
+    var compression = EnumerateControls(form)
+        .OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Compression target in megabytes");
+    var compressionHost = EnumerateControls(form)
+        .OfType<RoundedPanel>()
+        .Single(control => ReferenceEquals(control.Tag, compression));
+    var presetButton = EnumerateControls(form)
+        .OfType<OutlineButton>()
+        .Single(control => control.Name == "CompressionTargetPresetButton");
+    var expectedInputBackColor = SystemInformation.HighContrast ? SystemColors.Window : ClipCordTheme.SettingsField;
+    var expectedInputForeColor = SystemInformation.HighContrast ? SystemColors.WindowText : ClipCordTheme.ShellText;
+    var expectedButtonOutline = SystemInformation.HighContrast ? SystemColors.WindowText : Color.Transparent;
+    Assert(compression.BorderStyle == BorderStyle.None &&
+           compression.BackColor == expectedInputBackColor &&
+           compression.ForeColor == expectedInputForeColor &&
+           presetButton.SurfaceColor == expectedInputBackColor &&
+           presetButton.OutlineColor == expectedButtonOutline &&
+           presetButton.AccessibleRole == AccessibleRole.PushButton &&
+           !string.IsNullOrWhiteSpace(presetButton.AccessibleName),
+        "The compression selector must use a borderless dark editor and branded accessible preset button rather than native ComboBox chrome.");
+    Assert(!EnumerateControls(form).OfType<ComboBox>()
+               .Any(control => control.AccessibleName == "Compression target in megabytes"),
+        "The compression selector must not regress to native ComboBox chrome.");
+    Assert(SettingsForm.CompressionTargetPresets.SequenceEqual([5, 10, 25, 50, 75, 95, 100]),
+        "The branded compression picker must preserve the seven established preset choices.");
+    if (!SystemInformation.HighContrast)
+    {
+        using var bitmap = new Bitmap(compressionHost.Width, compressionHost.Height);
+        compressionHost.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        var darkPixels = 0;
+        var sampledPixels = 0;
+        for (var y = 2; y < bitmap.Height - 2; y++)
+        {
+            for (var x = 2; x < bitmap.Width - 2; x++)
+            {
+                var pixel = bitmap.GetPixel(x, y);
+                var luminance = (pixel.R * 299 + pixel.G * 587 + pixel.B * 114) / 1000;
+                if (luminance <= 100) darkPixels++;
+                sampledPixels++;
+            }
+        }
+        Assert(sampledPixels > 0 && darkPixels >= sampledPixels * .70,
+            $"The branded compression picker rendered an unexpected light surface: darkPixels={darkPixels}/{sampledPixels}.");
+    }
+}
+
+static int GetUnpaintedCardTail(Control card)
+{
+    var paintedBottom = EnumerateControls(card)
+        .Where(control => control.Width > 0 && control.Height > 0 &&
+                          control is Label or Button or TextBox or CheckBox or BrandIconTile)
+        .Select(control => GetLocationRelativeToAncestor(control, card).Y + control.Height)
+        .DefaultIfEmpty(0)
+        .Max();
+    return Math.Max(0, card.ClientSize.Height - paintedBottom);
+}
+
+static Point GetLocationRelativeToAncestor(Control control, Control ancestor)
+{
+    var x = 0;
+    var y = 0;
+    for (Control? current = control; current is not null && current != ancestor; current = current.Parent)
+    {
+        x += current.Left;
+        y += current.Top;
+    }
+    return new Point(x, y);
+}
+
+static int GetMaximumCardTail(Control card)
+{
+    var tile = EnumerateControls(card).OfType<BrandIconTile>().Single();
+    var scale = tile.Width / 64d;
+    return Math.Max(12, (int)Math.Ceiling(32 * scale));
+}
+
+static void AssertCompressionTargetPickerInteraction(SettingsForm form)
+{
+    var input = EnumerateControls(form)
+        .OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Compression target in megabytes");
+    var button = EnumerateControls(form)
+        .OfType<OutlineButton>()
+        .Single(control => control.Name == "CompressionTargetPresetButton");
+    var menuField = typeof(SettingsForm).GetField(
+        "_compressionTargetMenu",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var menu = (ContextMenuStrip)menuField.GetValue(form)!;
+    var expectedItems = SettingsForm.CompressionTargetPresets.Select(value => $"{value} MB").ToArray();
+    Assert(menu.Items.Cast<ToolStripItem>().Select(item => item.Text).SequenceEqual(expectedItems),
+        "The compression preset popup must expose the seven established choices in order.");
+
+    button.PerformClick();
+    Application.DoEvents();
+    Assert(menu.Visible, "The compression preset button must open its branded popup.");
+    menu.Close();
+
+    var originalText = input.Text;
+    menu.Items.Cast<ToolStripItem>().Single(item => item.Text == "25 MB").PerformClick();
+    Assert(input.Text == "25 MB", "Choosing a compression preset must update the editable target.");
+    input.Text = "37 MB";
+    Assert(SettingsForm.TryParseCompressionTarget(input.Text, out var arbitraryTarget) && arbitraryTarget == 37,
+        "The branded picker must preserve direct arbitrary 1-100 MB entry.");
+
+    var keyArgs = new KeyEventArgs(Keys.F4);
+    typeof(Control).GetMethod(
+            "OnKeyDown",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(input, [keyArgs]);
+    Application.DoEvents();
+    Assert(keyArgs.Handled && keyArgs.SuppressKeyPress && menu.Visible,
+        "F4 must open the compression preset popup without inserting text.");
+    menu.Close();
+    input.Text = originalText;
+}
+
+static void AssertSettingsFeatureIcons(SettingsForm form, int minimumSide = 64)
+{
+    var expected = new Dictionary<string, BrandGlyph>(StringComparer.Ordinal)
+    {
+        ["ClipSourceCardIcon"] = BrandGlyph.ClipSource,
+        ["DiscordDestinationCardIcon"] = BrandGlyph.DiscordDestination,
+        ["UploadBehaviorCardIcon"] = BrandGlyph.UploadBehavior,
+        ["AppPreferencesCardIcon"] = BrandGlyph.AppPreferences
+    };
+    var tiles = EnumerateControls(form).OfType<BrandIconTile>().ToArray();
+    Assert(tiles.Length == expected.Count,
+        $"Settings must expose exactly four feature icon tiles; found {tiles.Length}.");
+    Assert(tiles.Select(tile => tile.Size).Distinct().Count() == 1 &&
+           tiles[0].Width >= minimumSide &&
+           tiles[0].Height >= minimumSide,
+        $"All feature icons must share the approved enlarged size of at least {minimumSide}px: {string.Join(", ", tiles.Select(tile => $"{tile.Name}={tile.Size}"))}.");
+
+    var signatures = new HashSet<ulong>();
+    foreach (var tile in tiles)
+    {
+        Assert(expected.TryGetValue(tile.Name, out var expectedGlyph) && tile.Glyph == expectedGlyph,
+            $"Feature icon '{tile.Name}' uses {tile.Glyph} instead of its dedicated {expectedGlyph} artwork.");
+        Assert(tile.AccessibleRole == AccessibleRole.Graphic && !string.IsNullOrWhiteSpace(tile.AccessibleName),
+            $"Feature icon '{tile.Name}' must remain a named, noninteractive graphic.");
+
+        using var bitmap = new Bitmap(tile.Width, tile.Height);
+        tile.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        var brightCount = 0;
+        var left = bitmap.Width;
+        var top = bitmap.Height;
+        var right = -1;
+        var bottom = -1;
+        ulong signature = 1469598103934665603;
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                var pixel = bitmap.GetPixel(x, y);
+                var bright = pixel.R >= 210 && pixel.G >= 210 && pixel.B >= 210;
+                signature ^= bright ? (byte)1 : (byte)0;
+                signature *= 1099511628211;
+                if (!bright) continue;
+                brightCount++;
+                left = Math.Min(left, x);
+                top = Math.Min(top, y);
+                right = Math.Max(right, x);
+                bottom = Math.Max(bottom, y);
+            }
+        }
+
+        Assert(brightCount >= bitmap.Width * bitmap.Height / 100 && right > left && bottom > top,
+            $"Feature icon '{tile.Name}' did not paint enough high-contrast detail ({brightCount} pixels).");
+        Assert(right - left + 1 >= bitmap.Width * .45 && bottom - top + 1 >= bitmap.Height * .45,
+            $"Feature icon '{tile.Name}' is still visually undersized: detailBounds={Rectangle.FromLTRB(left, top, right + 1, bottom + 1)}, tile={bitmap.Size}.");
+        signatures.Add(signature);
+    }
+
+    Assert(signatures.Count == expected.Count,
+        "Each Settings section must use distinct feature artwork; duplicate rendered icon masks were found.");
 }
 
 static void AssertSettingsRoundTrip(AppSettings original)
@@ -1831,7 +2088,7 @@ static void AssertSettingsRoundTrip(AppSettings original)
     ((TextBox)controls.Single(control => control.AccessibleName == "Clips folder")).Text = changedFolder;
     ((TextBox)controls.Single(control => control.AccessibleName == "Discord webhook URL")).Text = changedWebhook;
     ((TextBox)controls.Single(control => control.AccessibleName == "Uploader name")).Text = "Round Trip User";
-    ((ComboBox)controls.Single(control => control.AccessibleName == "Compression target in megabytes")).Text = "37 MB";
+    ((TextBox)controls.Single(control => control.AccessibleName == "Compression target in megabytes")).Text = "37 MB";
     ((TextBox)controls.Single(control => control.AccessibleName == "Global upload-mode shortcut")).Text =
         "Ctrl + Shift + U";
     var startup = controls.OfType<CheckBox>().Single(control => control.Text == "Start with Windows");
@@ -1861,7 +2118,8 @@ static void AssertCriticalTextFits(Form form)
         "Discord destination",
         "Uploader name",
         "Webhook URL",
-        "Upload preferences",
+        "Upload behavior",
+        "App preferences",
         "Compression target",
         "Mode shortcut",
         "Upload new clips to Discord",
@@ -1984,9 +2242,11 @@ static void AssertOpaqueCustomControlsPaintEveryPixel(Form form)
 static void AssertDpiRefit(SettingsForm form)
 {
     var compression = EnumerateControls(form)
-        .OfType<ComboBox>()
+        .OfType<TextBox>()
         .Single(control => control.AccessibleName == "Compression target in megabytes");
-    var host = (RoundedPanel)compression.Parent!;
+    var host = EnumerateControls(form)
+        .OfType<RoundedPanel>()
+        .Single(control => ReferenceEquals(control.Tag, compression));
     var originalFont = compression.Font;
     compression.Font = ClipCordTheme.InterfaceFont(18f);
     host.MaximumSize = Size.Empty;
@@ -1994,7 +2254,7 @@ static void AssertDpiRefit(SettingsForm form)
     host.Height = 1;
     form.RefitDpiSensitiveControls();
     Assert(host.Height >= compression.PreferredHeight + host.Padding.Vertical,
-        "DPI refitting must recompute the compression host from the ComboBox preferred height.");
+        "DPI refitting must recompute the compression host from the editable compression field's preferred height.");
     compression.Font = originalFont;
     form.RefitDpiSensitiveControls();
 }
@@ -2124,6 +2384,9 @@ static void AssertModeFeedbackOverlayContract()
                "New clips will stay on this PC.",
                ModeFeedbackTone.LocalOnlyEnabled),
         "Shortcut feedback must identify the confirmed route unambiguously.");
+    Assert(ModeFeedbackOverlay.GetGlyph(ModeFeedbackTone.UploadsEnabled) == BrandGlyph.DiscordDestination &&
+           ModeFeedbackOverlay.GetGlyph(ModeFeedbackTone.LocalOnlyEnabled) == BrandGlyph.Shield,
+        "In-game route feedback must use the corrected Discord destination artwork and retain the local-only shield.");
 
     Assert(ModeFeedbackOverlay.RequiredExtendedStyles == 0x080000A0,
         "The in-game mode indicator must retain the non-activating, tool-window, and click-through styles.");
@@ -2293,6 +2556,30 @@ static void RenderModeFeedbackPreviews(string outputDirectory)
     if (failure is not null) throw new InvalidOperationException("Mode feedback preview rendering failed.", failure);
 }
 
+static void RenderSettingsPreview(string outputPath)
+{
+    var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+    if (!string.IsNullOrWhiteSpace(outputDirectory)) Directory.CreateDirectory(outputDirectory);
+    using var form = new SettingsForm(
+        new AppSettings(
+            @"C:\Users\Player\Videos\Game Clips",
+            "https://discord.com/api/webhooks/123456/preview-token",
+            true,
+            AppSettings.DefaultCompressionTargetMb,
+            "PlayerOne",
+            true),
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        watcherStatusProvider: () => "Watching");
+    form.Show();
+    Application.DoEvents();
+    AssertSettingsCardGrid(form);
+    AssertSettingsFeatureIcons(form);
+    using var bitmap = new Bitmap(form.Width, form.Height);
+    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+    bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+    form.Hide();
+}
+
 static void AssertSettingsScaledLayout(AppSettings settings, float scale)
 {
     var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
@@ -2329,6 +2616,9 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         Application.DoEvents();
         AssertControlsFit(form);
         if (scale <= 1.5f) AssertSettingsCardsOpenWithoutScrolling(form);
+        AssertSettingsCardGrid(form);
+        AssertSettingsTextFieldsAligned(form);
+        AssertSettingsFeatureIcons(form, (int)Math.Round(64 * scale));
         AssertCriticalTextFits(form);
 
         var hotkeyField = EnumerateControls(form)
