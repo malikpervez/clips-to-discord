@@ -183,7 +183,10 @@ internal sealed class ModeFeedbackOverlay : Form
         graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
         var scale = Math.Clamp(_presentationDpi, 96, 384) / 96f;
         var bounds = new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
-        var accent = GetAccentColor(_presentation.Tone);
+        var highContrast = SystemInformation.HighContrast;
+        var accent = highContrast
+            ? SystemColors.Highlight
+            : GetAccentColor(_presentation.Tone);
 
         using (var surfacePath = RoundedPanel.CreateRoundedPath(bounds, Math.Max(12, (int)Math.Round(18 * scale))))
         using (var surface = new LinearGradientBrush(
@@ -213,20 +216,38 @@ internal sealed class ModeFeedbackOverlay : Form
         using (var tileBrush = new LinearGradientBrush(
                    tile,
                    accent,
-                   Color.FromArgb(
-                       Math.Min(255, accent.R + 22),
-                       Math.Min(255, accent.G + 18),
-                       Math.Min(255, accent.B + 22)),
+                   highContrast
+                       ? accent
+                       : Color.FromArgb(
+                           Math.Min(255, accent.R + 22),
+                           Math.Min(255, accent.G + 18),
+                           Math.Min(255, accent.B + 22)),
                    45f))
         {
             graphics.FillPath(tileBrush, tilePath);
         }
-        BrandGlyphControl.DrawGlyph(
-            graphics,
-            Rectangle.Inflate(tile, -(int)Math.Round(14 * scale), -(int)Math.Round(14 * scale)),
-            GetGlyph(_presentation.Tone),
-            Color.White,
-            Math.Max(1.8f, 2.1f * scale));
+        var glyph = GetGlyph(_presentation.Tone);
+        var glyphColor = highContrast ? SystemColors.HighlightText : Color.White;
+        if (glyph == BrandGlyph.DiscordDestination)
+        {
+            // Feature artwork already carries its own normalized inset. Give the
+            // detailed Discord mark more of the notification tile so its eyes,
+            // smile, and silhouette remain legible at 100% display scaling.
+            BrandGlyphControl.DrawFeatureGlyph(
+                graphics,
+                Rectangle.Inflate(tile, -(int)Math.Round(8 * scale), -(int)Math.Round(8 * scale)),
+                glyph,
+                glyphColor);
+        }
+        else
+        {
+            BrandGlyphControl.DrawGlyph(
+                graphics,
+                Rectangle.Inflate(tile, -(int)Math.Round(14 * scale), -(int)Math.Round(14 * scale)),
+                glyph,
+                glyphColor,
+                Math.Max(1.8f, 2.1f * scale));
+        }
 
         var textLeft = tile.Right + Math.Max(14, (int)Math.Round(18 * scale));
         var textRight = Width - Math.Max(16, (int)Math.Round(20 * scale));
@@ -304,9 +325,9 @@ internal sealed class ModeFeedbackOverlay : Form
         _ => ClipCordTheme.Violet
     };
 
-    private static BrandGlyph GetGlyph(ModeFeedbackTone tone) => tone switch
+    internal static BrandGlyph GetGlyph(ModeFeedbackTone tone) => tone switch
     {
-        ModeFeedbackTone.UploadsEnabled => BrandGlyph.Destination,
+        ModeFeedbackTone.UploadsEnabled => BrandGlyph.DiscordDestination,
         ModeFeedbackTone.LocalOnlyEnabled => BrandGlyph.Shield,
         ModeFeedbackTone.Error => BrandGlyph.Close,
         ModeFeedbackTone.Warning => BrandGlyph.About,

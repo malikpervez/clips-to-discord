@@ -20,6 +20,8 @@ internal sealed class SettingsForm : Form
     private static readonly Regex CompressionTargetPattern = new(
         @"^\s*(?<value>\d{1,3})\s*(?:MB)?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    internal static IReadOnlyList<int> CompressionTargetPresets { get; } =
+        Array.AsReadOnly([5, 10, 25, 50, 75, 95, 100]);
 
     private const int WmNcHitTest = 0x0084;
     private const int WmNcLButtonDown = 0x00A1;
@@ -70,27 +72,46 @@ internal sealed class SettingsForm : Form
     private readonly TextBox _folderText = CreateTextBox("Clips folder");
     private readonly TextBox _webhookText = CreateTextBox("Discord webhook URL", usePasswordCharacter: true);
     private readonly TextBox _uploaderNameText = CreateTextBox("Uploader name");
-    private readonly ComboBox _compressionTarget = new()
+    private readonly TextBox _compressionTarget = CreateTextBox("Compression target in megabytes");
+    private readonly OutlineButton _compressionTargetPresetButton = new()
     {
-        DropDownStyle = ComboBoxStyle.DropDown,
-        FlatStyle = FlatStyle.Flat,
-        Width = 140,
-        Dock = DockStyle.Fill,
-        Font = ClipCordTheme.InterfaceFont(10.5f),
-        BackColor = Color.White,
-        ForeColor = ClipCordTheme.Text,
-        IntegralHeight = true,
-        MaxDropDownItems = 7,
-        AccessibleName = "Compression target in megabytes"
+        Name = "CompressionTargetPresetButton",
+        Text = "▾",
+        AccessibleName = "Choose a compression target preset",
+        AccessibleRole = AccessibleRole.PushButton,
+        AutoSize = false,
+        Size = new Size(32, 30),
+        Font = ClipCordTheme.InterfaceFont(11f),
+        SurfaceColor = ClipCordTheme.SettingsField,
+        HoverColor = ClipCordTheme.SettingsButtonHover,
+        OutlineColor = Color.Transparent,
+        ForeColor = ClipCordTheme.ShellText,
+        Margin = Padding.Empty
+    };
+    private readonly ContextMenuStrip _compressionTargetMenu = new()
+    {
+        Name = "CompressionTargetPresetMenu",
+        ShowImageMargin = false,
+        ShowCheckMargin = false,
+        AutoSize = true,
+        MinimumSize = new Size(120, 0),
+        Padding = new Padding(3)
     };
     private readonly TextBox _modeToggleHotkeyText = CreateTextBox("Global upload-mode shortcut");
     private readonly OutlineButton _modeToggleHotkeyAction = CreateSecondaryButton("Disable", 92);
-    private readonly ToggleSwitch _startWithWindows = new() { Text = "Start with Windows" };
+    private readonly ToggleSwitch _startWithWindows = new()
+    {
+        Text = "Start with Windows",
+        BackColor = ClipCordTheme.SettingsCard,
+        ForeColor = ClipCordTheme.ShellText
+    };
     private readonly ToggleSwitch _uploadToDiscord = new()
     {
         Name = "UploadToDiscordToggle",
         Text = "Upload new clips to Discord",
-        AccessibleName = "Upload new clips to Discord"
+        AccessibleName = "Upload new clips to Discord",
+        BackColor = ClipCordTheme.SettingsCard,
+        ForeColor = ClipCordTheme.ShellText
     };
     private readonly Label _uploadModeHelper = CreateHelper(string.Empty);
     private readonly Label _privacySummaryLabel = new()
@@ -178,8 +199,8 @@ internal sealed class SettingsForm : Form
         _webhookText.Text = settings.WebhookUrl;
         _uploaderNameText.MaxLength = AppSettings.MaximumUploaderNameLength;
         _uploaderNameText.Text = AppSettings.NormalizeUploaderName(settings.UploaderName);
-        _compressionTarget.Items.AddRange(["5 MB", "10 MB", "25 MB", "50 MB", "75 MB", "95 MB", "100 MB"]);
         _compressionTarget.Text = $"{Math.Clamp(settings.CompressionTargetMb, 1, 100)} MB";
+        ConfigureCompressionTargetPicker();
         _modeToggleHotkeyText.ReadOnly = true;
         _modeToggleHotkeyText.ShortcutsEnabled = false;
         _modeToggleHotkeyText.Text = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
@@ -625,81 +646,87 @@ internal sealed class SettingsForm : Form
             Name = "SettingsCards",
             Dock = DockStyle.Fill,
             AutoScroll = true,
-            ColumnCount = 1,
-            RowCount = 3,
+            ColumnCount = 2,
+            RowCount = 4,
             Margin = Padding.Empty,
-            Padding = new Padding(26, 12, 26, 12),
+            Padding = new Padding(26, 5, 26, 5),
             BackColor = ClipCordTheme.Shell
         };
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        cards.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         cards.Controls.Add(BuildClipSourceCard(), 0, 0);
+        cards.SetColumnSpan(cards.GetControlFromPosition(0, 0)!, 2);
         cards.Controls.Add(BuildDiscordCard(), 0, 1);
-        cards.Controls.Add(BuildUploadCard(), 0, 2);
+        cards.SetColumnSpan(cards.GetControlFromPosition(0, 1)!, 2);
+        cards.Controls.Add(BuildUploadBehaviorCard(), 0, 2);
+        cards.Controls.Add(BuildAppPreferencesCard(), 1, 2);
         return cards;
     }
 
     private Control BuildClipSourceCard()
     {
-        var layout = CreateCardContent(3);
+        var layout = CreateCardContent(2);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var heading = CreateCardHeading("Clip source");
-        layout.Controls.Add(heading, 0, 0);
-        layout.SetColumnSpan(heading, 2);
-        layout.Controls.Add(CreateInlineFieldLabel("Clips folder"), 0, 1);
-        layout.Controls.Add(CreateFieldRow(CreateFieldHost(_folderText), _browseButton), 1, 1);
-        layout.Controls.Add(CreateHelper("New MP4 clips in this folder are detected automatically."), 1, 2);
-        return CreateCard(BrandGlyph.Folder, "Clip source settings", layout, new Padding(0, 0, 0, 12));
+        layout.Controls.Add(CreateInlineFieldLabel("Clips folder"), 0, 0);
+        layout.Controls.Add(CreateFieldRow(CreateFieldHost(_folderText), _browseButton), 1, 0);
+        layout.Controls.Add(CreateHelper("New MP4 clips in this folder are detected automatically."), 1, 1);
+        return CreateCard(
+            BrandGlyph.ClipSource,
+            "ClipSourceCard",
+            "Clip source settings",
+            "Clip source",
+            "Any folder that receives MP4 clips.",
+            layout,
+            new Padding(0, 0, 0, 10),
+            148);
     }
 
     private Control BuildDiscordCard()
     {
-        var layout = CreateCardContent(6);
+        var layout = CreateCardContent(4);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 8));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
-        var heading = CreateCardHeading("Discord destination");
-        layout.Controls.Add(heading, 0, 0);
-        layout.SetColumnSpan(heading, 2);
-        layout.Controls.Add(CreateInlineFieldLabel("Uploader name"), 0, 1);
-        layout.Controls.Add(CreateFieldHost(_uploaderNameText), 1, 1);
-        layout.Controls.Add(CreateInlineFieldLabel("Webhook URL"), 0, 3);
-        layout.Controls.Add(CreateFieldRow(CreateFieldHost(_webhookText), _testButton), 1, 3);
-        layout.Controls.Add(CreateHelper("Encrypted for this Windows user."), 1, 4);
-        return CreateCard(BrandGlyph.Destination, "Discord destination settings", layout, new Padding(0, 0, 0, 12));
+        layout.Controls.Add(CreateInlineFieldLabel("Uploader name"), 0, 0);
+        layout.Controls.Add(CreateFieldHost(_uploaderNameText), 1, 0);
+        layout.Controls.Add(CreateInlineFieldLabel("Webhook URL"), 0, 2);
+        layout.Controls.Add(CreateFieldRow(CreateFieldHost(_webhookText), _testButton), 1, 2);
+        layout.Controls.Add(CreateHelper("Encrypted for this Windows user."), 1, 3);
+        return CreateCard(
+            BrandGlyph.DiscordDestination,
+            "DiscordDestinationCard",
+            "Discord destination settings",
+            "Discord destination",
+            "Identify who sent the clip and where it goes.",
+            layout,
+            new Padding(0, 0, 0, 10),
+            208);
     }
 
-    private Control BuildUploadCard()
+    private Control BuildUploadBehaviorCard()
     {
-        var layout = CreateCardContent(5);
-        layout.ColumnCount = 2;
-        layout.ColumnStyles.Clear();
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        var layout = CreateCardContent(3);
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var heading = CreateCardHeading("Upload preferences");
-        layout.Controls.Add(heading, 0, 0);
-        layout.SetColumnSpan(heading, 2);
-
+        _uploadToDiscord.Margin = Padding.Empty;
+        layout.Controls.Add(_uploadToDiscord, 0, 0);
+        _uploadModeHelper.Margin = new Padding(0, 0, 0, 6);
+        layout.Controls.Add(_uploadModeHelper, 0, 1);
         var compression = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -707,79 +734,95 @@ internal sealed class SettingsForm : Form
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
-            Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            Margin = new Padding(0, 4, 0, 0),
+            BackColor = ClipCordTheme.SettingsCard
         };
         var compressionLabel = new Label
         {
             Text = "Compression target",
             AutoSize = true,
-            ForeColor = ClipCordTheme.Text,
+            ForeColor = ClipCordTheme.ShellText,
             Font = ClipCordTheme.InterfaceFont(10f),
             Margin = new Padding(0, 11, 14, 0)
         };
         var compressionHost = CreateCompressionHost();
         compression.Controls.Add(compressionLabel);
         compression.Controls.Add(compressionHost);
-        layout.Controls.Add(compression, 0, 1);
-        layout.Controls.Add(BuildModeHotkeyEditor(), 1, 1);
-        _uploadToDiscord.Margin = new Padding(0, 4, 0, 0);
-        layout.Controls.Add(_uploadToDiscord, 0, 2);
-        layout.SetColumnSpan(_uploadToDiscord, 2);
-        _uploadModeHelper.Margin = new Padding(0, 0, 0, 2);
-        layout.Controls.Add(_uploadModeHelper, 0, 3);
-        layout.SetColumnSpan(_uploadModeHelper, 2);
-        _checkUpdatesButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-        _checkUpdatesButton.Margin = new Padding(0, 2, 0, 0);
-        layout.Controls.Add(_checkUpdatesButton, 1, 4);
-        _startWithWindows.Margin = new Padding(0, 2, 0, 0);
-        layout.Controls.Add(_startWithWindows, 0, 4);
-        return CreateCard(BrandGlyph.Sliders, "Upload preferences", layout, Padding.Empty);
+        layout.Controls.Add(compression, 0, 2);
+        return CreateCard(
+            BrandGlyph.UploadBehavior,
+            "UploadBehaviorCard",
+            "Upload behavior settings",
+            "Upload behavior",
+            "Control routing and preferred quality.",
+            layout,
+            new Padding(0, 0, 6, 0),
+            190);
     }
 
-    private Control BuildModeHotkeyEditor()
+    private Control BuildAppPreferencesCard()
     {
-        var editor = new FlowLayoutPanel
+        var layout = CreateCardContent(3);
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var shortcutLabel = CreateInlineFieldLabel("Mode shortcut");
+        shortcutLabel.Margin = new Padding(0, 0, 0, 4);
+        layout.Controls.Add(shortcutLabel, 0, 0);
+        var shortcutRow = CreateFieldRow(CreateFieldHost(_modeToggleHotkeyText), _modeToggleHotkeyAction);
+        layout.Controls.Add(shortcutRow, 0, 1);
+
+        var actions = new BufferedTableLayoutPanel
         {
             Name = "ModeHotkeyEditor",
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0, 8, 0, 0),
+            BackColor = ClipCordTheme.SettingsCard
         };
-        editor.Controls.Add(new Label
-        {
-            Text = "Mode shortcut",
-            AutoSize = true,
-            ForeColor = ClipCordTheme.Text,
-            Font = ClipCordTheme.InterfaceFont(10f),
-            Margin = new Padding(0, 11, 14, 0)
-        });
-        var host = CreateFieldHost(_modeToggleHotkeyText);
-        host.Dock = DockStyle.None;
-        host.Width = 175;
-        host.MinimumSize = new Size(175, host.MinimumSize.Height);
-        host.MaximumSize = new Size(175, host.MaximumSize.Height);
-        host.Margin = new Padding(0, 2, 0, 0);
-        editor.Controls.Add(host);
-        _modeToggleHotkeyAction.Margin = new Padding(8, 2, 0, 0);
-        editor.Controls.Add(_modeToggleHotkeyAction);
-        return editor;
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+        actions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _startWithWindows.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+        _startWithWindows.Margin = new Padding(0, 2, 0, 0);
+        _checkUpdatesButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        _checkUpdatesButton.Margin = Padding.Empty;
+        actions.Controls.Add(_startWithWindows, 0, 0);
+        actions.Controls.Add(_checkUpdatesButton, 1, 0);
+        layout.Controls.Add(actions, 0, 2);
+        return CreateCard(
+            BrandGlyph.AppPreferences,
+            "AppPreferencesCard",
+            "App preferences settings",
+            "App preferences",
+            "Startup, shortcut, and updates.",
+            layout,
+            new Padding(6, 0, 0, 0),
+            190);
     }
 
-    private static RoundedPanel CreateCard(BrandGlyph glyph, string accessibleName, Control content, Padding margin)
+    private static RoundedPanel CreateCard(
+        BrandGlyph glyph,
+        string name,
+        string accessibleName,
+        string title,
+        string subtitle,
+        Control content,
+        Padding margin,
+        int minimumHeight)
     {
         var card = new RoundedPanel
         {
+            Name = name,
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(0, accessibleName.StartsWith("Discord", StringComparison.Ordinal) ? 170 : 125),
-            BackColor = ClipCordTheme.Card,
-            BorderColor = ClipCordTheme.CardBorder,
+            MinimumSize = new Size(0, minimumHeight),
+            BackColor = ClipCordTheme.SettingsCard,
+            BorderColor = ClipCordTheme.SettingsCardBorder,
             CornerRadius = 16,
             Padding = new Padding(18, 10, 18, 10),
             Margin = margin,
@@ -790,23 +833,56 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2,
-            RowCount = 1,
-            BackColor = ClipCordTheme.Card,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = ClipCordTheme.SettingsCard,
             Margin = Padding.Empty,
             Padding = Padding.Empty
         };
-        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        shell.Controls.Add(new BrandIconTile
+        var heading = new BufferedTableLayoutPanel
         {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = ClipCordTheme.SettingsCard,
+            Margin = new Padding(0, 0, 0, 6),
+            Padding = Padding.Empty
+        };
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        heading.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        heading.Controls.Add(new BrandIconTile
+        {
+            Name = name + "Icon",
             Glyph = glyph,
             Anchor = AnchorStyles.Top | AnchorStyles.Left,
             Margin = new Padding(0, 0, 14, 0),
             AccessibleName = accessibleName + " icon"
         }, 0, 0);
-        shell.Controls.Add(content, 1, 0);
+        var headingCopy = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = ClipCordTheme.SettingsCard,
+            Margin = Padding.Empty,
+            Padding = new Padding(0, 7, 0, 0)
+        };
+        headingCopy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        headingCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        headingCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        headingCopy.Controls.Add(CreateCardHeading(title), 0, 0);
+        headingCopy.Controls.Add(CreateCardSubtitle(subtitle), 0, 1);
+        heading.Controls.Add(headingCopy, 1, 0);
+        shell.Controls.Add(heading, 0, 0);
+        shell.Controls.Add(content, 0, 1);
         card.Controls.Add(shell);
         return card;
     }
@@ -881,7 +957,7 @@ internal sealed class SettingsForm : Form
             RowCount = rows,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SettingsCard
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         return layout;
@@ -893,10 +969,22 @@ internal sealed class SettingsForm : Form
         Dock = DockStyle.Fill,
         AutoSize = true,
         AutoEllipsis = true,
-        ForeColor = ClipCordTheme.Text,
+        ForeColor = ClipCordTheme.ShellText,
         Font = ClipCordTheme.DisplayFont(14f, FontStyle.Bold),
         TextAlign = ContentAlignment.MiddleLeft,
         Margin = new Padding(0, 0, 0, 4)
+    };
+
+    private static Label CreateCardSubtitle(string text) => new()
+    {
+        Text = text,
+        Dock = DockStyle.Fill,
+        AutoSize = true,
+        AutoEllipsis = true,
+        ForeColor = ClipCordTheme.SettingsMutedText,
+        Font = ClipCordTheme.InterfaceFont(9f),
+        TextAlign = ContentAlignment.MiddleLeft,
+        Margin = Padding.Empty
     };
 
     private static Label CreateInlineFieldLabel(string text) => new()
@@ -905,7 +993,7 @@ internal sealed class SettingsForm : Form
         Dock = DockStyle.Fill,
         AutoSize = true,
         AutoEllipsis = true,
-        ForeColor = ClipCordTheme.Text,
+        ForeColor = ClipCordTheme.ShellText,
         Font = ClipCordTheme.InterfaceFont(10f),
         TextAlign = ContentAlignment.MiddleLeft,
         Margin = Padding.Empty
@@ -918,7 +1006,7 @@ internal sealed class SettingsForm : Form
         AutoSize = false,
         MinimumSize = new Size(0, ClipCordTheme.InterfaceFont(9f).Height + 4),
         AutoEllipsis = true,
-        ForeColor = ClipCordTheme.MutedText,
+        ForeColor = ClipCordTheme.SettingsMutedText,
         Font = ClipCordTheme.InterfaceFont(9f),
         TextAlign = ContentAlignment.MiddleLeft,
         Margin = Padding.Empty
@@ -929,8 +1017,8 @@ internal sealed class SettingsForm : Form
         var host = new RoundedPanel
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.White,
-            BorderColor = Color.FromArgb(202, 206, 215),
+            BackColor = ClipCordTheme.SettingsField,
+            BorderColor = ClipCordTheme.SettingsFieldBorder,
             CornerRadius = 7,
             Padding = new Padding(11, 7, 11, 5),
             Margin = Padding.Empty
@@ -948,17 +1036,97 @@ internal sealed class SettingsForm : Form
         var host = new RoundedPanel
         {
             Width = 170,
-            BackColor = Color.White,
-            BorderColor = Color.FromArgb(202, 206, 215),
+            BackColor = ClipCordTheme.SettingsField,
+            BorderColor = ClipCordTheme.SettingsFieldBorder,
             CornerRadius = 7,
             Padding = new Padding(10, 5, 6, 4),
             Margin = new Padding(0, 2, 0, 0)
         };
         host.Tag = _compressionTarget;
         FitFieldHost(host, _compressionTarget);
+        var picker = new BufferedTableLayoutPanel
+        {
+            Name = "CompressionTargetPicker",
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SettingsField
+        };
+        picker.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        picker.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 32));
+        picker.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _compressionTarget.Dock = DockStyle.Fill;
         _compressionTarget.Margin = Padding.Empty;
-        host.Controls.Add(_compressionTarget);
+        _compressionTargetPresetButton.Dock = DockStyle.Fill;
+        _compressionTargetPresetButton.Margin = Padding.Empty;
+        picker.Controls.Add(_compressionTarget, 0, 0);
+        picker.Controls.Add(_compressionTargetPresetButton, 1, 0);
+        host.Controls.Add(picker);
         return host;
+    }
+
+    private void ConfigureCompressionTargetPicker()
+    {
+        var highContrast = SystemInformation.HighContrast;
+        if (highContrast)
+        {
+            _compressionTarget.BackColor = SystemColors.Window;
+            _compressionTarget.ForeColor = SystemColors.WindowText;
+            _compressionTargetPresetButton.SurfaceColor = SystemColors.Window;
+            _compressionTargetPresetButton.HoverColor = SystemColors.Highlight;
+            _compressionTargetPresetButton.OutlineColor = SystemColors.WindowText;
+            _compressionTargetPresetButton.ForeColor = SystemColors.WindowText;
+        }
+        _compressionTargetMenu.BackColor = highContrast ? SystemColors.Window : ClipCordTheme.SettingsField;
+        _compressionTargetMenu.ForeColor = highContrast ? SystemColors.WindowText : ClipCordTheme.ShellText;
+        _compressionTargetMenu.Font = ClipCordTheme.InterfaceFont(10f);
+        _compressionTargetMenu.Renderer = highContrast
+            ? new ToolStripSystemRenderer()
+            : new ToolStripProfessionalRenderer(new CompressionMenuColorTable());
+        foreach (var value in CompressionTargetPresets)
+        {
+            var item = new ToolStripMenuItem($"{value} MB")
+            {
+                BackColor = _compressionTargetMenu.BackColor,
+                ForeColor = _compressionTargetMenu.ForeColor,
+                AccessibleName = $"Use {value} MB compression target"
+            };
+            item.Click += (_, _) =>
+            {
+                _compressionTarget.Text = $"{value} MB";
+                _compressionTarget.Focus();
+                _compressionTarget.SelectAll();
+            };
+            _compressionTargetMenu.Items.Add(item);
+        }
+
+        _compressionTargetPresetButton.Click += (_, _) => ShowCompressionTargetPresets();
+        _compressionTarget.KeyDown += HandleCompressionTargetKeyDown;
+        _toolTip.SetToolTip(_compressionTargetPresetButton, "Choose a common compression target");
+    }
+
+    private void HandleCompressionTargetKeyDown(object? sender, KeyEventArgs eventArgs)
+    {
+        if (eventArgs.KeyCode != Keys.F4 && !(eventArgs.Alt && eventArgs.KeyCode == Keys.Down)) return;
+        ShowCompressionTargetPresets();
+        eventArgs.Handled = true;
+        eventArgs.SuppressKeyPress = true;
+    }
+
+    private void ShowCompressionTargetPresets()
+    {
+        if (_compressionTargetMenu.Visible)
+        {
+            _compressionTargetMenu.Close();
+            return;
+        }
+
+        var preferredWidth = Math.Max(_compressionTargetMenu.MinimumSize.Width, _compressionTargetMenu.PreferredSize.Width);
+        _compressionTargetMenu.Show(
+            _compressionTargetPresetButton,
+            new Point(_compressionTargetPresetButton.Width - preferredWidth, _compressionTargetPresetButton.Height));
     }
 
     private static Control CreateFieldRow(Control field, Button action)
@@ -972,7 +1140,7 @@ internal sealed class SettingsForm : Form
             RowCount = 1,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SettingsCard
         };
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -1032,8 +1200,8 @@ internal sealed class SettingsForm : Form
         UseSystemPasswordChar = usePasswordCharacter,
         Font = ClipCordTheme.InterfaceFont(10.5f),
         BorderStyle = BorderStyle.None,
-        BackColor = Color.White,
-        ForeColor = ClipCordTheme.Text,
+        BackColor = ClipCordTheme.SettingsField,
+        ForeColor = ClipCordTheme.ShellText,
         AccessibleName = accessibleName
     };
 
@@ -1042,10 +1210,12 @@ internal sealed class SettingsForm : Form
         Text = text,
         Width = width,
         Height = 38,
-        SurfaceColor = Color.White,
-        HoverColor = Color.FromArgb(246, 243, 253),
-        OutlineColor = ClipCordTheme.CardBorder,
-        ForeColor = ClipCordTheme.Text,
+        SurfaceColor = ClipCordTheme.SettingsButton,
+        HoverColor = ClipCordTheme.SettingsButtonHover,
+        DisabledSurfaceColor = Color.FromArgb(28, 38, 55),
+        DisabledTextColor = Color.FromArgb(112, 123, 142),
+        OutlineColor = ClipCordTheme.SettingsFieldBorder,
+        ForeColor = ClipCordTheme.ShellText,
         Font = ClipCordTheme.InterfaceFont(9.5f),
         Margin = Padding.Empty
     };
@@ -1481,6 +1651,26 @@ internal sealed class SettingsForm : Form
         Region = new Region(path);
     }
 
+    private sealed class CompressionMenuColorTable : ProfessionalColorTable
+    {
+        private static Color Surface =>
+            SystemInformation.HighContrast ? SystemColors.Window : ClipCordTheme.SettingsField;
+        private static Color Selection =>
+            SystemInformation.HighContrast ? SystemColors.Highlight : ClipCordTheme.SettingsButtonHover;
+        private static Color Border =>
+            SystemInformation.HighContrast ? SystemColors.WindowText : ClipCordTheme.SettingsFieldBorder;
+
+        public override Color ToolStripDropDownBackground => Surface;
+        public override Color ImageMarginGradientBegin => Surface;
+        public override Color ImageMarginGradientMiddle => Surface;
+        public override Color ImageMarginGradientEnd => Surface;
+        public override Color MenuItemSelected => Selection;
+        public override Color MenuItemSelectedGradientBegin => Selection;
+        public override Color MenuItemSelectedGradientEnd => Selection;
+        public override Color MenuItemBorder => Border;
+        public override Color MenuBorder => Border;
+    }
+
     protected override void WndProc(ref Message message)
     {
         if (message.Msg == WmGetMinMaxInfo) ApplyWorkingAreaBounds(message.LParam);
@@ -1534,6 +1724,7 @@ internal sealed class SettingsForm : Form
         {
             _watcherStatusTimer.Stop();
             _watcherStatusTimer.Dispose();
+            _compressionTargetMenu.Dispose();
             _toolTip.Dispose();
             if (_ownsActivityHistory) _activityHistory.Dispose();
             _ownedApplicationIcon?.Dispose();

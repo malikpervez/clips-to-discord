@@ -4,6 +4,13 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.10.0 — 2026-08-14
+
+- Refine Settings into a balanced dark four-card layout, with matching full-width Clip source and Discord destination cards plus compact Upload behavior and App preferences cards.
+- Replace simplified section symbols with larger detailed ClipCord artwork, including the corrected Discord destination mark in both Settings and the in-game upload-mode confirmation.
+- Replace the native light compression selector with a fully themed editable field and preset menu while preserving arbitrary targets from 1 through 100 MB.
+- Make smoke-test failures exit cleanly with diagnostic output instead of showing an unhandled Windows application-error dialog.
+
 ## 1.9.1 — 2026-08-13
 
 - Show a branded, non-activating on-screen confirmation when the global mode shortcut changes ClipCord between Discord uploads and Local only, so feedback remains visible when Windows suppresses tray balloons during games.

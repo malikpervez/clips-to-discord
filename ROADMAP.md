@@ -25,6 +25,8 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 - ClipCord v1.8.0 adds permanent top navigation and an on-demand local Gallery for uploaded and local-only clips without background indexing or artwork-network dependencies.
 - ClipCord v1.8.1 fixes exact Explorer selection for clip paths containing spaces, commas, and Unicode characters.
 - ClipCord v1.9.0 adds a configurable global upload-mode shortcut, defaulting to **Ctrl + Alt + L**, with safe watcher handoff, conflict recovery, rebinding, disabling, and visible mode confirmation.
+- ClipCord v1.9.1 adds a non-activating in-game confirmation for upload-mode shortcut changes when Windows suppresses tray balloons.
+- ClipCord v1.10.0 refines Settings with a compact four-card dark layout, detailed branded section artwork, and a fully themed editable compression picker.
 
 ## Planned milestones
 
