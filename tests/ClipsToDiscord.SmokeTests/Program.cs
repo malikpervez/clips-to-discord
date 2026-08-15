@@ -1389,6 +1389,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.Show();
             Application.DoEvents();
             AssertControlsFit(form);
+            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
             AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, designedOpeningSize);
             AssertSettingsTextFieldsAligned(form);
             AssertSettingsCardGrid(form);
@@ -1435,6 +1436,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.Show();
             Application.DoEvents();
             AssertControlsFit(form);
+            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
             AssertSettingsCardGrid(form);
             AssertSettingsTextFieldsAligned(form);
             AssertCriticalTextFits(form);
@@ -1559,6 +1561,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
             Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2,
                 "Space must open a focused Gallery game card through its keyboard handler.");
             AssertControlsFit(form);
+            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
             AssertCriticalTextFits(form);
 
             TraceSmokeStep("Settings layout: About navigation and geometry");
@@ -1600,9 +1603,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
             Application.DoEvents();
             Assert(footer.Visible &&
                    ((TableLayoutPanel)EnumerateControls(form).Single(control => control.Name == "RootLayout"))
-                       .RowStyles[3].Height == (float)Math.Round(90 * GetDpiScale(form)) &&
+                       .RowStyles[3].Height == SettingsForm.FooterLogicalHeight &&
                    saveButton.Visible && ReferenceEquals(form.AcceptButton, saveButton),
                 "Returning from About to Settings must restore the normal footer and save action.");
+            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
             Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Local only"),
                 "The branded header must present the complete local-only watcher status.");
             var headerLogo = EnumerateControls(form)
@@ -3227,10 +3231,88 @@ static void RenderSettingsPreview(string outputPath)
     Application.DoEvents();
     AssertSettingsCardGrid(form);
     AssertSettingsFeatureIcons(form);
+    AssertSettingsFooterLayout(form, requireLogicalHeight: true);
     using var bitmap = new Bitmap(form.Width, form.Height);
     form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
     bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
     form.Hide();
+}
+
+static void AssertSettingsFooterLayout(SettingsForm form, bool requireLogicalHeight)
+{
+    var root = EnumerateControls(form)
+        .OfType<TableLayoutPanel>()
+        .Single(control => control.Name == "RootLayout");
+    var footer = EnumerateControls(form).Single(control => control.Name == "FooterLayout");
+    var glyph = EnumerateControls(footer)
+        .OfType<BrandGlyphControl>()
+        .Single(control => control.Name == "FooterPrivacyGlyph");
+    var messageStack = EnumerateControls(footer)
+        .Single(control => control.Name == "FooterMessageStack");
+    var actions = EnumerateControls(footer)
+        .Single(control => control.Name == "FooterActions");
+    var privacy = EnumerateControls(footer)
+        .OfType<Label>()
+        .Single(control => control.Name == "PrivacySummaryLabel");
+    var status = EnumerateControls(footer)
+        .OfType<Label>()
+        .Single(control => control.Name == "FooterStatusLabel");
+
+    if (requireLogicalHeight)
+    {
+        Assert(root.RowStyles[3].SizeType == SizeType.Absolute &&
+               Math.Abs(root.RowStyles[3].Height - SettingsForm.FooterLogicalHeight) < .1f,
+            $"The Settings footer must remain {SettingsForm.FooterLogicalHeight}px instead of being scaled independently: " +
+            $"actual={root.RowStyles[3].Height}px, dpi={form.DeviceDpi}.");
+    }
+
+    Assert(Math.Abs(glyph.Width - glyph.Height) <= 1 && glyph.Width >= 20,
+        $"The footer privacy glyph must retain a square drawing surface: {glyph.Bounds}.");
+
+    var contentCenterTwice = footer.Padding.Top * 2 +
+                             footer.ClientSize.Height - footer.Padding.Vertical;
+    static int CenterTwice(Control control, Control ancestor)
+    {
+        var location = GetLocationRelativeToAncestor(control, ancestor);
+        return location.Y * 2 + control.Height;
+    }
+
+    foreach (var (name, control) in new[]
+             {
+                 ("privacy glyph", (Control)glyph),
+                 ("message stack", messageStack),
+                 ("footer actions", actions)
+             })
+    {
+        Assert(Math.Abs(CenterTwice(control, footer) - contentCenterTwice) <= 2,
+            $"The {name} must be vertically centered in the footer: control={control.Bounds}, " +
+            $"footer={footer.ClientRectangle}, padding={footer.Padding}.");
+    }
+
+    if (string.IsNullOrWhiteSpace(status.Text))
+    {
+        Assert(!status.Visible && messageStack.Height <= privacy.Height + 1,
+            $"An empty footer status must collapse completely instead of reserving a blank row: " +
+            $"statusVisible={status.Visible}, status={status.Size}, stack={messageStack.Size}, privacy={privacy.Size}.");
+        Assert(Math.Abs(CenterTwice(privacy, footer) - CenterTwice(glyph, footer)) <= 2,
+            $"The privacy copy must align with its glyph when no transient status is shown: " +
+            $"privacy={GetLocationRelativeToAncestor(privacy, footer)} {privacy.Size}, glyph={glyph.Bounds}.");
+    }
+    else if (form.Visible)
+    {
+        Assert(status.Visible && messageStack.Height >= status.Height + privacy.Height - 1,
+            $"A nonempty footer status must expand into the centered two-line message stack: " +
+            $"statusVisible={status.Visible}, status={status.Size}, stack={messageStack.Size}, privacy={privacy.Size}.");
+    }
+
+    var buttons = EnumerateControls(actions)
+        .OfType<Button>()
+        .Where(button => !form.Visible || button.Visible)
+        .ToArray();
+    Assert(buttons.Length is >= 1 and <= 2 &&
+           buttons.All(button => Math.Abs(CenterTwice(button, footer) - contentCenterTwice) <= 2),
+        $"Save and Cancel must share the footer's vertical center: " +
+        string.Join(", ", buttons.Select(button => $"{button.Text}={GetLocationRelativeToAncestor(button, footer)} {button.Size}")));
 }
 
 static void RenderAboutPreview(string outputPath)
@@ -3298,6 +3380,7 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         form.PerformLayout();
         Application.DoEvents();
         AssertControlsFit(form);
+        AssertSettingsFooterLayout(form, requireLogicalHeight: false);
         if (scale <= 1.5f) AssertSettingsCardsOpenWithoutScrolling(form);
         AssertSettingsCardGrid(form);
         AssertSettingsTextFieldsAligned(form);

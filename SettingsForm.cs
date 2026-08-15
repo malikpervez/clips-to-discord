@@ -19,6 +19,7 @@ internal sealed class SettingsForm : Form
     internal static readonly Size GalleryDesignedClientSize = new(1100, 890);
     internal static readonly Size AboutDesignedClientSize = new(1100, 890);
     internal static readonly Size MinimumDesignedClientSize = new(900, 650);
+    internal const int FooterLogicalHeight = 90;
     private static readonly Regex CompressionTargetPattern = new(
         @"^\s*(?<value>\d{1,3})\s*(?:MB)?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -119,7 +120,8 @@ internal sealed class SettingsForm : Form
     private readonly Label _privacySummaryLabel = new()
     {
         Name = "PrivacySummaryLabel",
-        Dock = DockStyle.Fill,
+        AutoSize = true,
+        Anchor = AnchorStyles.Left,
         ForeColor = ClipCordTheme.ShellMutedText,
         TextAlign = ContentAlignment.MiddleLeft,
         Font = ClipCordTheme.InterfaceFont(9f)
@@ -146,8 +148,9 @@ internal sealed class SettingsForm : Form
     };
     private readonly Label _statusLabel = new()
     {
-        Dock = DockStyle.Fill,
-        AutoEllipsis = true,
+        Name = "FooterStatusLabel",
+        AutoSize = true,
+        Anchor = AnchorStyles.Left,
         ForeColor = ClipCordTheme.ShellMutedText,
         TextAlign = ContentAlignment.MiddleLeft,
         Font = ClipCordTheme.InterfaceFont(9.5f)
@@ -229,6 +232,9 @@ internal sealed class SettingsForm : Form
         _checkUpdatesButton.Name = "SettingsCheckUpdatesButton";
         _checkUpdatesButton.Enabled = _checkForUpdatesAsync is not null;
         _saveButton.Click += SaveClicked;
+        _statusLabel.Visible = false;
+        _statusLabel.TextChanged += (_, _) =>
+            _statusLabel.Visible = !string.IsNullOrWhiteSpace(_statusLabel.Text);
         _minimizeButton.Click += (_, _) => WindowState = FormWindowState.Minimized;
         _maximizeButton.Click += (_, _) => ToggleMaximize();
         _closeButton.Click += (_, _) => Close();
@@ -270,7 +276,7 @@ internal sealed class SettingsForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, FooterLogicalHeight));
         root.Controls.Add(BuildHeader(), 0, 0);
         root.Controls.Add(BuildNavigation(), 0, 1);
         root.Controls.Add(BuildBody(), 0, 2);
@@ -544,7 +550,7 @@ internal sealed class SettingsForm : Form
             _rootLayout.RowStyles[3].SizeType = SizeType.Absolute;
             _rootLayout.RowStyles[3].Height = showAbout
                 ? 0
-                : (float)Math.Round(90 * Math.Max(96, DeviceDpi) / 96d);
+                : FooterLogicalHeight;
         }
         if (_footer is not null) _footer.Visible = !showAbout;
         Text = page switch
@@ -944,31 +950,50 @@ internal sealed class SettingsForm : Form
             Name = "FooterMessages",
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 1,
             Margin = Padding.Empty,
             BackColor = ClipCordTheme.Header
         };
         messages.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
         messages.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        messages.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        messages.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        messages.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var shield = new BrandGlyphControl
         {
+            Name = "FooterPrivacyGlyph",
             Glyph = BrandGlyph.Shield,
             GlyphColor = ClipCordTheme.ShellMutedText,
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0, 5, 8, 5),
+            Size = new Size(26, 26),
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 0, 8, 0),
             AccessibleName = "Privacy"
         };
         messages.Controls.Add(shield, 0, 0);
-        messages.SetRowSpan(shield, 2);
-        messages.Controls.Add(_statusLabel, 1, 0);
-        messages.Controls.Add(_privacySummaryLabel, 1, 1);
+
+        var messageStack = new BufferedTableLayoutPanel
+        {
+            Name = "FooterMessageStack",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Anchor = AnchorStyles.Left,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.Header
+        };
+        messageStack.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        messageStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        messageStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        messageStack.Controls.Add(_statusLabel, 0, 0);
+        messageStack.Controls.Add(_privacySummaryLabel, 0, 1);
+        messages.Controls.Add(messageStack, 1, 0);
 
         var actions = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Name = "FooterActions",
+            Anchor = AnchorStyles.Right,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Margin = Padding.Empty,
