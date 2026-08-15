@@ -4,6 +4,11 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.11.1 — 2026-08-15
+
+- Correct the Settings footer at high display scaling so its privacy shield remains square instead of stretching vertically.
+- Restore a compact footer and vertically center its privacy copy, transient status, Save, and Cancel controls at 100%, 150%, and 200% scaling.
+
 ## 1.11.0 — 2026-08-14
 
 - Replace the About pop-up with a full branded page for live app status, safe diagnostics, privacy details, project links, and credits.
