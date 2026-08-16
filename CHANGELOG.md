@@ -4,6 +4,10 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- No unreleased changes.
+
+## 1.11.2 — 2026-08-15
+
 - Add a focused **Edit & upload** workflow for Local-only Gallery clips with precise trim controls, optional mute, output naming, game attribution, and a bounded Discord note.
 - Archive the edited result only after Discord confirms success, then move the original to the Windows Recycle Bin by default; **Keep original in Local only** remains an explicit opt-in and confirmed moves recover without reposting.
 
