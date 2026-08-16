@@ -6,6 +6,10 @@ All notable user-facing changes are documented here.
 
 - No unreleased changes.
 
+## 1.12.0 — 2026-08-16
+
+- Start **Edit & upload** straight from the Activity Center: a Local-only clip that still exists offers the action on its activity row and opens it in the Gallery editor. Uploaded, duplicate, and baseline rows never offer it.
+
 ## 1.11.3 — 2026-08-16
 
 - Preview the selected trim inside the editor: **Play selection** now plays only the chosen range, honours **Mute audio**, and stops at the trim end instead of running to the end of the clip.

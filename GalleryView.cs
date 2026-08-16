@@ -271,6 +271,68 @@ internal sealed class GalleryView : UserControl
         if (!_disposed && !IsDisposed && !Disposing) _refreshButton.Enabled = true;
     }
 
+    /// <summary>
+    /// Opens the clip editor for a specific Local-only clip, used when another page
+    /// (such as Activity) hands off an entry. Resolves the clip from disk so it does not
+    /// have to wait for the on-demand catalog scan; the editor still revalidates the path.
+    /// </summary>
+    internal bool TryOpenEditorFor(string clipPath)
+    {
+        if (_manualClipEditService is null || string.IsNullOrWhiteSpace(clipPath)) return false;
+        if (!TryResolveLocalOnlyClip(clipPath, out var clip)) return false;
+        // Align the surrounding view state so leaving the editor lands on the clip's game.
+        _routeFilter = GalleryClipRoute.LocalOnly;
+        _selectedGame = _snapshot.Games.FirstOrDefault(game =>
+            game.Name.Equals(clip.GameName, StringComparison.OrdinalIgnoreCase));
+        ShowEditor(clip);
+        return _screen == GalleryScreen.Editor;
+    }
+
+    private bool TryResolveLocalOnlyClip(string clipPath, out GalleryClipEntry clip)
+    {
+        clip = null!;
+        FileInfo file;
+        string? localOnlyRoot;
+        try
+        {
+            file = new FileInfo(Path.GetFullPath(clipPath));
+            localOnlyRoot = UploadedFolder.FindExistingLocalOnly(Path.GetFullPath(_clipsFolder));
+        }
+        catch (Exception exception) when (exception is IOException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+        if (localOnlyRoot is null || !file.Exists ||
+            !file.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var relative = Path.GetRelativePath(localOnlyRoot, file.FullName);
+        if (Path.IsPathRooted(relative) ||
+            relative.Equals("..", StringComparison.Ordinal) ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        var segments = relative.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length is < 1 or > 2) return false;
+
+        var gameName = segments.Length == 2
+            ? segments[0].Normalize(System.Text.NormalizationForm.FormC)
+            : "Uncategorized";
+        clip = new GalleryClipEntry(
+            file.FullName,
+            file.Name,
+            gameName,
+            GalleryClipRoute.LocalOnly,
+            file.Length,
+            file.LastWriteTimeUtc);
+        return true;
+    }
+
     internal bool HandleEscape()
     {
         if (_screen == GalleryScreen.Library) return false;

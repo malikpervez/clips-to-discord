@@ -11,12 +11,20 @@ internal sealed class ActivityView : UserControl
     private readonly BrandedScrollHost _scrollHost;
     private readonly Label _summaryLabel;
     private readonly IDisposable _subscription;
+    private readonly bool _allowLocalOnlyEditing;
     private Guid? _firstEntryId;
 
-    internal ActivityView(ActivityHistoryStore history, string clipsFolder)
+    /// <summary>Raised when a Local-only activity entry asks to open the clip editor.</summary>
+    internal event Action<ClipActivityEntry>? EditClipRequested;
+
+    internal ActivityView(
+        ActivityHistoryStore history,
+        string clipsFolder,
+        bool allowLocalOnlyEditing = false)
     {
         _history = history;
         _clipsFolder = clipsFolder;
+        _allowLocalOnlyEditing = allowLocalOnlyEditing;
         Name = "ActivityView";
         Dock = DockStyle.Fill;
         BackColor = ClipCordTheme.Shell;
@@ -354,10 +362,44 @@ internal sealed class ActivityView : UserControl
         };
         openLocation.Click += (_, _) => OpenFileLocation(entry);
         actionHost.Controls.Add(openLocation);
+        if (CanEditLocalOnlyClip(entry))
+        {
+            var editClip = new OutlineButton
+            {
+                Name = "EditActivityClipButton",
+                Text = "Edit & upload",
+                Dock = DockStyle.Top,
+                Height = 36,
+                Margin = new Padding(0, 0, 0, 8),
+                SurfaceColor = Color.FromArgb(237, 231, 253),
+                HoverColor = Color.FromArgb(228, 219, 250),
+                OutlineColor = ClipCordTheme.Violet,
+                ForeColor = Color.FromArgb(76, 44, 135),
+                Font = ClipCordTheme.InterfaceFont(8.5f),
+                AccessibleName = $"Edit and upload {entry.FileName}"
+            };
+            editClip.Click += (_, _) => EditClipRequested?.Invoke(entry);
+            actionHost.Controls.Add(editClip);
+            // Dock=Top stacks in reverse z-order, so bring the edit action above
+            // "Show in folder" after both are parented.
+            editClip.BringToFront();
+        }
         layout.Controls.Add(actionHost, 2, 0);
         card.Controls.Add(layout);
         return card;
     }
+
+    private bool CanEditLocalOnlyClip(ClipActivityEntry entry) =>
+        _allowLocalOnlyEditing && IsEditableLocalOnlyEntry(entry);
+
+    /// <summary>
+    /// Only a Local-only clip that still exists on disk can enter the editor. Uploaded,
+    /// duplicate, and baseline rows never expose the action, matching the Gallery card gate.
+    /// </summary>
+    internal static bool IsEditableLocalOnlyEntry(ClipActivityEntry entry) =>
+        entry.Route == ClipActivityRoute.LocalOnly &&
+        !string.IsNullOrWhiteSpace(entry.CurrentPath) &&
+        File.Exists(entry.CurrentPath);
 
     internal static string BuildDetail(ClipActivityEntry entry)
     {

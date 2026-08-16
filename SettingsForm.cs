@@ -432,7 +432,11 @@ internal sealed class SettingsForm : Form
             BackColor = ClipCordTheme.Shell
         };
         _settingsPage = BuildCards();
-        _activityPage = new ActivityView(_activityHistory, _folderText.Text);
+        _activityPage = new ActivityView(
+            _activityHistory,
+            _folderText.Text,
+            allowLocalOnlyEditing: _manualClipEditService is not null);
+        _activityPage.EditClipRequested += ActivityEditClipRequested;
         _galleryPage = new GalleryView(_folderText.Text, _manualClipEditService, _launchMediaFile);
         _galleryPage.OperationBusyChanged += GalleryOperationBusyChanged;
         _aboutPage = new AboutView(_appliedSettings, _watcherStatusProvider);
@@ -1565,6 +1569,21 @@ internal sealed class SettingsForm : Form
             _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
             _statusLabel.Text = status;
         }
+    }
+
+    private void ActivityEditClipRequested(ClipActivityEntry entry)
+    {
+        if (_galleryPage is null || IsDisposed || Disposing) return;
+        // A manual upload owns the shell while it runs; do not navigate out from under it.
+        if (_galleryBusy) return;
+        ShowPage(SettingsPage.Gallery);
+        if (_galleryPage.TryOpenEditorFor(entry.CurrentPath ?? string.Empty)) return;
+        MessageBox.Show(
+            this,
+            "This clip is no longer available in the Local-only archive, so it cannot be edited.",
+            "Cannot edit clip",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
     }
 
     private void GalleryOperationBusyChanged(bool busy)
