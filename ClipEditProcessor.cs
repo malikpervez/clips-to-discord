@@ -47,11 +47,13 @@ internal sealed class ClipEditProcessor
         string clipsFolder,
         string sourcePath,
         TimeSpan position,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int maxDimension = 960)
     {
         var source = ValidateLocalOnlySource(clipsFolder, sourcePath);
         var ffmpeg = FfmpegCompressor.FindExecutable()
             ?? throw new InvalidOperationException("ClipCord's bundled FFmpeg tool is unavailable.");
+        var dimension = Math.Max(160, Math.Clamp(maxDimension, 160, 1920));
         var previewFolder = Path.Combine(Path.GetTempPath(), "ClipsToDiscord", "previews");
         Directory.CreateDirectory(previewFolder);
         var previewPath = Path.Combine(previewFolder, Guid.NewGuid().ToString("N") + ".png");
@@ -64,7 +66,7 @@ internal sealed class ClipEditProcessor
                     "-ss", FormatSeconds(Math.Max(0, position.TotalSeconds)),
                     "-i", source.FullName,
                     "-frames:v", "1",
-                    "-vf", "scale='min(960,iw)':-2",
+                    "-vf", $"scale='min({dimension},iw)':-2",
                     previewPath
                 ],
                 cancellationToken);
@@ -79,6 +81,142 @@ internal sealed class ClipEditProcessor
             TryDelete(previewPath);
             throw;
         }
+    }
+
+    internal async Task<string> CreateTrimmedPlaybackAsync(
+        string clipsFolder,
+        string sourcePath,
+        TimeSpan start,
+        TimeSpan end,
+        bool muteAudio,
+        CancellationToken cancellationToken)
+    {
+        if (start < TimeSpan.Zero || end <= start)
+        {
+            throw new ArgumentOutOfRangeException(nameof(end), "The playback start and end must define a valid range.");
+        }
+
+        var source = ValidateLocalOnlySource(clipsFolder, sourcePath);
+        var ffmpeg = FfmpegCompressor.FindExecutable()
+            ?? throw new InvalidOperationException("ClipCord's bundled FFmpeg tool is unavailable.");
+
+        var duration = end - start;
+        if (duration < TimeSpan.FromMilliseconds(250))
+        {
+            throw new ArgumentOutOfRangeException(nameof(duration), "Playback requires at least 0.25 seconds.");
+        }
+
+        var previewFolder = Path.Combine(Path.GetTempPath(), "ClipsToDiscord", "editor-playback");
+        Directory.CreateDirectory(previewFolder);
+        var playbackPath = Path.Combine(previewFolder, $"{Guid.NewGuid():N}.mp4");
+        try
+        {
+            var arguments = BuildPlaybackArguments(
+                source.FullName,
+                playbackPath,
+                start,
+                end,
+                muteAudio);
+            await FfmpegCompressor.RunAsync(
+                ffmpeg,
+                arguments,
+                cancellationToken);
+            if (!File.Exists(playbackPath))
+            {
+                throw new InvalidOperationException("FFmpeg did not create the playback clip.");
+            }
+            return playbackPath;
+        }
+        catch
+        {
+            TryDelete(playbackPath);
+            throw;
+        }
+    }
+
+    internal static IReadOnlyList<string> BuildPlaybackArguments(
+        string sourcePath,
+        string playbackPath,
+        TimeSpan start,
+        TimeSpan end,
+        bool muteAudio)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(playbackPath);
+        if (start < TimeSpan.Zero || end <= start)
+        {
+            throw new ArgumentOutOfRangeException(nameof(end), "The playback start and end must define a valid range.");
+        }
+
+        var selectionDuration = end - start;
+        var arguments = new List<string>
+        {
+            "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", FormatSeconds(start.TotalSeconds),
+            "-i", sourcePath,
+            "-t", FormatSeconds(selectionDuration.TotalSeconds),
+            "-map", "0:v:0",
+            "-vf", "scale='min(960,iw)':-2,setpts=PTS-STARTPTS"
+        };
+        if (muteAudio)
+        {
+            arguments.Add("-an");
+        }
+        else
+        {
+            // The audio filter only belongs on the branch that actually maps an audio stream.
+            arguments.AddRange([
+                "-map", "0:a:0?",
+                "-af", "asetpts=PTS-STARTPTS",
+                "-c:a", "aac", "-b:a", "192k"
+            ]);
+        }
+        arguments.AddRange([
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
+            "-f", "mp4", playbackPath
+        ]);
+        return arguments;
+    }
+
+    internal static IReadOnlyList<string> BuildTrimmedPlaybackArguments(
+        string sourcePath,
+        string playbackPath,
+        TimeSpan start,
+        TimeSpan end,
+        bool muteAudio)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(playbackPath);
+        if (start < TimeSpan.Zero || end <= start)
+        {
+            throw new ArgumentOutOfRangeException(nameof(end), "The playback start and end must define a valid range.");
+        }
+
+        var duration = end - start;
+        var arguments = new List<string>
+        {
+            "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", FormatSeconds(start.TotalSeconds),
+            "-i", sourcePath,
+            "-t", FormatSeconds(duration.TotalSeconds),
+            "-map", "0:v:0",
+            "-vf", "scale='min(960,iw)':-2,setpts=PTS-STARTPTS",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"
+        };
+        if (muteAudio)
+        {
+            arguments.AddRange(["-an"]);
+        }
+        else
+        {
+            arguments.AddRange(["-map", "0:a:0?", "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k"]);
+        }
+        arguments.AddRange(["-f", "mp4", playbackPath]);
+        return arguments;
     }
 
     internal async Task<PreparedClipEdit> PrepareAsync(

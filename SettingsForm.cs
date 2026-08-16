@@ -159,6 +159,7 @@ internal sealed class SettingsForm : Form
     private readonly AppSettings _appliedSettings;
     private readonly ActivityHistoryStore _activityHistory;
     private readonly IManualClipEditService? _manualClipEditService;
+    private readonly Func<string, bool>? _launchMediaFile;
     private readonly SettingsPage _openingPage;
     private readonly bool _ownsActivityHistory;
     private RoundedPanel? _settingsNavigationItem;
@@ -186,7 +187,8 @@ internal sealed class SettingsForm : Form
         Func<string>? watcherStatusProvider = null,
         ActivityHistoryStore? activityHistory = null,
         SettingsPage initialPage = SettingsPage.Settings,
-        IManualClipEditService? manualClipEditService = null)
+        IManualClipEditService? manualClipEditService = null,
+        Func<string, bool>? launchMediaFile = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -195,6 +197,7 @@ internal sealed class SettingsForm : Form
         _watcherStatusProvider = watcherStatusProvider;
         _activityHistory = activityHistory ?? new ActivityHistoryStore(string.Empty);
         _manualClipEditService = manualClipEditService;
+        _launchMediaFile = launchMediaFile;
         _ownsActivityHistory = activityHistory is null;
         _openingPage = initialPage;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
@@ -430,7 +433,7 @@ internal sealed class SettingsForm : Form
         };
         _settingsPage = BuildCards();
         _activityPage = new ActivityView(_activityHistory, _folderText.Text);
-        _galleryPage = new GalleryView(_folderText.Text, _manualClipEditService);
+        _galleryPage = new GalleryView(_folderText.Text, _manualClipEditService, _launchMediaFile);
         _galleryPage.OperationBusyChanged += GalleryOperationBusyChanged;
         _aboutPage = new AboutView(_appliedSettings, _watcherStatusProvider);
         _aboutPage.CheckUpdatesRequested += CheckUpdatesClicked;

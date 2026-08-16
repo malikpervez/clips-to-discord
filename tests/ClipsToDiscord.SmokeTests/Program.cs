@@ -1390,6 +1390,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertGalleryPreHandleLifecycle(settings);
             TraceSmokeStep("Settings layout: Gallery Local-only editor flow");
             AssertGalleryEditorFlow(settings);
+            TraceSmokeStep("Settings layout: Gallery editor trim preview playback");
+            AssertGalleryEditorPreviewPlayback(settings);
             TraceSmokeStep("Settings layout: About actions and privacy seams");
             AssertAboutViewActions(settings);
             TraceSmokeStep("Settings layout: Activity navigation lifecycle");
@@ -2377,6 +2379,45 @@ static void AssertClipEditProcessorContracts(string temporaryRoot)
            !muted.Contains("-af") &&
            !muted.Contains("-c:a"),
         "A muted edit must explicitly remove audio and omit every audio map/filter/codec option.");
+
+    var playbackPath = Path.Combine(root, ".clipcord-editing", "playback", "preview.mp4");
+    var playback = ClipEditProcessor.BuildPlaybackArguments(
+        localPath,
+        playbackPath,
+        TimeSpan.FromSeconds(4.5),
+        TimeSpan.FromSeconds(9.75),
+        muteAudio: false).ToArray();
+    Assert(HasPair(playback, "-ss", "4.500000") &&
+           HasPair(playback, "-t", "5.250000") &&
+           HasPair(playback, "-map", "0:v:0") &&
+           HasPair(playback, "-map", "0:a:0?") &&
+           HasPair(playback, "-af", "asetpts=PTS-STARTPTS") &&
+           playback[^3] == "-f" && playback[^2] == "mp4" && playback[^1] == playbackPath,
+        "Trim preview playback must render exactly the selected range, not the whole source.");
+    var mutedPlayback = ClipEditProcessor.BuildPlaybackArguments(
+        localPath,
+        playbackPath,
+        TimeSpan.FromSeconds(4.5),
+        TimeSpan.FromSeconds(9.75),
+        muteAudio: true).ToArray();
+    Assert(mutedPlayback.Contains("-an") &&
+           !mutedPlayback.Contains("0:a:0?") &&
+           !mutedPlayback.Contains("-af") &&
+           !mutedPlayback.Contains("-c:a"),
+        "A muted trim preview must drop audio and omit every audio map/filter/codec option.");
+    var playbackRangeRejected = false;
+    try
+    {
+        ClipEditProcessor.BuildPlaybackArguments(
+            localPath,
+            playbackPath,
+            TimeSpan.FromSeconds(9.75),
+            TimeSpan.FromSeconds(4.5),
+            muteAudio: false);
+    }
+    catch (ArgumentOutOfRangeException) { playbackRangeRejected = true; }
+    Assert(playbackRangeRejected,
+        "Trim preview playback must reject an inverted selection instead of rendering the whole clip.");
 
     var processor = new ClipEditProcessor();
     var sourceBytes = 200_000_000L;
@@ -4366,6 +4407,119 @@ static void AssertGalleryEditorFlow(AppSettings settings)
     form.Close();
 }
 
+static void AssertGalleryEditorPreviewPlayback(AppSettings settings)
+{
+    var service = new FakeManualClipEditService();
+    var launchedPaths = new List<string>();
+    using var form = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Gallery,
+        manualClipEditService: service,
+        launchMediaFile: path => { launchedPaths.Add(path); return true; });
+    form.Show();
+    var editor = OpenLocalOnlyEditor(form);
+    var trim = EnumerateControls(editor).OfType<TrimRangeControl>().Single();
+    var duration = TimeSpan.FromSeconds(FakeManualClipEditService.ProbeDurationSeconds);
+    var playSelection = typeof(LocalClipEditorView).GetMethod(
+        "TryPlaySelectionInTempMediaAsync",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    Task<bool> PlaySelection() => (Task<bool>)playSelection.Invoke(editor, [])!;
+
+    // --- Trim-range replay: the render must use the handles' current values. ---
+    var replayStart = TimeSpan.FromSeconds(12.5);
+    var replayEnd = TimeSpan.FromSeconds(31.25);
+    trim.SetRange(replayStart, replayEnd, duration);
+    Application.DoEvents();
+    var replayTask = PlaySelection();
+    WaitForUiCondition(
+        () => replayTask.IsCompleted,
+        TimeSpan.FromSeconds(5),
+        "Trim preview playback did not complete for the selected range.");
+    Assert(replayTask.Result && service.PlaybackCalls.Count == 1,
+        "Playing a selection must run exactly one trimmed-playback render.");
+    var replayed = service.PlaybackCalls[0];
+    Assert(replayed.Start == replayStart && replayed.End == replayEnd && !replayed.MuteAudio,
+        $"Trim preview must replay the current handle range; got {replayed.Start}-{replayed.End}.");
+    Assert(launchedPaths.Count == 1 && File.Exists(launchedPaths[0]),
+        "A completed trim preview must hand exactly one existing rendered clip to the media launcher.");
+
+    // --- Moving the handles mid-render must cancel it and never launch the stale range. ---
+    service.GatePlayback();
+    var staleTask = PlaySelection();
+    WaitForUiCondition(
+        () => service.PlaybackCalls.Count == 2,
+        TimeSpan.FromSeconds(5),
+        "The second trim preview render did not start.");
+    trim.SetRange(TimeSpan.FromSeconds(40), TimeSpan.FromSeconds(55), duration);
+    Application.DoEvents();
+    service.ReleasePlayback();
+    WaitForUiCondition(
+        () => staleTask.IsCompleted,
+        TimeSpan.FromSeconds(5),
+        "The superseded trim preview render never unwound.");
+    Assert(!staleTask.Result && service.PlaybackCancellations == 1,
+        "Moving a trim handle must cancel the in-flight trim preview render.");
+    Assert(launchedPaths.Count == 1,
+        "A cancelled trim preview must never launch a player for the stale range.");
+
+    // --- A still-frame refresh must not paint over playback that started after it. ---
+    var playbackRunning = typeof(LocalClipEditorView).GetField(
+        "_isPlaybackRunning",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var previewControl = EnumerateControls(editor).OfType<ClipPreviewControl>().Single();
+    var refreshPreview = typeof(LocalClipEditorView).GetMethod(
+        "RefreshPreviewRequestAsync",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var adoptedBefore = previewControl.Image;
+    playbackRunning.SetValue(editor, true);
+    var refreshTask = (Task)refreshPreview.Invoke(editor, [TimeSpan.FromSeconds(5), CancellationToken.None])!;
+    WaitForUiCondition(
+        () => refreshTask.IsCompleted,
+        TimeSpan.FromSeconds(5),
+        "The still-frame preview refresh never completed while playback was active.");
+    Assert(ReferenceEquals(previewControl.Image, adoptedBefore),
+        "A still-frame refresh must not replace the preview image while playback is running.");
+    playbackRunning.SetValue(editor, false);
+
+    // With playback stopped the same refresh must adopt normally, proving the guard is
+    // conditional rather than a permanent disable.
+    var resumedTask = (Task)refreshPreview.Invoke(editor, [TimeSpan.FromSeconds(5), CancellationToken.None])!;
+    WaitForUiCondition(
+        () => resumedTask.IsCompleted,
+        TimeSpan.FromSeconds(5),
+        "The still-frame preview refresh never completed after playback stopped.");
+    Assert(!ReferenceEquals(previewControl.Image, adoptedBefore) && previewControl.Image is not null,
+        "A still-frame refresh must adopt its frame once playback is no longer running.");
+    form.Close();
+}
+
+static LocalClipEditorView OpenLocalOnlyEditor(SettingsForm form)
+{
+    WaitForUiCondition(
+        () => EnumerateControls(form).OfType<GalleryGameCard>().Any(card =>
+            card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true),
+        TimeSpan.FromSeconds(5),
+        "The Local-only editor flow did not populate its game-first Gallery entry.");
+    var gameCard = EnumerateControls(form)
+        .OfType<GalleryGameCard>()
+        .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+    typeof(Control).GetMethod(
+            "OnClick",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(gameCard, [EventArgs.Empty]);
+    Application.DoEvents();
+    EnumerateControls(form).OfType<Button>()
+        .Single(button => button.Name == "EditGalleryClipButton")
+        .PerformClick();
+    WaitForUiCondition(
+        () => EnumerateControls(form).OfType<Button>().Any(button =>
+            button.Name == "UploadEditedClipButton" && button.Enabled),
+        TimeSpan.FromSeconds(5),
+        "The Local-only editor did not finish its on-demand media inspection.");
+    return EnumerateControls(form).OfType<LocalClipEditorView>().Single();
+}
+
 static void AssertSettingsFooterLayout(SettingsForm form, bool requireLogicalHeight)
 {
     var root = EnumerateControls(form)
@@ -4970,12 +5124,30 @@ internal sealed class RecordingOriginalClipRecycler(string recycleRoot) : IOrigi
     }
 }
 
+internal sealed record TrimmedPlaybackCall(TimeSpan Start, TimeSpan End, bool MuteAudio);
+
 internal sealed class FakeManualClipEditService : IManualClipEditService
 {
+    internal const double ProbeDurationSeconds = 74.8;
+
     private IProgress<ManualClipEditProgress>? _activeProgress;
+    private TaskCompletionSource? _playbackGate;
 
     public int EditCalls { get; private set; }
     public ManualClipEditRequest? LastRequest { get; private set; }
+    public List<TrimmedPlaybackCall> PlaybackCalls { get; } = [];
+    public int PlaybackCancellations { get; private set; }
+
+    /// <summary>Holds the next trimmed-playback render open until <see cref="ReleasePlayback"/>.</summary>
+    public void GatePlayback() =>
+        _playbackGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public void ReleasePlayback()
+    {
+        var gate = _playbackGate;
+        _playbackGate = null;
+        gate?.TrySetResult();
+    }
 
     public void ReportStage(ManualClipEditStage stage, string message) =>
         _activeProgress?.Report(new ManualClipEditProgress(stage, message));
@@ -4985,13 +5157,14 @@ internal sealed class FakeManualClipEditService : IManualClipEditService
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(new ClipMediaInfo(TimeSpan.FromSeconds(74.8), source.Length));
+        return Task.FromResult(new ClipMediaInfo(TimeSpan.FromSeconds(ProbeDurationSeconds), source.Length));
     }
 
     public Task<string> CreatePreviewFrameAsync(
         GalleryClipEntry source,
         TimeSpan position,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int maxDimension = 960)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var folder = Directory.CreateDirectory(Path.Combine(
@@ -5025,6 +5198,56 @@ internal sealed class FakeManualClipEditService : IManualClipEditService
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
         return Task.FromResult(path);
+    }
+
+    public async Task<string> CreateTrimmedPlaybackAsync(
+        GalleryClipEntry source,
+        TimeSpan start,
+        TimeSpan end,
+        bool muteAudio,
+        CancellationToken cancellationToken)
+    {
+        // Record the exact range the editor asked for so a stale-range regression is visible.
+        PlaybackCalls.Add(new TrimmedPlaybackCall(start, end, muteAudio));
+        cancellationToken.ThrowIfCancellationRequested();
+        var gate = _playbackGate;
+        if (gate is not null)
+        {
+            // Observe cancellation for the whole render, not only at entry, so a trim change
+            // mid-render can abandon this attempt exactly like the real FFmpeg run.
+            try
+            {
+                await gate.Task.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                PlaybackCancellations++;
+                throw;
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        var folder = Directory.CreateDirectory(Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordTests",
+            "editor-playback")).FullName;
+        var path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".mp4");
+        // Honor the requested selection instead of copying the whole source, so the produced
+        // artifact reflects the trim the editor requested.
+        var sourceBytes = await File.ReadAllBytesAsync(source.Path, cancellationToken);
+        var totalSeconds = Math.Max(0.001, ProbeDurationSeconds);
+        var ratio = Math.Clamp((end - start).TotalSeconds / totalSeconds, 0, 1);
+        var offset = (int)Math.Clamp(
+            Math.Round(sourceBytes.Length * (start.TotalSeconds / totalSeconds)),
+            0,
+            Math.Max(0, sourceBytes.Length - 1));
+        var length = (int)Math.Clamp(
+            Math.Round(sourceBytes.Length * ratio),
+            1,
+            Math.Max(1, sourceBytes.Length - offset));
+        var slice = new byte[muteAudio ? length : length + 1];
+        Array.Copy(sourceBytes, offset, slice, 0, length);
+        await File.WriteAllBytesAsync(path, slice, cancellationToken);
+        return path;
     }
 
     public long EstimateOutputBytes(

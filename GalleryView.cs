@@ -20,6 +20,7 @@ internal sealed class GalleryView : UserControl
     private readonly ActivityListPanel _clipList;
     private readonly BrandedScrollHost _scrollHost;
     private readonly IManualClipEditService? _manualClipEditService;
+    private readonly Func<string, bool>? _launchMediaFile;
     private CancellationTokenSource? _scanCancellation;
     private string _clipsFolder;
     private GallerySnapshot _snapshot = new([], []);
@@ -32,10 +33,14 @@ internal sealed class GalleryView : UserControl
 
     internal event Action<bool>? OperationBusyChanged;
 
-    internal GalleryView(string clipsFolder, IManualClipEditService? manualClipEditService = null)
+    internal GalleryView(
+        string clipsFolder,
+        IManualClipEditService? manualClipEditService = null,
+        Func<string, bool>? launchMediaFile = null)
     {
         _clipsFolder = clipsFolder;
         _manualClipEditService = manualClipEditService;
+        _launchMediaFile = launchMediaFile;
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         Name = "GalleryView";
         Dock = DockStyle.Fill;
@@ -414,7 +419,7 @@ internal sealed class GalleryView : UserControl
         _filterBar.Visible = false;
         _refreshButton.Enabled = false;
         var canonicalClip = clip with { GameName = _selectedGame?.Name ?? clip.GameName };
-        _editor = new LocalClipEditorView(canonicalClip, _manualClipEditService);
+        _editor = new LocalClipEditorView(canonicalClip, _manualClipEditService, _launchMediaFile);
         _editor.BusyChanged += EditorBusyChanged;
         _editor.Cancelled += EditorCancelled;
         _editor.Completed += EditorCompleted;

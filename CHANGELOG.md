@@ -6,6 +6,12 @@ All notable user-facing changes are documented here.
 
 - No unreleased changes.
 
+## 1.11.3 — 2026-08-16
+
+- Preview the selected trim inside the editor: **Play selection** now plays only the chosen range, honours **Mute audio**, and stops at the trim end instead of running to the end of the clip.
+- Keep the preview honest while it plays: a still frame that was still rendering can no longer paint over live playback, and moving a trim handle stops playback instead of leaving it on a stale range.
+- Cancel trim preview work as soon as the selection changes, so a superseded render can never open a player for the range you already moved away from.
+
 ## 1.11.2 — 2026-08-15
 
 - Add a focused **Edit & upload** workflow for Local-only Gallery clips with precise trim controls, optional mute, output naming, game attribution, and a bounded Discord note.
