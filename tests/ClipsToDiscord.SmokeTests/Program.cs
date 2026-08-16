@@ -1392,6 +1392,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertGalleryEditorFlow(settings);
             TraceSmokeStep("Settings layout: Gallery editor trim preview playback");
             AssertGalleryEditorPreviewPlayback(settings);
+            TraceSmokeStep("Settings layout: Activity to editor handoff");
+            AssertActivityEditorHandoff(settings);
             TraceSmokeStep("Settings layout: About actions and privacy seams");
             AssertAboutViewActions(settings);
             TraceSmokeStep("Settings layout: Activity navigation lifecycle");
@@ -4492,6 +4494,145 @@ static void AssertGalleryEditorPreviewPlayback(AppSettings settings)
     Assert(!ReferenceEquals(previewControl.Image, adoptedBefore) && previewControl.Image is not null,
         "A still-frame refresh must adopt its frame once playback is no longer running.");
     form.Close();
+}
+
+static void AssertActivityEditorHandoff(AppSettings settings)
+{
+    var localOnlyRoot = UploadedFolder.FindExistingLocalOnly(settings.ClipsFolder)
+        ?? throw new InvalidOperationException("The layout fixture has no Local-only archive.");
+    var localClip = Directory
+        .EnumerateFiles(localOnlyRoot, "*.mp4", SearchOption.AllDirectories)
+        .OrderBy(path => path, StringComparer.Ordinal)
+        .First();
+    var uploadedRoot = UploadedFolder.FindExistingUploaded(settings.ClipsFolder)
+        ?? throw new InvalidOperationException("The layout fixture has no uploaded archive.");
+    var uploadedClip = Directory
+        .EnumerateFiles(uploadedRoot, "*.mp4", SearchOption.AllDirectories)
+        .OrderBy(path => path, StringComparer.Ordinal)
+        .First();
+    var missingLocalClip = Path.Combine(localOnlyRoot, "Battlefield™-6", "deleted-since-archive.mp4");
+
+    using var history = new ActivityHistoryStore(string.Empty);
+    history.Transition(new ClipActivityUpdate(
+        localClip,
+        ClipActivityState.Archived,
+        GameName: "Battlefield™-6",
+        CurrentPath: localClip,
+        Route: ClipActivityRoute.LocalOnly));
+    history.Transition(new ClipActivityUpdate(
+        uploadedClip,
+        ClipActivityState.Archived,
+        GameName: "Battlefield™-6",
+        CurrentPath: uploadedClip,
+        Route: ClipActivityRoute.Uploaded));
+    history.Transition(new ClipActivityUpdate(
+        missingLocalClip,
+        ClipActivityState.Archived,
+        GameName: "Battlefield™-6",
+        CurrentPath: missingLocalClip,
+        Route: ClipActivityRoute.LocalOnly));
+
+    Assert(ActivityView.IsEditableLocalOnlyEntry(new ClipActivityEntry
+           {
+               Route = ClipActivityRoute.LocalOnly,
+               CurrentPath = localClip
+           }) &&
+           !ActivityView.IsEditableLocalOnlyEntry(new ClipActivityEntry
+           {
+               Route = ClipActivityRoute.Uploaded,
+               CurrentPath = uploadedClip
+           }) &&
+           !ActivityView.IsEditableLocalOnlyEntry(new ClipActivityEntry
+           {
+               Route = ClipActivityRoute.LocalOnly,
+               CurrentPath = missingLocalClip
+           }),
+        "Only a Local-only activity entry whose clip still exists may offer the editor.");
+
+    var service = new FakeManualClipEditService();
+    using var form = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        activityHistory: history,
+        initialPage: SettingsPage.Activity,
+        manualClipEditService: service);
+    form.Show();
+    Application.DoEvents();
+    Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 3,
+        "The Activity page must render every seeded history entry.");
+    var editButtons = EnumerateControls(form)
+        .OfType<Button>()
+        .Where(button => button.Name == "EditActivityClipButton")
+        .ToArray();
+    Assert(editButtons.Length == 1 &&
+           editButtons[0].AccessibleName == $"Edit and upload {Path.GetFileName(localClip)}",
+        $"Activity must expose Edit & upload only on its editable Local-only clip; found {editButtons.Length}.");
+    // Both per-card actions must remain inside the card now that Activity stacks two of them.
+    var activityCards = EnumerateControls(form)
+        .Where(control => control.Name == "ActivityCard" && control.Visible)
+        .ToArray();
+    foreach (var button in editButtons.Concat(
+                 EnumerateControls(form).OfType<Button>().Where(b => b.Name == "OpenFileLocationButton")))
+    {
+        var card = activityCards.Single(candidate => candidate.Contains(button));
+        var bounds = card.RectangleToClient(button.RectangleToScreen(button.ClientRectangle));
+        Assert(bounds.Top >= 0 && bounds.Bottom <= card.ClientSize.Height &&
+               bounds.Left >= 0 && bounds.Right <= card.ClientSize.Width,
+            $"Activity action '{button.Text}' must stay inside its card; bounds={bounds}, card={card.ClientSize}.");
+    }
+
+    editButtons[0].PerformClick();
+    WaitForUiCondition(
+        () => EnumerateControls(form).OfType<LocalClipEditorView>().Any(),
+        TimeSpan.FromSeconds(5),
+        "Activity's Edit & upload action did not hand off to the Gallery editor.");
+    var editor = EnumerateControls(form).OfType<LocalClipEditorView>().Single();
+    Assert(EnumerateControls(form).Single(control => control.Name == "GalleryView").Visible &&
+           !EnumerateControls(form).Single(control => control.Name == "ActivityView").Visible,
+        "Handing off to the editor must switch the shell to the Gallery page.");
+    Assert(editor.AccessibleName == $"Edit and upload {Path.GetFileName(localClip)}",
+        "The handed-off editor must open the clip that was chosen in Activity.");
+    Assert(form.Text == "ClipCord — Gallery",
+        $"The shell must retitle itself for the Gallery handoff; got '{form.Text}'.");
+
+    // A clip that vanished after its activity row was written must be refused rather than
+    // opening an editor over a missing file.
+    var gallery = EnumerateControls(form).OfType<GalleryView>().Single();
+    Assert(!gallery.TryOpenEditorFor(missingLocalClip) &&
+           !gallery.TryOpenEditorFor(uploadedClip) &&
+           !gallery.TryOpenEditorFor(string.Empty),
+        "The Gallery handoff must refuse missing clips, uploaded clips, and empty paths.");
+
+    // A clip nested deeper than the game-folder layout must be refused by the handoff
+    // itself rather than relying on the editor to reject it later.
+    var nestedFolder = Directory.CreateDirectory(
+        Path.Combine(localOnlyRoot, "Battlefield™-6", "nested")).FullName;
+    var nestedClip = Path.Combine(nestedFolder, "too-deep.mp4");
+    try
+    {
+        File.WriteAllBytes(nestedClip, [4, 2]);
+        Assert(!gallery.TryOpenEditorFor(nestedClip),
+            "The Gallery handoff must refuse a clip nested below the game-folder layout.");
+    }
+    finally
+    {
+        try { Directory.Delete(nestedFolder, recursive: true); } catch { }
+    }
+    form.Close();
+
+    // Without a manual edit service the action must not appear at all, so a build that
+    // cannot edit never advertises editing.
+    using var withoutService = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        activityHistory: history,
+        initialPage: SettingsPage.Activity);
+    withoutService.Show();
+    Application.DoEvents();
+    Assert(EnumerateControls(withoutService).Count(control => control.Name == "ActivityCard" && control.Visible) == 3 &&
+           !EnumerateControls(withoutService).OfType<Button>().Any(button => button.Name == "EditActivityClipButton"),
+        "Activity must hide Edit & upload when no manual clip edit service is available.");
+    withoutService.Close();
 }
 
 static LocalClipEditorView OpenLocalOnlyEditor(SettingsForm form)

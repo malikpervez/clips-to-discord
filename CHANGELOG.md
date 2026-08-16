@@ -4,7 +4,7 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
-- No unreleased changes.
+- Start **Edit & upload** straight from the Activity Center: a Local-only clip that still exists offers the action on its activity row and opens it in the Gallery editor. Uploaded, duplicate, and baseline rows never offer it.
 
 ## 1.11.3 — 2026-08-16
 
