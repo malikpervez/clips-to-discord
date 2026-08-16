@@ -31,6 +31,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private bool _updateDialogOpen;
     private bool _shutdownScheduled;
     private bool _reconfigurationInProgress;
+    private bool _exitRequestedAfterReconfiguration;
+    private CancellationTokenSource? _manualClipOperationCancellation;
     private SettingsForm? _settingsForm;
 
     internal UpdateLaunchRequest? PendingUpdateLaunch { get; private set; }
@@ -138,7 +140,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 CheckForUpdatesManuallyAsync,
                 () => _statusItem.Text ?? "Starting…",
                 _activityHistory,
-                initialPage);
+                initialPage,
+                new ManualClipEditCoordinator(
+                    _settings,
+                    UploadPreparedEditedClipExclusiveAsync));
             _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
                 form.SavedSettings is not null &&
@@ -215,6 +220,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 _uploadToDiscordItem.Enabled = _settings.IsValid;
                 UpdateModeToggleHotkeyDisplay(_settings);
             }
+            ScheduleDeferredExitIfRequested();
         }
     }
 
@@ -240,10 +246,118 @@ internal sealed class TrayApplicationContext : ApplicationContext
         StartController(settings);
     }
 
+    private async Task<ManualClipEditResult> UploadPreparedEditedClipExclusiveAsync(
+        PreparedClipEdit prepared,
+        IProgress<ManualClipEditProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (_shutdownScheduled)
+        {
+            throw new OperationCanceledException("ClipCord is shutting down.", cancellationToken);
+        }
+        if (_reconfigurationInProgress)
+        {
+            throw new InvalidOperationException("ClipCord is already applying another change.");
+        }
+        if (!WebhookValidation.IsDiscordWebhook(_settings.WebhookUrl))
+        {
+            throw new InvalidOperationException(
+                "Add a valid Discord webhook in Settings before uploading a Local-only clip.");
+        }
+
+        var operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            _lifetimeCancellation.Token);
+        _manualClipOperationCancellation = operationCancellation;
+        _reconfigurationInProgress = true;
+        _uploadToDiscordItem.Enabled = false;
+        var previousController = _controller;
+        _controller = null;
+        try
+        {
+            if (previousController is not null)
+            {
+                SetStatus("Preparing manual upload — pausing clip watcher");
+                await previousController.StopAsync();
+            }
+            operationCancellation.Token.ThrowIfCancellationRequested();
+            SetStatus("Uploading edited Local-only clip");
+            var service = new EditedClipUploadService();
+            return await service.UploadAsync(
+                _settings,
+                prepared,
+                _activityHistory,
+                progress,
+                operationCancellation.Token);
+        }
+        finally
+        {
+            try
+            {
+                if (!_shutdownScheduled && !_exitRequestedAfterReconfiguration)
+                {
+                    try
+                    {
+                        StartController(_settings);
+                    }
+                    catch (Exception exception)
+                    {
+                        // The manual upload result is authoritative. A watcher restart failure
+                        // must not turn a confirmed Discord upload into an apparent upload error.
+                        Log.Error("The edited clip operation finished, but ClipCord could not restart its watcher.", exception);
+                        SetStatus("Watcher restart failed — open Settings to retry");
+                    }
+                }
+            }
+            finally
+            {
+                if (ReferenceEquals(_manualClipOperationCancellation, operationCancellation))
+                {
+                    _manualClipOperationCancellation = null;
+                }
+                operationCancellation.Dispose();
+                _reconfigurationInProgress = false;
+                if (!_shutdownScheduled)
+                {
+                    _uploadToDiscordItem.Checked = _settings.UploadToDiscord;
+                    _uploadToDiscordItem.Enabled = _settings.IsValid;
+                }
+                ScheduleDeferredExitIfRequested();
+            }
+        }
+    }
+
     private void RequestExit()
     {
+        if (TryDeferExitAndCancelManualOperation(
+                _reconfigurationInProgress,
+                ref _exitRequestedAfterReconfiguration,
+                _manualClipOperationCancellation))
+        {
+            SetStatus("Finishing the current clip operation before exit");
+            return;
+        }
         _shutdownScheduled = true;
         ExitThread();
+    }
+
+    internal static bool TryDeferExitAndCancelManualOperation(
+        bool reconfigurationInProgress,
+        ref bool exitRequested,
+        CancellationTokenSource? manualOperationCancellation)
+    {
+        if (!reconfigurationInProgress) return false;
+        exitRequested = true;
+        try { manualOperationCancellation?.Cancel(); }
+        catch (ObjectDisposedException) { }
+        return true;
+    }
+
+    private void ScheduleDeferredExitIfRequested()
+    {
+        if (!_exitRequestedAfterReconfiguration || _shutdownScheduled || _reconfigurationInProgress) return;
+        _exitRequestedAfterReconfiguration = false;
+        _uiContext.Post(_ => RequestExit(), null);
     }
 
     private void StartController(AppSettings settings)
@@ -542,8 +656,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             release.Version,
             dialog.DownloadedUpdate.InstallerPath,
             release.InstallerSha256);
-        _shutdownScheduled = true;
-        _uiContext.Post(_ => ExitThread(), null);
+        // Use the same deferred-exit boundary as the tray Exit command. If a manual
+        // clip operation is active, cancellable FFmpeg work stops while any started
+        // webhook POST reaches an authoritative result and persists it before setup runs.
+        _uiContext.Post(_ => RequestExit(), null);
     }
 
     private static void OpenReleasePage(Uri releasePageUri, IWin32Window? owner)

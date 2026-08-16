@@ -38,12 +38,15 @@ flowchart LR
 - `ActivityView` renders those snapshots independently of the watcher and provides valid local file, uploaded-folder, and diagnostic-log actions.
 - `GalleryCatalog` performs a bounded, one-level scan of the existing uploaded and local-only archives on demand, skips reparse points, preserves each clip's route, and groups clips case-insensitively by game. Parseable legacy clips left at an archive root join their inferred game; unrecognized names remain under `Uncategorized`.
 - `GalleryView` renders deterministic local gradient cards and clip actions only while its page is active; it has no timer, file watcher, artwork request, or persistent media index.
+- `LocalClipEditorView` adds an on-demand, focused Local-only workflow for still-frame preview, trim, mute, naming, attribution, and explicit upload without embedding a browser or media runtime.
+- `ClipEditProcessor` validates the selected Local-only path, probes and renders with the bundled FFmpeg through argument lists, and stages same-volume artifacts beneath the watcher-invisible `.clipcord-editing` directory.
+- `EditedClipUploadService` persists the edited content hash and fixed archive/recycle disposition before touching either source file; `UploaderWorker` resumes confirmed pending dispositions without another webhook request.
 - `AboutView` renders a read-only status, privacy, diagnostics, links, and credits page inside the existing Settings shell without adding a background worker or network client.
 - `AboutPageSupport` normalizes watcher text to fixed categories, constructs an exact allowlisted diagnostic summary, classifies installed versus portable copies without exposing paths, and maps project actions to fixed official HTTPS GitHub targets.
 - `DiscordWebhookClient` sends multipart attachments with uploader/game attribution, disabled mentions, separate connection and total deadlines, and progressively smaller compression retries.
 - `FfmpegCompressor` performs local two-pass H.264/AAC compression to a requested target.
 - `SettingsStore` encrypts the webhook with DPAPI and performs staged legacy migration.
-- `WatchStateStore` uses durable atomic replacement for content hashes, safe-baseline keys, and pending archive moves.
+- `WatchStateStore` uses durable atomic replacement for content hashes, safe-baseline keys, pending archive moves, and confirmed edited-upload dispositions.
 - `GitHubUpdateChecker` fetches only the repository's fixed latest-release endpoint, validates stable release and installer metadata, and uses bounded response sizes and deadlines.
 - `UpdateCoordinator` enforces the 24-hour automatic-check interval, prevents concurrent checks, and applies persisted skip/remind choices.
 - `UpdateDownloadService` follows at most one allow-listed GitHub asset redirect, streams into a temporary per-version file, enforces the release size, computes SHA-256 incrementally, and commits the verified installer atomically.
@@ -60,6 +63,7 @@ flowchart LR
 - SHA-256 identity survives file, folder, and timestamp renames at the cost of one full local read per new clip.
 - Two workers isolate the queue from one slow request; each HTTP upload has a five-minute deadline and connection establishment has a 15-second deadline.
 - Confirmed upload state is flushed to disk before any archive move.
+- A user-edited upload stops the active watcher before sharing its state store. Each webhook POST is allowed to finish under its bounded request deadline once started, while inspection, rendering, compression, and later attempts remain cancellable. This avoids a local-cancel/remote-success duplicate window; its edited hash and disposition are then flushed before archive or Recycle Bin work.
 - Local-only state and its pending destination are also flushed before moving, independently of uploaded state.
 - Move destinations never overwrite existing files.
 - Archive-folder resolution reuses case-insensitive `uploaded`, `local-only`, and game-name matches, creates lowercase canonical names only when none exists, and uses `Uncategorized` when no supported filename timestamp exposes a game name.

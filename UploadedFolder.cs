@@ -37,8 +37,13 @@ public static class UploadedFolder
 
     public static string GetOrCreateForClip(string clipsFolder, string clipFileName)
     {
+        return GetOrCreateForGame(clipsFolder, GetGameFolderName(clipFileName));
+    }
+
+    internal static string GetOrCreateForGame(string clipsFolder, string gameName)
+    {
         var uploadedFolder = GetOrCreate(clipsFolder);
-        return GetOrCreateCaseInsensitiveChild(uploadedFolder, GetGameFolderName(clipFileName));
+        return GetOrCreateCaseInsensitiveChild(uploadedFolder, SanitizeGameFolderName(gameName));
     }
 
     public static string GetOrCreateLocalOnly(string clipsFolder) =>
@@ -52,6 +57,30 @@ public static class UploadedFolder
 
     internal static string? FindExistingLocalOnly(string clipsFolder) =>
         FindCaseInsensitiveChild(clipsFolder, LocalOnlyFolderName);
+
+    internal static string GetUniqueDestination(string folder, string fileName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(folder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        if (!Path.GetFileName(fileName).Equals(fileName, StringComparison.Ordinal) ||
+            !Path.GetExtension(fileName).Equals(".mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("The archive file name must be an MP4 leaf name.", nameof(fileName));
+        }
+
+        var destination = Path.Combine(folder, fileName);
+        if (!File.Exists(destination)) return destination;
+
+        var baseName = Path.GetFileNameWithoutExtension(fileName);
+        var extension = Path.GetExtension(fileName);
+        do
+        {
+            var suffix = $"{DateTime.Now:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}"[..25];
+            destination = Path.Combine(folder, $"{baseName}-{suffix}{extension}");
+        } while (File.Exists(destination));
+
+        return destination;
+    }
 
     public static string GetGameFolderName(string clipFileName)
     {
@@ -130,7 +159,7 @@ public static class UploadedFolder
         return null;
     }
 
-    private static string SanitizeGameFolderName(string? gameName)
+    internal static string SanitizeGameFolderName(string? gameName)
     {
         if (string.IsNullOrWhiteSpace(gameName)) return UncategorizedFolderName;
 

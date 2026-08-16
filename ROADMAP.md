@@ -13,8 +13,9 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 
 ## Current priority
 
-1. [#17 Opt-in beta channel](https://github.com/malikpervez/clips-to-discord/issues/17) — expose public prereleases only to users who explicitly choose them while stable remains the default.
-2. Build on the shipped Activity foundation with [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20) as separate changes.
+1. Finish and review the focused Local-only **Edit & upload** Gallery workflow without expanding ClipCord into a general-purpose editor.
+2. [#17 Opt-in beta channel](https://github.com/malikpervez/clips-to-discord/issues/17) — expose public prereleases only to users who explicitly choose them while stable remains the default.
+3. Build on the shipped Activity foundation with [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20) as separate changes.
 
 ## Recently shipped
 

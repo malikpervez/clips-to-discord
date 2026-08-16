@@ -6,7 +6,7 @@ namespace ClipsToDiscord;
 
 internal sealed class WatchStateStore
 {
-    private const int CurrentVersion = 3;
+    private const int CurrentVersion = 4;
     private const int MinimumCompatibleVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _statePath;
@@ -46,15 +46,16 @@ internal sealed class WatchStateStore
 
         if (!forceSafeBaseline && saved is not null && saved.Version >= MinimumCompatibleVersion)
         {
-            var needsLocalOnlyBaseline = saved.Version < CurrentVersion;
+            var needsLocalOnlyBaseline = saved.Version < 3;
+            var needsVersionUpgrade = saved.Version < CurrentVersion;
             Normalize(saved);
             if (saved.ClipsFolder.Equals(clipsFolder, StringComparison.OrdinalIgnoreCase))
             {
                 if (needsLocalOnlyBaseline)
                 {
                     await AddLocalOnlyBaselineAsync(saved, clipsFolder, cancellationToken);
-                    Save(saved);
                 }
+                if (needsLocalOnlyBaseline || needsVersionUpgrade) Save(saved);
                 return saved;
             }
 
@@ -74,7 +75,8 @@ internal sealed class WatchStateStore
             Version = CurrentVersion,
             ClipsFolder = clipsFolder,
             PendingMoves = saved?.PendingMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
-            PendingLocalOnlyMoves = saved?.PendingLocalOnlyMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            PendingLocalOnlyMoves = saved?.PendingLocalOnlyMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            PendingEditedUploads = saved?.PendingEditedUploads ?? []
         };
         Normalize(state);
         await AddSafeBaselineAsync(state, clipsFolder, cancellationToken);
@@ -202,6 +204,11 @@ internal sealed class WatchStateStore
         state.PendingLocalOnlyMoves = new HashSet<string>(
             state.PendingLocalOnlyMoves ?? [],
             StringComparer.OrdinalIgnoreCase);
+        state.PendingEditedUploads = (state.PendingEditedUploads ?? [])
+            .Where(pending => pending is not null && pending.Id != Guid.Empty)
+            .GroupBy(pending => pending.Id)
+            .Select(group => group.First())
+            .ToList();
         state.KnownSignatures = null;
     }
 
@@ -224,7 +231,21 @@ internal sealed class WatchState
     public HashSet<string> IgnoredFileKeys { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> PendingMoves { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> PendingLocalOnlyMoves { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public List<PendingEditedClipDisposition> PendingEditedUploads { get; set; } = [];
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public HashSet<string>? KnownSignatures { get; set; }
+}
+
+internal sealed record PendingEditedClipDisposition
+{
+    public Guid Id { get; init; }
+    public string ClipsFolder { get; init; } = string.Empty;
+    public string EditedPath { get; init; } = string.Empty;
+    public string DestinationPath { get; init; } = string.Empty;
+    public string OriginalLocalOnlyPath { get; init; } = string.Empty;
+    public string EditedContentHash { get; init; } = string.Empty;
+    public string OriginalContentHash { get; init; } = string.Empty;
+    public bool KeepOriginal { get; init; }
+    public long OutputBytes { get; init; }
 }

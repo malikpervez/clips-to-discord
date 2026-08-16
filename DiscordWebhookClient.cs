@@ -13,9 +13,13 @@ internal sealed class DiscordWebhookClient : IDisposable
     internal const int MaximumResponseBytes = 64 * 1024;
     private readonly HttpClient _client;
 
-    public DiscordWebhookClient()
+    public DiscordWebhookClient() : this(CreateHandler())
     {
-        var handler = CreateHandler();
+    }
+
+    internal DiscordWebhookClient(HttpMessageHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
         _client = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = Timeout.InfiniteTimeSpan
@@ -59,21 +63,57 @@ internal sealed class DiscordWebhookClient : IDisposable
         string uploaderName,
         CancellationToken cancellationToken,
         Action<CompressionProgress>? reportCompression = null)
+        => await UploadWithCompressionAsync(
+            webhookUrl,
+            filePath,
+            new DiscordUploadPresentation(
+                Path.GetFileName(filePath),
+                UploadedFolder.GetGameFolderName(Path.GetFileName(filePath)),
+                null),
+            compressionTargetMb,
+            uploaderName,
+            cancellationToken,
+            reportCompression);
+
+    internal async Task UploadWithCompressionAsync(
+        string webhookUrl,
+        string filePath,
+        DiscordUploadPresentation presentation,
+        int compressionTargetMb,
+        string uploaderName,
+        CancellationToken cancellationToken,
+        Action<CompressionProgress>? reportCompression = null,
+        bool completeStartedPosts = false)
     {
-        var message = DiscordClipMessage.BuildContent(uploaderName, Path.GetFileName(filePath));
-        var description = DiscordClipMessage.BuildDescription(uploaderName, Path.GetFileName(filePath));
+        ArgumentNullException.ThrowIfNull(presentation);
+        var displayFileName = Path.GetFileName(presentation.DisplayFileName);
+        if (!displayFileName.Equals(presentation.DisplayFileName, StringComparison.Ordinal) ||
+            !Path.GetExtension(displayFileName).Equals(".mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("The Discord display file name must be an MP4 leaf name.", nameof(presentation));
+        }
+        var message = DiscordClipMessage.BuildContentForGame(
+            uploaderName,
+            presentation.GameName,
+            presentation.Note);
+        var description = DiscordClipMessage.BuildDescriptionForGame(
+            uploaderName,
+            presentation.GameName,
+            presentation.Note);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             await UploadOnceAsync(
                 webhookUrl,
                 filePath,
-                Path.GetFileName(filePath),
+                displayFileName,
                 message,
                 description,
-                cancellationToken);
+                completeStartedPosts ? CancellationToken.None : cancellationToken);
         }
         catch (DiscordUploadException exception) when (exception.IsTooLarge)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var ffmpegPath = FfmpegCompressor.FindExecutable();
             if (ffmpegPath is null)
             {
@@ -95,6 +135,7 @@ internal sealed class DiscordWebhookClient : IDisposable
             DiscordUploadException lastSizeException = exception;
             foreach (var targetMb in achievableTargets)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 CompressionTargetPlanner.TryCreateBitrates(duration, targetMb, out var bitrates);
                 reportCompression?.Invoke(new CompressionProgress(
                     targetMb,
@@ -126,13 +167,14 @@ internal sealed class DiscordWebhookClient : IDisposable
                         originalBytes,
                         compressedBytes));
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     await UploadOnceAsync(
                         webhookUrl,
                         compressedPath,
-                        Path.GetFileName(filePath),
+                        displayFileName,
                         message,
                         description,
-                        cancellationToken);
+                        completeStartedPosts ? CancellationToken.None : cancellationToken);
                     return;
                 }
                 catch (DiscordUploadException compressedException) when (compressedException.IsTooLarge)
@@ -331,6 +373,11 @@ internal readonly record struct CompressionProgress(
     int AudioKbps,
     long OriginalBytes,
     long? CompressedBytes);
+
+internal sealed record DiscordUploadPresentation(
+    string DisplayFileName,
+    string GameName,
+    string? Note);
 
 internal sealed class DiscordUploadException(string message, bool isTooLarge) : Exception(message)
 {

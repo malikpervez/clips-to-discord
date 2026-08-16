@@ -8,7 +8,8 @@ internal sealed class UploaderWorker(
     Action<string> reportStatus,
     WatchStateStore? stateStore = null,
     Func<DiscordWebhookClient>? discordClientFactory = null,
-    ActivityHistoryStore? activityHistory = null)
+    ActivityHistoryStore? activityHistory = null,
+    EditedClipDispositionProcessor? editedClipDispositionProcessor = null)
 {
     private const int UploadWorkerCount = 2;
     private readonly WatchStateStore _stateStore = stateStore ?? new WatchStateStore();
@@ -21,6 +22,8 @@ internal sealed class UploaderWorker(
     private readonly ConcurrentDictionary<string, byte> _activeMoves = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _hashCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTime> _lastReadinessLog = new(StringComparer.OrdinalIgnoreCase);
+    private readonly EditedClipDispositionProcessor _editedClipDispositionProcessor =
+        editedClipDispositionProcessor ?? new EditedClipDispositionProcessor();
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -316,7 +319,7 @@ internal sealed class UploaderWorker(
             // For uploads, this is intentionally the first operation after Discord confirms
             // success. For both destinations, the content hash and intended move are flushed
             // to disk before any move attempt so a restart cannot change the routing decision.
-            await _stateGate.WaitAsync(cancellationToken);
+            await _stateGate.WaitAsync(uploadedNow ? CancellationToken.None : cancellationToken);
             try
             {
                 state.KnownContentHashes.Add(clip.ContentHash);
@@ -462,17 +465,75 @@ internal sealed class UploaderWorker(
 
     private async Task ProcessPendingMovesAsync(WatchState state, CancellationToken cancellationToken)
     {
+        PendingEditedClipDisposition[] pendingEditedUploads;
         string[] pendingUploads;
         string[] pendingLocalOnly;
         await _stateGate.WaitAsync(cancellationToken);
         try
         {
+            pendingEditedUploads = state.PendingEditedUploads.ToArray();
             pendingUploads = state.PendingMoves.ToArray();
             pendingLocalOnly = state.PendingLocalOnlyMoves.ToArray();
         }
         finally
         {
             _stateGate.Release();
+        }
+
+        foreach (var pending in pendingEditedUploads)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var retryKey = $"edited-disposition:{pending.Id:N}";
+            if (IsBackedOff(retryKey)) continue;
+            try
+            {
+                var disposition = await _editedClipDispositionProcessor.CompleteAsync(
+                    pending,
+                    cancellationToken);
+                await _stateGate.WaitAsync(cancellationToken);
+                try
+                {
+                    state.PendingEditedUploads.RemoveAll(item => item.Id == pending.Id);
+                    _stateStore.Save(state);
+                }
+                finally
+                {
+                    _stateGate.Release();
+                }
+                _retryAfter.TryRemove(retryKey, out _);
+                var gameName = Path.GetFileName(Path.GetDirectoryName(disposition.ArchivedPath)) ?? "Uncategorized";
+                activityHistory?.Transition(new ClipActivityUpdate(
+                    pending.OriginalLocalOnlyPath,
+                    ClipActivityState.Archived,
+                    GameName: gameName,
+                    OriginalBytes: pending.OutputBytes,
+                    CurrentPath: disposition.ArchivedPath,
+                    Route: ClipActivityRoute.Uploaded,
+                    Detail: disposition.OriginalCleanupFailed
+                        ? "Recovered the edited archive; its Local-only original was kept because Recycle Bin cleanup failed."
+                        : pending.KeepOriginal
+                            ? "Recovered the edited archive and kept the Local-only original by choice."
+                            : "Recovered the confirmed edited upload without posting it again.",
+                    ClearError: true,
+                    ReuseTerminalEntry: true));
+                Log.Info($"Recovered a confirmed edited upload without another Discord request: {Path.GetFileName(disposition.ArchivedPath)}");
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _retryAfter[retryKey] = DateTime.UtcNow.AddMinutes(1);
+                Log.Error(
+                    $"Could not finish the confirmed edited-clip archive for {Path.GetFileName(pending.DestinationPath)}; it will retry without another upload.",
+                    exception);
+                activityHistory?.Transition(new ClipActivityUpdate(
+                    pending.OriginalLocalOnlyPath,
+                    ClipActivityState.Retrying,
+                    GameName: Path.GetFileName(Path.GetDirectoryName(pending.DestinationPath)),
+                    OriginalBytes: pending.OutputBytes,
+                    Route: ClipActivityRoute.Uploaded,
+                    Detail: "Discord already accepted this edit; local archive recovery will retry without reposting.",
+                    Error: exception.Message,
+                    ReuseTerminalEntry: true));
+            }
         }
 
         foreach (var path in pendingUploads)
@@ -582,7 +643,7 @@ internal sealed class UploaderWorker(
         var archiveFolder = destination == ArchiveDestination.Uploaded
             ? UploadedFolder.GetOrCreateForClip(clipsFolder, Path.GetFileName(sourcePath))
             : UploadedFolder.GetOrCreateLocalOnlyForClip(clipsFolder, Path.GetFileName(sourcePath));
-        var destinationPath = UniqueDestination(archiveFolder, Path.GetFileName(sourcePath));
+        var destinationPath = UploadedFolder.GetUniqueDestination(archiveFolder, Path.GetFileName(sourcePath));
         Exception? lastError = null;
 
         for (var attempt = 1; attempt <= 5; attempt++)
@@ -604,22 +665,6 @@ internal sealed class UploaderWorker(
         }
 
         throw new IOException($"Could not move the clip to {archiveFolder}.", lastError);
-    }
-
-    private static string UniqueDestination(string folder, string fileName)
-    {
-        var destination = Path.Combine(folder, fileName);
-        if (!File.Exists(destination)) return destination;
-
-        var baseName = Path.GetFileNameWithoutExtension(fileName);
-        var extension = Path.GetExtension(fileName);
-        do
-        {
-            var suffix = $"{DateTime.Now:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}"[..25];
-            destination = Path.Combine(folder, $"{baseName}-{suffix}{extension}");
-        } while (File.Exists(destination));
-
-        return destination;
     }
 
     private bool IsBackedOff(string key) =>

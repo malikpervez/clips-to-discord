@@ -761,7 +761,8 @@ internal sealed class OutlineButton : Button
                 Font,
                 textBounds,
                 textColor,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix);
         }
         else
         {
@@ -771,7 +772,8 @@ internal sealed class OutlineButton : Button
                 Font,
                 ClientRectangle,
                 textColor,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix);
         }
         if (Focused && ShowFocusCues)
         {

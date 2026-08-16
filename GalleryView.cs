@@ -12,19 +12,30 @@ internal sealed class GalleryView : UserControl
     private readonly OutlineButton _backButton;
     private readonly OutlineButton _refreshButton;
     private readonly OutlineButton _openClipsButton;
+    private readonly FlowLayoutPanel _filterBar;
+    private readonly OutlineButton _allFilterButton;
+    private readonly OutlineButton _localOnlyFilterButton;
+    private readonly OutlineButton _uploadedFilterButton;
     private readonly GalleryGridPanel _gameGrid;
     private readonly ActivityListPanel _clipList;
     private readonly BrandedScrollHost _scrollHost;
+    private readonly IManualClipEditService? _manualClipEditService;
     private CancellationTokenSource? _scanCancellation;
     private string _clipsFolder;
     private GallerySnapshot _snapshot = new([], []);
     private GalleryGameEntry? _selectedGame;
+    private GalleryClipRoute? _routeFilter;
+    private LocalClipEditorView? _editor;
+    private GalleryScreen _screen;
     private bool _active;
     private bool _disposed;
 
-    internal GalleryView(string clipsFolder)
+    internal event Action<bool>? OperationBusyChanged;
+
+    internal GalleryView(string clipsFolder, IManualClipEditService? manualClipEditService = null)
     {
         _clipsFolder = clipsFolder;
+        _manualClipEditService = manualClipEditService;
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         Name = "GalleryView";
         Dock = DockStyle.Fill;
@@ -36,7 +47,7 @@ internal sealed class GalleryView : UserControl
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 2,
+            RowCount = 3,
             Padding = new Padding(26, 12, 26, 12),
             Margin = Padding.Empty,
             BackColor = ClipCordTheme.Shell
@@ -59,6 +70,7 @@ internal sealed class GalleryView : UserControl
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _headingLabel = new Label
         {
             Name = "GalleryHeading",
@@ -66,13 +78,17 @@ internal sealed class GalleryView : UserControl
             AutoSize = true,
             ForeColor = ClipCordTheme.ShellText,
             Font = ClipCordTheme.DisplayFont(18f, FontStyle.Bold),
+            UseMnemonic = false,
             Margin = Padding.Empty
         };
         _summaryLabel = new Label
         {
             Name = "GallerySummary",
             Text = "Uploaded and local-only clips appear together by game.",
-            AutoSize = true,
+            AutoSize = false,
+            AutoEllipsis = true,
+            Dock = DockStyle.Fill,
+            Height = 24,
             ForeColor = ClipCordTheme.ShellMutedText,
             Font = ClipCordTheme.InterfaceFont(9.5f),
             Margin = new Padding(0, 2, 0, 0)
@@ -93,7 +109,7 @@ internal sealed class GalleryView : UserControl
         _backButton = CreateShellButton("All games", 105);
         _backButton.Name = "GalleryBackButton";
         _backButton.Visible = false;
-        _backButton.Click += (_, _) => ShowLibrary();
+        _backButton.Click += (_, _) => NavigateBack();
         _refreshButton = CreateShellButton("Refresh", 94);
         _refreshButton.Name = "RefreshGalleryButton";
         _refreshButton.Margin = new Padding(10, 0, 0, 0);
@@ -107,6 +123,28 @@ internal sealed class GalleryView : UserControl
         actions.Controls.Add(_openClipsButton);
         header.Controls.Add(actions, 1, 0);
         header.SetRowSpan(actions, 2);
+
+        _filterBar = new FlowLayoutPanel
+        {
+            Name = "GalleryRouteFilters",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0, 10, 0, 0),
+            BackColor = ClipCordTheme.Shell,
+            Visible = false
+        };
+        _allFilterButton = CreateFilterButton("All", "GalleryAllFilterButton", () => SetRouteFilter(null));
+        _localOnlyFilterButton = CreateFilterButton("Local only", "GalleryLocalOnlyFilterButton", () => SetRouteFilter(GalleryClipRoute.LocalOnly));
+        _uploadedFilterButton = CreateFilterButton("Uploaded", "GalleryUploadedFilterButton", () => SetRouteFilter(GalleryClipRoute.Uploaded));
+        _localOnlyFilterButton.Margin = new Padding(8, 0, 0, 0);
+        _uploadedFilterButton.Margin = new Padding(8, 0, 0, 0);
+        _filterBar.Controls.Add(_allFilterButton);
+        _filterBar.Controls.Add(_localOnlyFilterButton);
+        _filterBar.Controls.Add(_uploadedFilterButton);
+        header.Controls.Add(_filterBar, 0, 2);
+        header.SetColumnSpan(_filterBar, 2);
 
         _gameGrid = new GalleryGridPanel
         {
@@ -186,6 +224,17 @@ internal sealed class GalleryView : UserControl
             snapshot = new GallerySnapshot([], ["ClipCord could not read the clip archive."]);
         }
         _snapshot = snapshot ?? new GallerySnapshot([], []);
+        if (_screen == GalleryScreen.Editor)
+        {
+            _refreshButton.Enabled = false;
+            var currentName = _selectedGame?.Name;
+            var refreshedGame = currentName is null
+                ? null
+                : _snapshot.Games.FirstOrDefault(game =>
+                    game.Name.Equals(currentName, StringComparison.OrdinalIgnoreCase));
+            if (refreshedGame is not null) _selectedGame = refreshedGame;
+            return;
+        }
         if (_selectedGame is not null)
         {
             _selectedGame = _snapshot.Games.FirstOrDefault(game =>
@@ -206,7 +255,22 @@ internal sealed class GalleryView : UserControl
     {
         _active = false;
         _scanCancellation?.Cancel();
+        if (_editor?.IsBusy == true)
+        {
+            _editor.CancelActiveOperation();
+        }
+        else if (_screen == GalleryScreen.Editor && _selectedGame is not null)
+        {
+            ShowGame(_selectedGame);
+        }
         if (!_disposed && !IsDisposed && !Disposing) _refreshButton.Enabled = true;
+    }
+
+    internal bool HandleEscape()
+    {
+        if (_screen == GalleryScreen.Library) return false;
+        NavigateBack();
+        return true;
     }
 
     internal void RefreshViewport()
@@ -223,9 +287,13 @@ internal sealed class GalleryView : UserControl
 
     private void ShowLibrary()
     {
+        DisposeEditor();
+        _screen = GalleryScreen.Library;
         _selectedGame = null;
         _headingLabel.Text = "Gallery";
         _backButton.Visible = false;
+        _filterBar.Visible = false;
+        _refreshButton.Enabled = true;
         _gameGrid.SuspendLayout();
         try
         {
@@ -254,17 +322,31 @@ internal sealed class GalleryView : UserControl
 
     private void ShowGame(GalleryGameEntry game)
     {
+        DisposeEditor();
+        _screen = GalleryScreen.Game;
         _selectedGame = game;
         _headingLabel.Text = game.Name;
-        _summaryLabel.Text = $"{FormatClipCount(game.Clips.Count)} · {game.UploadedCount} uploaded · {game.LocalOnlyCount} local only · {FormatBytes(game.TotalBytes)}";
+        var visibleClips = GetVisibleClips(game).ToArray();
+        _summaryLabel.Text = BuildGameSummary(game, visibleClips.Length);
         _backButton.Visible = true;
+        _backButton.Text = "All games";
+        _filterBar.Visible = true;
+        _refreshButton.Enabled = true;
+        UpdateFilterButtons();
         _clipList.SuspendLayout();
         try
         {
             DisposeChildren(_clipList);
-            foreach (var clip in game.Clips)
+            foreach (var clip in visibleClips)
             {
                 _clipList.Controls.Add(BuildClipRow(clip));
+            }
+            if (visibleClips.Length == 0)
+            {
+                _clipList.Controls.Add(CreateEmptyState(
+                    _routeFilter == GalleryClipRoute.LocalOnly
+                        ? "No Local-only clips for this game."
+                        : "No uploaded clips for this game."));
             }
         }
         finally
@@ -273,6 +355,132 @@ internal sealed class GalleryView : UserControl
         }
         _scrollHost.Content = _clipList;
         _scrollHost.RefreshContentLayout(preservePosition: false);
+    }
+
+    private void SetRouteFilter(GalleryClipRoute? route)
+    {
+        if (_screen != GalleryScreen.Game || _selectedGame is null) return;
+        _routeFilter = route;
+        ShowGame(_selectedGame);
+    }
+
+    private IEnumerable<GalleryClipEntry> GetVisibleClips(GalleryGameEntry game) =>
+        _routeFilter is null
+            ? game.Clips
+            : game.Clips.Where(clip => clip.Route == _routeFilter.Value);
+
+    private void UpdateFilterButtons()
+    {
+        SetFilterSelected(_allFilterButton, _routeFilter is null);
+        SetFilterSelected(_localOnlyFilterButton, _routeFilter == GalleryClipRoute.LocalOnly);
+        SetFilterSelected(_uploadedFilterButton, _routeFilter == GalleryClipRoute.Uploaded);
+    }
+
+    private static void SetFilterSelected(OutlineButton button, bool selected)
+    {
+        button.SurfaceColor = selected ? Color.FromArgb(67, 50, 104) : Color.FromArgb(25, 35, 52);
+        button.OutlineColor = selected ? ClipCordTheme.Violet : Color.FromArgb(65, 76, 96);
+        button.ForeColor = ClipCordTheme.ShellText;
+        button.AccessibleDescription = selected ? "Selected filter" : string.Empty;
+        button.Invalidate();
+    }
+
+    private void NavigateBack()
+    {
+        if (_screen == GalleryScreen.Editor)
+        {
+            if (_editor?.IsBusy == true)
+            {
+                _editor.CancelActiveOperation();
+                return;
+            }
+            if (_selectedGame is not null) ShowGame(_selectedGame);
+            else ShowLibrary();
+            return;
+        }
+        ShowLibrary();
+    }
+
+    private void ShowEditor(GalleryClipEntry clip)
+    {
+        if (_manualClipEditService is null || clip.Route != GalleryClipRoute.LocalOnly || !File.Exists(clip.Path)) return;
+        _scanCancellation?.Cancel();
+        DisposeEditor();
+        _screen = GalleryScreen.Editor;
+        _headingLabel.Text = "Edit & upload";
+        _summaryLabel.Text = $"{clip.GameName} · Local only · {clip.FileName}";
+        _backButton.Visible = true;
+        _backButton.Text = "Back to clips";
+        _filterBar.Visible = false;
+        _refreshButton.Enabled = false;
+        var canonicalClip = clip with { GameName = _selectedGame?.Name ?? clip.GameName };
+        _editor = new LocalClipEditorView(canonicalClip, _manualClipEditService);
+        _editor.BusyChanged += EditorBusyChanged;
+        _editor.Cancelled += EditorCancelled;
+        _editor.Completed += EditorCompleted;
+        _scrollHost.Content = _editor;
+        _scrollHost.RefreshContentLayout(preservePosition: false);
+        BeginInvoke((Action)(() =>
+        {
+            if (_editor is not null && !_editor.IsDisposed) _editor.Focus();
+        }));
+    }
+
+    private void EditorBusyChanged(bool busy)
+    {
+        _backButton.Enabled = !busy;
+        OperationBusyChanged?.Invoke(busy);
+    }
+
+    private void EditorCancelled()
+    {
+        if (_selectedGame is not null)
+        {
+            ShowGame(_selectedGame);
+            BeginInvoke((Action)(() => GetSelectedFilterButton().Focus()));
+        }
+        else ShowLibrary();
+    }
+
+    private void EditorCompleted(string editedGameName, GalleryClipRoute resultRoute)
+    {
+        var selectedName = UploadedFolder.SanitizeGameFolderName(editedGameName);
+        if (_disposed || IsDisposed || Disposing || !IsHandleCreated) return;
+        BeginInvoke((Action)(() => CompleteEditorUpload(selectedName, resultRoute)));
+    }
+
+    private void CompleteEditorUpload(string selectedName, GalleryClipRoute resultRoute)
+    {
+        if (_disposed || IsDisposed || Disposing) return;
+        _routeFilter = resultRoute;
+        DisposeEditor();
+        _screen = GalleryScreen.Game;
+        _selectedGame = selectedName is null
+            ? null
+            : _snapshot.Games.FirstOrDefault(game =>
+                game.Name.Equals(selectedName, StringComparison.OrdinalIgnoreCase))
+              ?? new GalleryGameEntry(selectedName, []);
+        RefreshCatalog(_clipsFolder);
+    }
+
+    private OutlineButton GetSelectedFilterButton() => _routeFilter switch
+    {
+        GalleryClipRoute.LocalOnly => _localOnlyFilterButton,
+        GalleryClipRoute.Uploaded => _uploadedFilterButton,
+        _ => _allFilterButton
+    };
+
+    private void DisposeEditor()
+    {
+        if (_editor is null) return;
+        _editor.BusyChanged -= EditorBusyChanged;
+        _editor.Cancelled -= EditorCancelled;
+        _editor.Completed -= EditorCompleted;
+        _editor.CancelActiveOperation();
+        if (ReferenceEquals(_scrollHost.Content, _editor)) _scrollHost.Content = null;
+        _editor.Dispose();
+        _editor = null;
+        OperationBusyChanged?.Invoke(false);
     }
 
     private Control BuildClipRow(GalleryClipEntry clip)
@@ -302,7 +510,8 @@ internal sealed class GalleryView : UserControl
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         // OutlineButton grows to its rendered text width at higher DPI, so reserve
         // enough room for both actions plus their spacing and right padding.
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 244));
+        var canEdit = clip.Route == GalleryClipRoute.LocalOnly && _manualClipEditService is not null;
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, canEdit ? 376 : 244));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.Controls.Add(new GalleryGradientTile(
             GalleryCatalog.GetInitials(clip.GameName),
@@ -363,6 +572,18 @@ internal sealed class GalleryView : UserControl
             Margin = Padding.Empty,
             BackColor = ClipCordTheme.Card
         };
+        if (canEdit)
+        {
+            var edit = CreateCardButton("Edit & upload", 116);
+            edit.Name = "EditGalleryClipButton";
+            edit.AccessibleName = $"Edit and upload {clip.FileName}";
+            edit.SurfaceColor = Color.FromArgb(237, 231, 253);
+            edit.OutlineColor = ClipCordTheme.Violet;
+            edit.ForeColor = Color.FromArgb(76, 44, 135);
+            edit.Enabled = File.Exists(clip.Path);
+            edit.Click += (_, _) => ShowEditor(clip);
+            actions.Controls.Add(edit);
+        }
         var play = CreateCardButton("Play clip", 90);
         play.Name = "PlayGalleryClipButton";
         play.AccessibleName = $"Play {clip.FileName}";
@@ -374,6 +595,7 @@ internal sealed class GalleryView : UserControl
         show.Margin = new Padding(8, 0, 0, 0);
         show.Enabled = File.Exists(clip.Path);
         show.Click += (_, _) => ShowClipInFolder(clip);
+        play.Margin = canEdit ? new Padding(8, 0, 0, 0) : Padding.Empty;
         actions.Controls.Add(play);
         actions.Controls.Add(show);
         layout.Controls.Add(actions, 2, 0);
@@ -435,6 +657,12 @@ internal sealed class GalleryView : UserControl
         return snapshot.Warnings.Count == 0 ? summary : summary + " · Some clips could not be read";
     }
 
+    private string BuildGameSummary(GalleryGameEntry game, int visibleCount)
+    {
+        var baseSummary = $"{FormatClipCount(game.Clips.Count)} · {game.UploadedCount} uploaded · {game.LocalOnlyCount} local only · {FormatBytes(game.TotalBytes)}";
+        return _routeFilter is null ? baseSummary : $"Showing {FormatClipCount(visibleCount)} · {baseSummary}";
+    }
+
     private static string FormatClipCount(int count) => $"{count} clip{(count == 1 ? string.Empty : "s")}";
 
     internal static string FormatBytes(long bytes)
@@ -456,11 +684,23 @@ internal sealed class GalleryView : UserControl
         Height = 38,
         SurfaceColor = Color.FromArgb(25, 35, 52),
         HoverColor = Color.FromArgb(35, 46, 65),
+        DisabledSurfaceColor = Color.FromArgb(20, 30, 46),
+        DisabledTextColor = ClipCordTheme.ShellMutedText,
         OutlineColor = Color.FromArgb(65, 76, 96),
         ForeColor = ClipCordTheme.ShellText,
         Font = ClipCordTheme.InterfaceFont(9f),
         Margin = Padding.Empty
     };
+
+    private static OutlineButton CreateFilterButton(string text, string name, Action clicked)
+    {
+        var button = CreateShellButton(text, text.Length > 6 ? 104 : 72);
+        button.Name = name;
+        button.Height = 32;
+        button.AccessibleName = $"Show {text.ToLowerInvariant()} clips";
+        button.Click += (_, _) => clicked();
+        return button;
+    }
 
     private static OutlineButton CreateCardButton(string text, int width) => new()
     {
@@ -513,11 +753,19 @@ internal sealed class GalleryView : UserControl
             _active = false;
             _scanCancellation?.Cancel();
             _scanCancellation?.Dispose();
+            DisposeEditor();
             _toolTip.Dispose();
             _gameGrid.Dispose();
             _clipList.Dispose();
         }
         base.Dispose(disposing);
+    }
+
+    private enum GalleryScreen
+    {
+        Library,
+        Game,
+        Editor
     }
 }
 

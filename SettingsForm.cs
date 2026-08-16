@@ -158,6 +158,7 @@ internal sealed class SettingsForm : Form
     private readonly Func<IWin32Window, Task>? _checkForUpdatesAsync;
     private readonly AppSettings _appliedSettings;
     private readonly ActivityHistoryStore _activityHistory;
+    private readonly IManualClipEditService? _manualClipEditService;
     private readonly SettingsPage _openingPage;
     private readonly bool _ownsActivityHistory;
     private RoundedPanel? _settingsNavigationItem;
@@ -171,6 +172,7 @@ internal sealed class SettingsForm : Form
     private GalleryView? _galleryPage;
     private AboutView? _aboutPage;
     private bool _busy;
+    private bool _galleryBusy;
     private string? _lastWatcherFullStatus;
     private Size _lastWindowRegionSize = Size.Empty;
 
@@ -183,7 +185,8 @@ internal sealed class SettingsForm : Form
         Func<IWin32Window, Task>? checkForUpdatesAsync = null,
         Func<string>? watcherStatusProvider = null,
         ActivityHistoryStore? activityHistory = null,
-        SettingsPage initialPage = SettingsPage.Settings)
+        SettingsPage initialPage = SettingsPage.Settings,
+        IManualClipEditService? manualClipEditService = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -191,6 +194,7 @@ internal sealed class SettingsForm : Form
         _checkForUpdatesAsync = checkForUpdatesAsync;
         _watcherStatusProvider = watcherStatusProvider;
         _activityHistory = activityHistory ?? new ActivityHistoryStore(string.Empty);
+        _manualClipEditService = manualClipEditService;
         _ownsActivityHistory = activityHistory is null;
         _openingPage = initialPage;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
@@ -426,7 +430,8 @@ internal sealed class SettingsForm : Form
         };
         _settingsPage = BuildCards();
         _activityPage = new ActivityView(_activityHistory, _folderText.Text);
-        _galleryPage = new GalleryView(_folderText.Text);
+        _galleryPage = new GalleryView(_folderText.Text, _manualClipEditService);
+        _galleryPage.OperationBusyChanged += GalleryOperationBusyChanged;
         _aboutPage = new AboutView(_appliedSettings, _watcherStatusProvider);
         _aboutPage.CheckUpdatesRequested += CheckUpdatesClicked;
         _aboutPage.SetBusy(false, _checkForUpdatesAsync is not null);
@@ -504,6 +509,7 @@ internal sealed class SettingsForm : Form
     internal void ShowPage(SettingsPage page)
     {
         if (_settingsPage is null || _activityPage is null || _galleryPage is null || _aboutPage is null) return;
+        if (_galleryBusy && page != SettingsPage.Gallery) return;
 
         var showSettings = page == SettingsPage.Settings;
         var showActivity = page == SettingsPage.Activity;
@@ -1558,9 +1564,34 @@ internal sealed class SettingsForm : Form
         }
     }
 
+    private void GalleryOperationBusyChanged(bool busy)
+    {
+        _galleryBusy = busy;
+        if (IsDisposed || Disposing) return;
+        if (_settingsNavigationItem is not null) _settingsNavigationItem.Enabled = !busy;
+        if (_activityNavigationItem is not null) _activityNavigationItem.Enabled = !busy;
+        if (_galleryNavigationItem is not null) _galleryNavigationItem.Enabled = true;
+        if (_aboutNavigationItem is not null) _aboutNavigationItem.Enabled = !busy;
+        _saveButton.Enabled = !busy && !_busy;
+        _cancelButton.Enabled = !busy && !_busy;
+        _closeButton.Enabled = !busy && !_busy;
+        _maximizeButton.Enabled = !busy && !_busy;
+        if (busy)
+        {
+            _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
+            _statusLabel.Text = "Editing and manual upload in progress…";
+            _privacySummaryLabel.Text = "The Local-only original remains protected until Discord confirms success.";
+        }
+        else if (_galleryPage is { Visible: true })
+        {
+            _statusLabel.Text = "Gallery reads uploaded and local-only archives only while this page is open.";
+            _privacySummaryLabel.Text = "Playing or browsing a local-only clip never uploads it.";
+        }
+    }
+
     private void FormClosingWhileBusy(object? sender, FormClosingEventArgs eventArgs)
     {
-        if (_busy && eventArgs.CloseReason == CloseReason.UserClosing) eventArgs.Cancel = true;
+        if ((_busy || _galleryBusy) && eventArgs.CloseReason == CloseReason.UserClosing) eventArgs.Cancel = true;
     }
 
     private void EnableWindowDrag(Control control)
@@ -1630,6 +1661,11 @@ internal sealed class SettingsForm : Form
 
     protected override bool ProcessDialogKey(Keys keyData)
     {
+        if (keyData == Keys.Escape && _galleryPage is { Visible: true } &&
+            _galleryPage.HandleEscape())
+        {
+            return true;
+        }
         if (keyData == Keys.Escape && _aboutPage is { Visible: true } && !_busy)
         {
             Close();

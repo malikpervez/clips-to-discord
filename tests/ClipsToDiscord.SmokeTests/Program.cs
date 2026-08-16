@@ -27,6 +27,12 @@ try
         RenderAboutPreview(args[1]);
         return;
     }
+
+    if (args.Length == 2 && args[0].Equals("--render-gallery-editor", StringComparison.Ordinal))
+    {
+        RenderGalleryEditorPreview(args[1]);
+        return;
+    }
 }
 catch (Exception exception)
 {
@@ -335,8 +341,27 @@ try
         _ => { },
         CancellationToken.None);
     Assert(
-        upgradedV2State.Version == 3 && upgradedV2State.LocalOnlyContentHashes.Count == 2,
+        upgradedV2State.Version == 4 && upgradedV2State.LocalOnlyContentHashes.Count == 2,
         "A v2 state upgrade must baseline existing local-only archives without treating them as uploads.");
+
+    var v3UpgradeStateDirectory = Path.Combine(temporaryRoot, "v3-edited-upload-upgrade");
+    Directory.CreateDirectory(v3UpgradeStateDirectory);
+    var v3StatePath = Path.Combine(v3UpgradeStateDirectory, "state.json");
+    var v3UpgradeStore = new WatchStateStore(
+        v3StatePath,
+        Path.Combine(v3UpgradeStateDirectory, ".safe-baseline-required"));
+    v3UpgradeStore.Save(new WatchState { Version = 3, ClipsFolder = gameArchiveRoot });
+    var upgradedV3State = await v3UpgradeStore.LoadOrInitializeAsync(
+        gameArchiveRoot,
+        _ => { },
+        CancellationToken.None);
+    using (var persistedV3Upgrade = JsonDocument.Parse(File.ReadAllText(v3StatePath)))
+    {
+        Assert(upgradedV3State.Version == 4 &&
+               upgradedV3State.LocalOnlyContentHashes.Count == 0 &&
+               persistedV3Upgrade.RootElement.GetProperty("Version").GetInt32() == 4,
+            "A quiet same-folder v3 migration must durably write state v4 without rerunning the v2 Local-only baseline.");
+    }
 
     var localOnlySettings = new AppSettings(
         gameArchiveRoot,
@@ -411,6 +436,22 @@ try
         DiscordClipMessage.BuildContent("player_*one*", "manual-highlight.mp4") ==
         "player\\_\\*one\\* uploaded a clip.",
         "Uploader names must be escaped and unrecognized games must not claim a game name.");
+    var longManualNote = new string('x', DiscordClipMessage.MaximumNoteLength - 1) + "😀ignored";
+    var normalizedManualNote = DiscordClipMessage.NormalizeNote("  flank\r\n*push*\u0001  ");
+    Assert(normalizedManualNote == "flank\n*push*" &&
+           DiscordClipMessage.BuildContentForGame(
+               "Malik_*",
+               "Battlefield™-6",
+               normalizedManualNote) ==
+           "Malik\\_\\* uploaded a clip from Battlefield™-6.\nflank\n\\*push\\*" &&
+           DiscordClipMessage.BuildDescriptionForGame(
+               "Malik_*",
+               "Battlefield™-6",
+               normalizedManualNote) ==
+           "Malik_* uploaded a clip from Battlefield™-6. flank\n*push*" &&
+           DiscordClipMessage.NormalizeNote(longManualNote) is { Length: DiscordClipMessage.MaximumNoteLength - 1 } boundedNote &&
+           !char.IsSurrogate(boundedNote[^1]),
+        "Manual edit notes must remove controls, normalize line endings, escape visible Markdown only, and never split a surrogate at the bound.");
     using (var payload = JsonDocument.Parse(DiscordWebhookClient.BuildUploadPayload(
                "clip.mp4",
                "Malik uploaded a clip from Battlefield™-6.",
@@ -477,12 +518,26 @@ try
     var recoveryStatePath = Path.Combine(recoveryStateDirectory, "state.json");
     var recoveryMarkerPath = Path.Combine(recoveryStateDirectory, ".safe-baseline-required");
     var recoveryStore = new WatchStateStore(recoveryStatePath, recoveryMarkerPath);
+    var pendingEditedId = Guid.NewGuid();
     recoveryStore.Save(new WatchState
     {
         Version = 2,
         ClipsFolder = recoveryClips,
         PendingMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pendingMovePath },
-        PendingLocalOnlyMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pendingLocalOnlyMovePath }
+        PendingLocalOnlyMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pendingLocalOnlyMovePath },
+        PendingEditedUploads =
+        [
+            new PendingEditedClipDisposition
+            {
+                Id = pendingEditedId,
+                ClipsFolder = recoveryClips,
+                EditedPath = Path.Combine(recoveryClips, ".clipcord-editing", "pending", "edit.mp4"),
+                DestinationPath = Path.Combine(recoveryClips, "uploaded", "Game", "edit.mp4"),
+                OriginalLocalOnlyPath = Path.Combine(recoveryClips, "local-only", "Game", "source.mp4"),
+                EditedContentHash = "edited-hash",
+                OriginalContentHash = "original-hash"
+            }
+        ]
     });
     await File.WriteAllTextAsync(recoveryMarkerPath, DateTime.UtcNow.ToString("O"));
     var recoveredState = await recoveryStore.LoadOrInitializeAsync(
@@ -495,6 +550,8 @@ try
     Assert(
         recoveredState.PendingLocalOnlyMoves.Contains(pendingLocalOnlyMovePath),
         "A forced safe-baseline rebuild must preserve readable local-only pending moves.");
+    Assert(recoveredState.PendingEditedUploads.Single().Id == pendingEditedId,
+        "A forced safe-baseline rebuild must preserve a confirmed edited upload for no-repost recovery.");
     Assert(
         recoveredState.KnownContentHashes.Count == 2,
         "A forced safe-baseline rebuild must hash existing clips.");
@@ -616,6 +673,7 @@ try
         Assert(!webhookHandler.AllowAutoRedirect,
             "Discord uploads must not automatically follow redirects away from the validated webhook URL.");
     }
+    await AssertStartedWebhookPostCancellationAsync(temporaryRoot, versionedWebhook);
     using (var oversizedResponse = new ByteArrayContent(
                Enumerable.Repeat((byte)'x', DiscordWebhookClient.MaximumResponseBytes + 20).ToArray()))
     {
@@ -792,6 +850,10 @@ try
 
     TraceSmokeStep("Local-only worker lifecycle");
     await AssertLocalOnlyWorkerAsync(temporaryRoot);
+
+    TraceSmokeStep("Manual Local-only edit upload transaction");
+    AssertClipEditProcessorContracts(temporaryRoot);
+    await AssertEditedClipUploadTransactionsAsync(temporaryRoot);
 
     TraceSmokeStep("Update checker");
     await UpdateCheckerTests.RunAsync(temporaryRoot);
@@ -1326,6 +1388,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
         {
             TraceSmokeStep("Settings layout: pre-handle Gallery lifecycle");
             AssertGalleryPreHandleLifecycle(settings);
+            TraceSmokeStep("Settings layout: Gallery Local-only editor flow");
+            AssertGalleryEditorFlow(settings);
             TraceSmokeStep("Settings layout: About actions and privacy seams");
             AssertAboutViewActions(settings);
             TraceSmokeStep("Settings layout: Activity navigation lifecycle");
@@ -1688,6 +1752,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertGalleryScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Gallery 200% scaling");
             AssertGalleryScaledLayout(settings, 2f);
+            TraceSmokeStep("Settings layout: Gallery editor 150% scaling");
+            AssertGalleryEditorScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Gallery editor 200% scaling");
+            AssertGalleryEditorScaledLayout(settings, 2f);
             TraceSmokeStep("Settings layout: About 150% scaling");
             AssertAboutScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: About 200% scaling");
@@ -1728,6 +1796,707 @@ static void TraceSmokeStep(string message)
 {
     Console.WriteLine($"[smoke] {message}");
     Console.Out.Flush();
+}
+
+static async Task AssertStartedWebhookPostCancellationAsync(string temporaryRoot, string webhookUrl)
+{
+    var clipPath = Path.Combine(temporaryRoot, "started-post-cancellation.mp4");
+    await File.WriteAllBytesAsync(clipPath, [1, 2, 3, 4]);
+    var presentation = new DiscordUploadPresentation(
+        Path.GetFileName(clipPath),
+        "Cancellation Test",
+        null);
+
+    using (var cancelledBeforeStart = new CancellationTokenSource())
+    using (var handler = new GatedWebhookHandler(System.Net.HttpStatusCode.NoContent))
+    using (var client = new DiscordWebhookClient(handler))
+    {
+        cancelledBeforeStart.Cancel();
+        var cancelled = false;
+        try
+        {
+            await client.UploadWithCompressionAsync(
+                webhookUrl,
+                clipPath,
+                presentation,
+                95,
+                "Cancellation Tester",
+                cancelledBeforeStart.Token,
+                completeStartedPosts: true);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+        Assert(cancelled && handler.CallCount == 0,
+            "Cancellation before a webhook POST starts must avoid sending any request.");
+    }
+
+    using (var cancellation = new CancellationTokenSource())
+    using (var handler = new GatedWebhookHandler(System.Net.HttpStatusCode.NoContent))
+    using (var client = new DiscordWebhookClient(handler))
+    {
+        var upload = client.UploadWithCompressionAsync(
+            webhookUrl,
+            clipPath,
+            presentation,
+            95,
+            "Cancellation Tester",
+            cancellation.Token,
+            completeStartedPosts: true);
+        await handler.Started.WaitAsync(TimeSpan.FromSeconds(3));
+        cancellation.Cancel();
+        await Task.Delay(50);
+        Assert(!upload.IsCompleted,
+            "A caller cancellation must not abandon an already-started webhook POST with an ambiguous result.");
+        handler.Release();
+        await upload;
+        Assert(handler.CallCount == 1,
+            "A confirmed started POST must complete exactly once after caller cancellation.");
+    }
+
+    using (var cancellation = new CancellationTokenSource())
+    using (var handler = new GatedWebhookHandler(System.Net.HttpStatusCode.RequestEntityTooLarge))
+    using (var client = new DiscordWebhookClient(handler))
+    {
+        var upload = client.UploadWithCompressionAsync(
+            webhookUrl,
+            clipPath,
+            presentation,
+            95,
+            "Cancellation Tester",
+            cancellation.Token,
+            completeStartedPosts: true);
+        await handler.Started.WaitAsync(TimeSpan.FromSeconds(3));
+        cancellation.Cancel();
+        handler.Release();
+        var cancelled = false;
+        try
+        {
+            await upload;
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+        Assert(cancelled && handler.CallCount == 1,
+            "After a definite size rejection, cancellation must stop before FFmpeg or another POST begins.");
+    }
+}
+
+static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
+{
+    var transactionRoot = Directory.CreateDirectory(Path.Combine(temporaryRoot, "manual-edit-transaction")).FullName;
+    var localGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(transactionRoot),
+        "Battlefield™-6")).FullName;
+    var originalPath = Path.Combine(localGame, "Battlefield™-6 original.mp4");
+    await File.WriteAllBytesAsync(originalPath, [1, 2, 3, 4, 5, 6]);
+    var operationId = Guid.NewGuid();
+    var operationFolder = Directory.CreateDirectory(Path.Combine(
+        transactionRoot,
+        ".clipcord-editing",
+        operationId.ToString("N"))).FullName;
+    var editedPath = Path.Combine(operationFolder, "Battlefield edited.mp4");
+    await File.WriteAllBytesAsync(editedPath, [9, 8, 7, 6, 5, 4, 3]);
+    var originalHash = await ContentIdentity.ComputeSha256Async(originalPath, CancellationToken.None);
+    var editedHash = await ContentIdentity.ComputeSha256Async(editedPath, CancellationToken.None);
+    var stateDirectory = Directory.CreateDirectory(Path.Combine(transactionRoot, "state-data")).FullName;
+    var stateStore = new WatchStateStore(
+        Path.Combine(stateDirectory, "state.json"),
+        Path.Combine(stateDirectory, ".safe-baseline-required"));
+    var recycleRoot = Directory.CreateDirectory(Path.Combine(transactionRoot, "fake-recycle-bin")).FullName;
+    var recycler = new RecordingOriginalClipRecycler(recycleRoot);
+    var archiveSeenBeforeRecycle = false;
+    var expectedArchivePath = Path.Combine(
+        transactionRoot,
+        "uploaded",
+        "Battlefield™-6",
+        "Battlefield edited.mp4");
+    recycler.BeforeRecycle = _ => archiveSeenBeforeRecycle = File.Exists(expectedArchivePath);
+    using var activity = new ActivityHistoryStore(string.Empty);
+    using var cancellation = new CancellationTokenSource();
+    var originalSeenWhenUploadReturned = false;
+    var uploader = new RecordingManualDiscordUploader
+    {
+        EmitCompressionProgress = true,
+        AfterSuccessfulUpload = () =>
+        {
+            originalSeenWhenUploadReturned = File.Exists(originalPath);
+            cancellation.Cancel();
+        }
+    };
+    var service = new EditedClipUploadService(
+        stateStore,
+        () => uploader,
+        new EditedClipDispositionProcessor(recycler));
+    var settings = new AppSettings(
+        transactionRoot,
+        "https://discord.com/api/v10/webhooks/123456/manual-edit-token",
+        true,
+        95,
+        "Manual Editor Tester",
+        false);
+    var prepared = new PreparedClipEdit(
+        operationId,
+        transactionRoot,
+        originalPath,
+        originalHash,
+        editedPath,
+        editedHash,
+        "Battlefield edited.mp4",
+        "Battlefield™-6",
+        "A carefully trimmed flank.",
+        KeepOriginal: false,
+        UsesOriginalAsArtifact: false,
+        OutputBytes: new FileInfo(editedPath).Length);
+
+    var progressUpdates = new List<ManualClipEditProgress>();
+    var result = await service.UploadAsync(
+        settings,
+        prepared,
+        activity,
+        progress: new InlineProgress<ManualClipEditProgress>(progressUpdates.Add),
+        cancellation.Token);
+    Assert(uploader.UploadCount == 1 &&
+           uploader.LastPresentation is
+           {
+               DisplayFileName: "Battlefield edited.mp4",
+               GameName: "Battlefield™-6",
+               Note: "A carefully trimmed flank."
+           },
+        "A manual edit must post once with its explicit display name, game, and bounded Discord note.");
+    Assert(File.Exists(result.ArchivedPath) &&
+           Path.GetFileName(Path.GetDirectoryName(result.ArchivedPath)) == "Battlefield™-6" &&
+           !File.Exists(originalPath) && recycler.RecycledPaths.Count == 1 &&
+           !result.OriginalKept && !result.OriginalCleanupFailed,
+        "After Discord success, the edited copy must archive under the selected game before the original is recycled.");
+    Assert(originalSeenWhenUploadReturned && archiveSeenBeforeRecycle,
+        "The Local-only original must still exist when Discord returns, and the edited archive must exist before recycling begins.");
+    Assert(progressUpdates.Select(update => update.Stage).SequenceEqual([
+               ManualClipEditStage.Uploading,
+               ManualClipEditStage.Compressing,
+               ManualClipEditStage.Uploading,
+               ManualClipEditStage.Archiving,
+               ManualClipEditStage.Completed
+           ]),
+        "Compression must be cancellable only while FFmpeg is running, then return to the non-cancellable Uploading stage before the retry POST.");
+    var terminalActivity = activity.GetSnapshot().Entries.Single(entry =>
+        entry.SourcePath.Equals(originalPath, StringComparison.OrdinalIgnoreCase));
+    Assert(terminalActivity.State == ClipActivityState.Archived &&
+           terminalActivity.Route == ClipActivityRoute.Uploaded &&
+           terminalActivity.GameName == "Battlefield™-6" &&
+           terminalActivity.CurrentPath == result.ArchivedPath &&
+           terminalActivity.OriginalBytes == prepared.OutputBytes,
+        "A manual edit must finish Activity with its selected game, uploaded route, archived path, and rendered byte count.");
+    var committedState = await stateStore.LoadOrInitializeAsync(transactionRoot, _ => { }, CancellationToken.None);
+    Assert(committedState.Version == 4 &&
+           committedState.UploadedContentHashes.Contains(editedHash) &&
+           committedState.KnownContentHashes.Contains(editedHash) &&
+           committedState.PendingEditedUploads.Count == 0,
+        "Cancellation requested as the POST returns must not prevent the non-cancellable uploaded-hash/disposition commit.");
+
+    var keepGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(transactionRoot),
+        "Keep Game")).FullName;
+    var keepOriginal = Path.Combine(keepGame, "keep-source.mp4");
+    await File.WriteAllBytesAsync(keepOriginal, [11, 12, 13, 14]);
+    var keepOperation = Guid.NewGuid();
+    var keepStageFolder = Directory.CreateDirectory(Path.Combine(
+        transactionRoot,
+        ".clipcord-editing",
+        keepOperation.ToString("N"))).FullName;
+    var keepEdited = Path.Combine(keepStageFolder, "keep-edit.mp4");
+    await File.WriteAllBytesAsync(keepEdited, [15, 16, 17, 18, 19]);
+    var keepUploader = new RecordingManualDiscordUploader();
+    var keepService = new EditedClipUploadService(
+        stateStore,
+        () => keepUploader,
+        new EditedClipDispositionProcessor(recycler));
+    var keepResult = await keepService.UploadAsync(
+        settings,
+        new PreparedClipEdit(
+            keepOperation,
+            transactionRoot,
+            keepOriginal,
+            await ContentIdentity.ComputeSha256Async(keepOriginal, CancellationToken.None),
+            keepEdited,
+            await ContentIdentity.ComputeSha256Async(keepEdited, CancellationToken.None),
+            "keep-edit.mp4",
+            "Keep Game",
+            null,
+            KeepOriginal: true,
+            UsesOriginalAsArtifact: false,
+            OutputBytes: new FileInfo(keepEdited).Length),
+        null,
+        null,
+        CancellationToken.None);
+    Assert(keepUploader.UploadCount == 1 && File.Exists(keepResult.ArchivedPath) &&
+           File.Exists(keepOriginal) && keepResult.OriginalKept && !keepResult.OriginalCleanupFailed &&
+           recycler.RecycledPaths.Count == 1,
+        "Keep original must archive the edited copy without sending the Local-only source to the Recycle Bin.");
+
+    var duplicateGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(transactionRoot),
+        "Duplicate Game")).FullName;
+    var duplicateOriginal = Path.Combine(duplicateGame, "duplicate-source.mp4");
+    await File.WriteAllBytesAsync(duplicateOriginal, [31, 41, 59]);
+    var duplicateOperation = Guid.NewGuid();
+    var duplicateStageFolder = Directory.CreateDirectory(Path.Combine(
+        transactionRoot,
+        ".clipcord-editing",
+        duplicateOperation.ToString("N"))).FullName;
+    var duplicateEdited = Path.Combine(duplicateStageFolder, "duplicate-edit.mp4");
+    await File.WriteAllBytesAsync(duplicateEdited, [9, 8, 7, 6, 5, 4, 3]);
+    var duplicateResult = await keepService.UploadAsync(
+        settings,
+        new PreparedClipEdit(
+            duplicateOperation,
+            transactionRoot,
+            duplicateOriginal,
+            await ContentIdentity.ComputeSha256Async(duplicateOriginal, CancellationToken.None),
+            duplicateEdited,
+            editedHash,
+            "duplicate-edit.mp4",
+            "Duplicate Game",
+            null,
+            KeepOriginal: false,
+            UsesOriginalAsArtifact: false,
+            OutputBytes: new FileInfo(duplicateEdited).Length),
+        null,
+        null,
+        CancellationToken.None);
+    Assert(duplicateResult.AlreadyUploaded && keepUploader.UploadCount == 1 &&
+           File.Exists(duplicateOriginal) && !File.Exists(duplicateEdited) &&
+           !Directory.Exists(duplicateStageFolder),
+        "An exact edited-content duplicate must not repost, must preserve its Local-only source, and must clean the redundant stage.");
+
+    var crashRoot = Directory.CreateDirectory(Path.Combine(temporaryRoot, "manual-edit-recovery")).FullName;
+    var crashLocalGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(crashRoot),
+        "Recovery Game")).FullName;
+    var crashOriginal = Path.Combine(crashLocalGame, "Recovery source.mp4");
+    await File.WriteAllBytesAsync(crashOriginal, [20, 21, 22, 23]);
+    var crashOperation = Guid.NewGuid();
+    var crashStageFolder = Directory.CreateDirectory(Path.Combine(
+        crashRoot,
+        ".clipcord-editing",
+        crashOperation.ToString("N"))).FullName;
+    var crashEdited = Path.Combine(crashStageFolder, "Recovery edit.mp4");
+    await File.WriteAllBytesAsync(crashEdited, [30, 31, 32, 33, 34]);
+    var crashOriginalHash = await ContentIdentity.ComputeSha256Async(crashOriginal, CancellationToken.None);
+    var crashEditedHash = await ContentIdentity.ComputeSha256Async(crashEdited, CancellationToken.None);
+    var crashStateDirectory = Directory.CreateDirectory(Path.Combine(crashRoot, "state-data")).FullName;
+    var crashStore = new WatchStateStore(
+        Path.Combine(crashStateDirectory, "state.json"),
+        Path.Combine(crashStateDirectory, ".safe-baseline-required"));
+    var crashRecycler = new RecordingOriginalClipRecycler(
+        Directory.CreateDirectory(Path.Combine(crashRoot, "fake-recycle-bin")).FullName);
+    var conflictingDestination = Path.Combine(crashRoot, "uploaded", "Recovery Game", "Recovery edit.mp4");
+    var crashUploader = new RecordingManualDiscordUploader
+    {
+        AfterSuccessfulUpload = () =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(conflictingDestination)!);
+            File.WriteAllBytes(conflictingDestination, [99, 99, 99]);
+        }
+    };
+    var crashService = new EditedClipUploadService(
+        crashStore,
+        () => crashUploader,
+        new EditedClipDispositionProcessor(crashRecycler));
+    var crashPrepared = new PreparedClipEdit(
+        crashOperation,
+        crashRoot,
+        crashOriginal,
+        crashOriginalHash,
+        crashEdited,
+        crashEditedHash,
+        "Recovery edit.mp4",
+        "Recovery Game",
+        null,
+        KeepOriginal: false,
+        UsesOriginalAsArtifact: false,
+        OutputBytes: new FileInfo(crashEdited).Length);
+    var commitPending = false;
+    try
+    {
+        await crashService.UploadAsync(
+            settings with { ClipsFolder = crashRoot },
+            crashPrepared,
+            activityHistory: null,
+            progress: null,
+            CancellationToken.None);
+    }
+    catch (ManualClipCommitPendingException)
+    {
+        commitPending = true;
+    }
+    Assert(commitPending && crashUploader.UploadCount == 1 &&
+           File.Exists(crashOriginal) && File.Exists(crashEdited),
+        "An archive collision after Discord success must retain both source files and enter recovery without reposting.");
+    var pendingState = await crashStore.LoadOrInitializeAsync(crashRoot, _ => { }, CancellationToken.None);
+    Assert(pendingState.UploadedContentHashes.Contains(crashEditedHash) &&
+           pendingState.PendingEditedUploads.Count == 1,
+        "Discord confirmation and the fixed archive destination must be durable before a failing move.");
+    File.Delete(conflictingDestination);
+    using (var recoveryCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
+    {
+        var recoveryWorker = new UploaderWorker(
+            settings with
+            {
+                ClipsFolder = crashRoot,
+                WebhookUrl = string.Empty,
+                UploadToDiscord = false
+            },
+            _ => { },
+            crashStore,
+            discordClientFactory: null,
+            activityHistory: null,
+            editedClipDispositionProcessor: new EditedClipDispositionProcessor(crashRecycler));
+        var recoveryTask = recoveryWorker.RunAsync(recoveryCancellation.Token);
+        try
+        {
+            await WaitUntilAsync(
+                () =>
+                {
+                    if (!File.Exists(conflictingDestination) || File.Exists(crashOriginal)) return false;
+                    try
+                    {
+                        return crashStore.LoadOrInitializeAsync(crashRoot, _ => { }, CancellationToken.None)
+                            .GetAwaiter().GetResult().PendingEditedUploads.Count == 0;
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                },
+                TimeSpan.FromSeconds(5),
+                "The uploader worker did not durably finish its confirmed edited-clip disposition.");
+        }
+        finally
+        {
+            recoveryCancellation.Cancel();
+            try { await recoveryTask; }
+            catch (OperationCanceledException) when (recoveryCancellation.IsCancellationRequested) { }
+        }
+    }
+    var recoveredState = await crashStore.LoadOrInitializeAsync(crashRoot, _ => { }, CancellationToken.None);
+    Assert(crashUploader.UploadCount == 1 && File.Exists(conflictingDestination) &&
+           !File.Exists(crashOriginal) && crashRecycler.RecycledPaths.Count == 1 &&
+           recoveredState.PendingEditedUploads.Count == 0,
+        "Uploader-worker restart recovery must finish archive and Recycle Bin disposition without another webhook request.");
+
+    var invalidRoot = Directory.CreateDirectory(Path.Combine(temporaryRoot, "manual-edit-invalid-webhook")).FullName;
+    var invalidLocalGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(invalidRoot),
+        "Invalid Webhook Game")).FullName;
+    var invalidOriginal = Path.Combine(invalidLocalGame, "source.mp4");
+    await File.WriteAllBytesAsync(invalidOriginal, [1, 3, 5]);
+    var invalidOperation = Guid.NewGuid();
+    var invalidStageFolder = Directory.CreateDirectory(Path.Combine(
+        invalidRoot,
+        ".clipcord-editing",
+        invalidOperation.ToString("N"))).FullName;
+    var invalidEdited = Path.Combine(invalidStageFolder, "edit.mp4");
+    await File.WriteAllBytesAsync(invalidEdited, [2, 4, 6]);
+    var invalidUploader = new RecordingManualDiscordUploader();
+    var invalidService = new EditedClipUploadService(
+        new WatchStateStore(
+            Path.Combine(invalidRoot, "state-data", "state.json"),
+            Path.Combine(invalidRoot, "state-data", ".marker")),
+        () => invalidUploader);
+    var invalidPrepared = new PreparedClipEdit(
+        invalidOperation,
+        invalidRoot,
+        invalidOriginal,
+        await ContentIdentity.ComputeSha256Async(invalidOriginal, CancellationToken.None),
+        invalidEdited,
+        await ContentIdentity.ComputeSha256Async(invalidEdited, CancellationToken.None),
+        "edit.mp4",
+        "Invalid Webhook Game",
+        null,
+        KeepOriginal: false,
+        UsesOriginalAsArtifact: false,
+        OutputBytes: 3);
+    var invalidRejected = false;
+    try
+    {
+        await invalidService.UploadAsync(
+            settings with { ClipsFolder = invalidRoot, WebhookUrl = string.Empty },
+            invalidPrepared,
+            null,
+            null,
+            CancellationToken.None);
+    }
+    catch (InvalidOperationException)
+    {
+        invalidRejected = true;
+    }
+    Assert(invalidRejected && invalidUploader.UploadCount == 0 && File.Exists(invalidOriginal) &&
+           !File.Exists(invalidEdited),
+        "Manual uploads in Local-only mode must still require a valid webhook and must preserve the original on rejection.");
+
+    var failedRoot = Directory.CreateDirectory(Path.Combine(temporaryRoot, "manual-edit-failed-post")).FullName;
+    var failedLocalGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(failedRoot),
+        "Failure Game")).FullName;
+    var failedOriginal = Path.Combine(failedLocalGame, "source.mp4");
+    await File.WriteAllBytesAsync(failedOriginal, [8, 6, 7, 5, 3, 0, 9]);
+    var failedOriginalBytes = await File.ReadAllBytesAsync(failedOriginal);
+    var failedOperation = Guid.NewGuid();
+    var failedStageFolder = Directory.CreateDirectory(Path.Combine(
+        failedRoot,
+        ".clipcord-editing",
+        failedOperation.ToString("N"))).FullName;
+    var failedEdited = Path.Combine(failedStageFolder, "edit.mp4");
+    await File.WriteAllBytesAsync(failedEdited, [4, 2, 4, 2]);
+    var failedStore = new WatchStateStore(
+        Path.Combine(failedRoot, "state-data", "state.json"),
+        Path.Combine(failedRoot, "state-data", ".marker"));
+    var failedUploader = new RecordingManualDiscordUploader
+    {
+        Failure = new HttpRequestException("Simulated definite webhook rejection.")
+    };
+    var failedService = new EditedClipUploadService(failedStore, () => failedUploader);
+    var failedPrepared = new PreparedClipEdit(
+        failedOperation,
+        failedRoot,
+        failedOriginal,
+        await ContentIdentity.ComputeSha256Async(failedOriginal, CancellationToken.None),
+        failedEdited,
+        await ContentIdentity.ComputeSha256Async(failedEdited, CancellationToken.None),
+        "edit.mp4",
+        "Failure Game",
+        null,
+        KeepOriginal: false,
+        UsesOriginalAsArtifact: false,
+        OutputBytes: new FileInfo(failedEdited).Length);
+    var failedPostRejected = false;
+    try
+    {
+        await failedService.UploadAsync(
+            settings with { ClipsFolder = failedRoot },
+            failedPrepared,
+            null,
+            null,
+            CancellationToken.None);
+    }
+    catch (HttpRequestException)
+    {
+        failedPostRejected = true;
+    }
+    var failedState = await failedStore.LoadOrInitializeAsync(failedRoot, _ => { }, CancellationToken.None);
+    Assert(failedPostRejected && failedUploader.UploadCount == 1 &&
+           File.Exists(failedOriginal) &&
+           (await File.ReadAllBytesAsync(failedOriginal)).SequenceEqual(failedOriginalBytes) &&
+           !File.Exists(failedEdited) && !Directory.Exists(failedStageFolder) &&
+           !failedState.UploadedContentHashes.Contains(failedPrepared.EditedContentHash) &&
+           failedState.PendingEditedUploads.Count == 0,
+        "A definite pre-confirmation upload failure must preserve the original byte-for-byte and clean staging without durable uploaded state.");
+}
+
+static void AssertClipEditProcessorContracts(string temporaryRoot)
+{
+    var root = Directory.CreateDirectory(Path.Combine(temporaryRoot, "clip-edit-processor-contracts")).FullName;
+    var localGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(root),
+        "Battlefield™-6")).FullName;
+    var localPath = Path.Combine(localGame, "Local source.mp4");
+    File.WriteAllBytes(localPath, [1, 3, 3, 7]);
+    var local = ClipEditProcessor.ValidateLocalOnlySource(root, localPath);
+    Assert(local.FullName == Path.GetFullPath(localPath),
+        "The edit processor must accept a regular MP4 at the supported Local-only game depth.");
+
+    var uploadedGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreate(root),
+        "Battlefield™-6")).FullName;
+    var uploadedPath = Path.Combine(uploadedGame, "Already uploaded.mp4");
+    File.WriteAllBytes(uploadedPath, [2, 4, 6, 8]);
+    foreach (var rejectedPath in new[]
+             {
+                 uploadedPath,
+                 Path.Combine(temporaryRoot, "outside-local-only.mp4"),
+                 Path.Combine(localGame, "not-a-video.txt")
+             })
+    {
+        if (!File.Exists(rejectedPath)) File.WriteAllBytes(rejectedPath, [9]);
+        var rejected = false;
+        try { ClipEditProcessor.ValidateLocalOnlySource(root, rejectedPath); }
+        catch (InvalidOperationException) { rejected = true; }
+        Assert(rejected,
+            $"The edit processor must reject a source outside its regular Local-only MP4 layout: {Path.GetFileName(rejectedPath)}.");
+    }
+
+    var source = new GalleryClipEntry(
+        localPath,
+        Path.GetFileName(localPath),
+        "Battlefield™-6",
+        GalleryClipRoute.LocalOnly,
+        1_000_000,
+        DateTime.UtcNow);
+    var request = new ManualClipEditRequest(
+        source,
+        TimeSpan.FromSeconds(2.345),
+        TimeSpan.FromSeconds(5.555),
+        MuteAudio: false,
+        "Edited output.mp4",
+        "Battlefield™-6",
+        "Trimmed flank",
+        KeepOriginal: false);
+    var stagedPath = Path.Combine(root, ".clipcord-editing", "operation", "Edited output.mp4");
+    var arguments = ClipEditProcessor.BuildRenderArguments(localPath, stagedPath, request).ToArray();
+    static bool HasPair(IReadOnlyList<string> values, string option, string value)
+    {
+        for (var index = 0; index + 1 < values.Count; index++)
+        {
+            if (values[index] == option && values[index + 1] == value) return true;
+        }
+        return false;
+    }
+    Assert(HasPair(arguments, "-ss", "2.345000") &&
+           HasPair(arguments, "-t", "3.210000") &&
+           HasPair(arguments, "-map", "0:v:0") &&
+           HasPair(arguments, "-map", "0:a:0?") &&
+           HasPair(arguments, "-vf", "setpts=PTS-STARTPTS") &&
+           HasPair(arguments, "-af", "asetpts=PTS-STARTPTS") &&
+           HasPair(arguments, "-c:v", "libx264") &&
+           HasPair(arguments, "-c:a", "aac") &&
+           HasPair(arguments, "-map_metadata", "-1") &&
+           HasPair(arguments, "-map_chapters", "-1") &&
+           arguments.Contains("-sn") && arguments.Contains("-dn") &&
+           arguments[^3] == "-f" && arguments[^2] == "mp4" && arguments[^1] == stagedPath,
+        "An accurate unmuted edit must preserve the selected trim, rebuild timestamps/audio, strip metadata, and target MP4 without a shell command.");
+
+    var muted = ClipEditProcessor.BuildRenderArguments(
+        localPath,
+        stagedPath,
+        request with { MuteAudio = true }).ToArray();
+    Assert(muted.Contains("-an") &&
+           !muted.Contains("0:a:0?") &&
+           !muted.Contains("-af") &&
+           !muted.Contains("-c:a"),
+        "A muted edit must explicitly remove audio and omit every audio map/filter/codec option.");
+
+    var processor = new ClipEditProcessor();
+    var sourceBytes = 200_000_000L;
+    var sourceDuration = TimeSpan.FromSeconds(100);
+    var estimateFull = processor.EstimateOutputBytes(sourceBytes, sourceDuration, sourceDuration);
+    var estimateHalf = processor.EstimateOutputBytes(sourceBytes, sourceDuration, TimeSpan.FromSeconds(50));
+    var estimateQuarter = processor.EstimateOutputBytes(sourceBytes, sourceDuration, TimeSpan.FromSeconds(25));
+    var estimateTenSeconds = processor.EstimateOutputBytes(sourceBytes, sourceDuration, TimeSpan.FromSeconds(10));
+    var estimateOneSecond = processor.EstimateOutputBytes(sourceBytes, sourceDuration, TimeSpan.FromSeconds(1));
+    var estimateTiny = processor.EstimateOutputBytes(sourceBytes, sourceDuration, TimeSpan.FromSeconds(0.25));
+    var smallSourceBytes = 5_000_000L;
+    var estimateTinyWithSlack = processor.EstimateOutputBytes(
+        smallSourceBytes,
+        sourceDuration,
+        TimeSpan.FromSeconds(0.25));
+    Assert(estimateFull > estimateHalf &&
+           estimateHalf > estimateQuarter &&
+           estimateQuarter > estimateTenSeconds &&
+           estimateTenSeconds > estimateOneSecond &&
+           estimateOneSecond > estimateTiny &&
+           estimateTiny > 0,
+        "The editor size estimate should strictly increase as the selected trim grows.");
+    Assert(estimateQuarter < sourceBytes,
+        "A quarter-length trim should reduce the estimate instead of pinning to the source size.");
+    Assert(estimateHalf < sourceBytes * 4 && estimateFull < sourceBytes * 4.0,
+        "The estimate should remain conservative for full clips but not explode to an unusable upper bound.");
+    Assert(estimateTiny < estimateQuarter / 4 &&
+           estimateFull >= sourceBytes,
+        "The estimate should reflect short trims while still honoring conservative growth for full clips.");
+    Assert(estimateHalf > sourceBytes * 0.5 * 2.0,
+        "A half-length selection must stay meaningfully above linear scaling to cover CRF re-encode growth.");
+    Assert(estimateTinyWithSlack > 1_000_000,
+        "Small sources should retain the small-file safety slack so short trims aren't grossly under-estimated.");
+
+    var outsideIdentity = Path.Combine(temporaryRoot, "outside-identity.mp4");
+    File.WriteAllBytes(outsideIdentity, [1, 9, 8, 4]);
+    var unsafeIdentityRejected = false;
+    try
+    {
+        EditedClipDispositionProcessor.ValidatePendingPaths(new PendingEditedClipDisposition
+        {
+            Id = Guid.NewGuid(),
+            ClipsFolder = root,
+            EditedPath = outsideIdentity,
+            OriginalLocalOnlyPath = outsideIdentity,
+            DestinationPath = Path.Combine(uploadedGame, "identity.mp4"),
+            EditedContentHash = "identity-hash",
+            OriginalContentHash = "identity-hash"
+        });
+    }
+    catch (Exception exception) when (exception is InvalidOperationException or IOException)
+    {
+        unsafeIdentityRejected = true;
+    }
+    Assert(unsafeIdentityRejected,
+        "A recovered identity edit must still be confined to this clips folder's Local-only archive.");
+
+    var movedIdentitySource = Path.Combine(localGame, "Identity source.mp4");
+    File.WriteAllBytes(movedIdentitySource, [4, 8, 15, 16, 23, 42]);
+    var movedIdentityHash = ContentIdentity.ComputeSha256Async(
+        movedIdentitySource,
+        CancellationToken.None).GetAwaiter().GetResult();
+    var movedIdentityDestination = Path.Combine(uploadedGame, "Identity source.mp4");
+    File.Move(movedIdentitySource, movedIdentityDestination);
+    var identityRecycler = new RecordingOriginalClipRecycler(
+        Directory.CreateDirectory(Path.Combine(root, "identity-recycle")).FullName);
+    var identityResult = new EditedClipDispositionProcessor(identityRecycler).CompleteAsync(
+        new PendingEditedClipDisposition
+        {
+            Id = Guid.NewGuid(),
+            ClipsFolder = root,
+            EditedPath = movedIdentitySource,
+            OriginalLocalOnlyPath = movedIdentitySource,
+            DestinationPath = movedIdentityDestination,
+            EditedContentHash = movedIdentityHash,
+            OriginalContentHash = movedIdentityHash,
+            KeepOriginal = false,
+            OutputBytes = new FileInfo(movedIdentityDestination).Length
+        },
+        CancellationToken.None).GetAwaiter().GetResult();
+    Assert(identityResult.ArchivedPath == movedIdentityDestination &&
+           !identityResult.OriginalKept && !identityResult.OriginalCleanupFailed &&
+           identityRecycler.RecycledPaths.Count == 0,
+        "Identity-edit recovery after the archive move must accept the matching destination and clear without reposting or recycling twice.");
+
+    var stagingTarget = Directory.CreateDirectory(Path.Combine(temporaryRoot, "linked-edit-staging-target")).FullName;
+    var linkedOperation = Directory.CreateDirectory(Path.Combine(stagingTarget, Guid.NewGuid().ToString("N"))).FullName;
+    var linkedEdit = Path.Combine(linkedOperation, "linked-edit.mp4");
+    File.WriteAllBytes(linkedEdit, [7, 7, 7]);
+    var stagingLink = Path.Combine(root, ".clipcord-editing");
+    CreateDirectoryJunction(stagingLink, stagingTarget);
+    try
+    {
+        var stagingJunctionRejected = false;
+        try
+        {
+            EditedClipDispositionProcessor.ValidatePendingPaths(new PendingEditedClipDisposition
+            {
+                Id = Guid.NewGuid(),
+                ClipsFolder = root,
+                EditedPath = Path.Combine(stagingLink, Path.GetFileName(linkedOperation), "linked-edit.mp4"),
+                OriginalLocalOnlyPath = localPath,
+                DestinationPath = Path.Combine(uploadedGame, "linked-edit.mp4"),
+                EditedContentHash = "linked-edit-hash",
+                OriginalContentHash = "local-hash"
+            });
+        }
+        catch (IOException)
+        {
+            stagingJunctionRejected = true;
+        }
+        Assert(stagingJunctionRejected,
+            "Confirmed-edit recovery must reject a junction at the app-owned staging root.");
+    }
+    finally
+    {
+        Directory.Delete(stagingLink);
+    }
+    Assert(File.Exists(linkedEdit),
+        "Rejecting a linked edit-staging root must never modify its external target.");
 }
 
 static void AssertAboutPageSupport(string testRoot)
@@ -2821,7 +3590,8 @@ static void AssertCriticalTextFits(Form form)
             for (var second = first + 1; second < children.Length; second++)
             {
                 Assert(!children[first].Bounds.IntersectsWith(children[second].Bounds),
-                    $"Sibling controls '{children[first].Text}' and '{children[second].Text}' overlap in {layout.Name}.");
+                    $"Sibling controls '{children[first].Text}' {children[first].Bounds} and " +
+                    $"'{children[second].Text}' {children[second].Bounds} overlap in {layout.Name} {layout.ClientRectangle}.");
             }
         }
     }
@@ -2946,7 +3716,8 @@ static void AssertOfficialLogoArtworkPainted(ClipCordLogoControl logo)
 }
 
 static bool IsAutoScrollViewport(Control control) =>
-    control is ScrollableControl scrollable && scrollable.AutoScroll;
+    control is BrandedScrollHost { HasOverflow: true } ||
+    control is ScrollableControl { AutoScroll: true };
 
 static void AssertGlobalHotkeyLifecycle()
 {
@@ -3026,6 +3797,40 @@ static void AssertModeHotkeyGuardPolicy()
     Assert(TrayApplicationContext.GetModeHotkeyBlockReason(true, true, true, true) ==
            ModeHotkeyBlockReason.ShuttingDown,
         "Shutdown must dominate every other global-shortcut guard state.");
+
+    var exitRequested = false;
+    using (var idleOperation = new CancellationTokenSource())
+    {
+        Assert(!TrayApplicationContext.TryDeferExitAndCancelManualOperation(
+                   false,
+                   ref exitRequested,
+                   idleOperation) &&
+               !exitRequested &&
+               !idleOperation.IsCancellationRequested,
+            "An ordinary exit must not be deferred or cancel a nonexistent manual transaction.");
+    }
+    using (var activeOperation = new CancellationTokenSource())
+    {
+        var exitMarkedBeforeCancellation = false;
+        using var registration = activeOperation.Token.Register(() =>
+            exitMarkedBeforeCancellation = exitRequested);
+        Assert(TrayApplicationContext.TryDeferExitAndCancelManualOperation(
+                   true,
+                   ref exitRequested,
+                   activeOperation) &&
+               exitRequested &&
+               activeOperation.IsCancellationRequested &&
+               exitMarkedBeforeCancellation,
+            "Exit during a manual edit must request deferred shutdown before cancelling safe pre-POST work.");
+    }
+    var disposedOperation = new CancellationTokenSource();
+    disposedOperation.Dispose();
+    exitRequested = false;
+    Assert(TrayApplicationContext.TryDeferExitAndCancelManualOperation(
+               true,
+               ref exitRequested,
+               disposedOperation) && exitRequested,
+        "Deferred exit must tolerate a manual-operation cancellation source that completed concurrently.");
 }
 
 static void AssertModeFeedbackOverlayContract()
@@ -3236,6 +4041,329 @@ static void RenderSettingsPreview(string outputPath)
     form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
     bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
     form.Hide();
+}
+
+static void AssertGalleryEditorScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            initialPage: SettingsPage.Gallery,
+            manualClipEditService: new FakeManualClipEditService());
+        form.Show();
+        WaitForUiCondition(
+            () => EnumerateControls(form).OfType<GalleryGameCard>().Any(card =>
+                card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true),
+            TimeSpan.FromSeconds(5),
+            $"Gallery editor did not populate before the {scale:F1}x layout check.");
+        var gameCard = EnumerateControls(form).OfType<GalleryGameCard>().Single(card =>
+            card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+        typeof(Control).GetMethod(
+                "OnClick",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(gameCard, [EventArgs.Empty]);
+        EnumerateControls(form).OfType<Button>()
+            .Single(button => button.Name == "GalleryLocalOnlyFilterButton")
+            .PerformClick();
+        EnumerateControls(form).OfType<Button>()
+            .Single(button => button.Name == "EditGalleryClipButton")
+            .PerformClick();
+        WaitForUiCondition(
+            () => EnumerateControls(form).OfType<Button>().Any(button =>
+                button.Name == "UploadEditedClipButton" && button.Enabled),
+            TimeSpan.FromSeconds(5),
+            $"Gallery editor did not initialize before the {scale:F1}x layout check.");
+
+        var gallery = EnumerateControls(form).OfType<GalleryView>().Single();
+        var topNavigation = EnumerateControls(form).Single(control => control.Name == "TopNavigation");
+        form.Hide();
+        form.Scale(new SizeF(scale, scale));
+        var featureControls = new[] { (Control)gallery, topNavigation }
+            .SelectMany(root => new[] { root }.Concat(EnumerateControls(root)))
+            .Distinct();
+        foreach (var control in featureControls)
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * scale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+        form.PerformLayout();
+        gallery.RefreshViewport();
+        Application.DoEvents();
+        AssertLocalClipEditorLayout(form, scale);
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+    }
+}
+
+static void AssertLocalClipEditorLayout(SettingsForm form, float scale)
+{
+    var editor = EnumerateControls(form).OfType<LocalClipEditorView>().Single();
+    var root = EnumerateControls(editor).Single(control => control.Name == "LocalClipEditorLayout");
+    var host = EnumerateControls(form).OfType<BrandedScrollHost>()
+        .Single(control => control.Name == "GalleryScrollHost");
+    host.RefreshContentLayout();
+    form.PerformLayout();
+    Application.DoEvents();
+
+    var preferred = editor.GetPreferredSize(new Size(host.ClientSize.Width, int.MaxValue));
+    Assert(editor.Width > 0 && editor.Width <= host.ClientSize.Width && editor.Width < 10_000 &&
+           root.Width == editor.ClientSize.Width && root.Height == editor.ClientSize.Height &&
+           editor.Height >= preferred.Height - 1,
+        $"Gallery editor {scale:F1}x must be width-constrained by its branded viewport and report its full content height: " +
+        $"host={host.ClientSize}, editor={editor.Bounds}, root={root.Bounds}, preferred={preferred}.");
+    Assert(host.HasOverflow == (editor.Height > host.ClientSize.Height),
+        $"Gallery editor {scale:F1}x overflow must match its actual content: host={host.ClientSize}, editor={editor.Size}, overflow={host.HasOverflow}.");
+
+    foreach (var control in EnumerateControls(editor).Where(control => control.Visible))
+    {
+        if (control.Parent is null || ReferenceEquals(control.Parent, host)) continue;
+        var parentBounds = control.Parent.ClientRectangle;
+        Assert(control.Left >= -1 && control.Top >= -1 &&
+               control.Right <= parentBounds.Right + 1 && control.Bottom <= parentBounds.Bottom + 1,
+            $"Gallery editor {scale:F1}x clips {control.GetType().Name} '{control.Name}' ('{control.Text}') " +
+            $"inside {control.Parent.GetType().Name} '{control.Parent.Name}': child={control.Bounds}, parent={parentBounds}.");
+    }
+
+    var cards = new[] { "EditorPreviewCard", "EditorOptionsCard", "EditorTrimCard", "EditorCommitCard" }
+        .Select(name => EnumerateControls(editor).Single(control => control.Name == name))
+        .ToArray();
+    var (preview, options, trim, commit) = (cards[0], cards[1], cards[2], cards[3]);
+    Assert(preview.Top == options.Top && preview.Bottom == options.Bottom &&
+           trim.Top == commit.Top && trim.Bottom == commit.Bottom &&
+           trim.Top > preview.Bottom &&
+           preview.Right < options.Left && trim.Right < commit.Left,
+        $"Gallery editor {scale:F1}x must keep two aligned, non-overlapping card rows: " +
+        string.Join(", ", cards.Select(card => $"{card.Name}={card.Bounds}")));
+}
+
+static void RenderGalleryEditorPreview(string outputPath)
+{
+    var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+    if (!string.IsNullOrWhiteSpace(outputDirectory)) Directory.CreateDirectory(outputDirectory);
+    var fixtureRoot = Path.Combine(
+        Path.GetTempPath(),
+        "ClipsToDiscordTests",
+        "gallery-editor-render-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var uploadedGame = Directory.CreateDirectory(Path.Combine(
+            fixtureRoot,
+            "uploaded",
+            "Battlefield™-6")).FullName;
+        var localGame = Directory.CreateDirectory(Path.Combine(
+            fixtureRoot,
+            "local-only",
+            "Battlefield™-6")).FullName;
+        File.WriteAllBytes(Path.Combine(uploadedGame, "Battlefield uploaded match.mp4"), new byte[4096]);
+        File.WriteAllBytes(Path.Combine(localGame, "Battlefield local match.mp4"), new byte[175 * 1024]);
+        using var form = new SettingsForm(
+            new AppSettings(
+                fixtureRoot,
+                "https://discord.com/api/webhooks/123456/preview-token",
+                true,
+                95,
+                "PlayerOne",
+                true),
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            initialPage: SettingsPage.Gallery,
+            manualClipEditService: new FakeManualClipEditService());
+        form.Show();
+        WaitForUiCondition(
+            () => EnumerateControls(form).OfType<GalleryGameCard>().Any(),
+            TimeSpan.FromSeconds(5),
+            "Gallery editor preview did not populate its game card.");
+        var gameCard = EnumerateControls(form).OfType<GalleryGameCard>().Single();
+        typeof(Control).GetMethod(
+                "OnClick",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(gameCard, [EventArgs.Empty]);
+        EnumerateControls(form).OfType<Button>()
+            .Single(button => button.Name == "GalleryLocalOnlyFilterButton")
+            .PerformClick();
+        EnumerateControls(form).OfType<Button>()
+            .Single(button => button.Name == "EditGalleryClipButton")
+            .PerformClick();
+        WaitForUiCondition(
+            () => EnumerateControls(form).OfType<Button>().Any(button =>
+                      button.Name == "UploadEditedClipButton" && button.Enabled) &&
+                  EnumerateControls(form).OfType<ClipPreviewControl>().Any(preview =>
+                      preview.Name == "EditorPreviewImage" && preview.Image is not null),
+            TimeSpan.FromSeconds(5),
+            "Gallery editor preview did not initialize its media controls.");
+        form.PerformLayout();
+        EnumerateControls(form).OfType<GalleryView>().Single().RefreshViewport();
+        Application.DoEvents();
+        using var bitmap = new Bitmap(form.Width, form.Height);
+        form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+        form.Hide();
+    }
+    finally
+    {
+        try { Directory.Delete(fixtureRoot, recursive: true); } catch { }
+    }
+}
+
+static void AssertGalleryEditorFlow(AppSettings settings)
+{
+    var service = new FakeManualClipEditService();
+    using var form = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Gallery,
+        manualClipEditService: service);
+    form.Show();
+    WaitForUiCondition(
+        () => EnumerateControls(form).OfType<GalleryGameCard>().Any(card =>
+            card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true),
+        TimeSpan.FromSeconds(5),
+        "The Local-only editor flow did not populate its game-first Gallery entry.");
+    var gameCard = EnumerateControls(form)
+        .OfType<GalleryGameCard>()
+        .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+    typeof(Control).GetMethod(
+            "OnClick",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(gameCard, [EventArgs.Empty]);
+    Application.DoEvents();
+    Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2 &&
+           EnumerateControls(form).OfType<Button>().Count(button => button.Name == "EditGalleryClipButton") == 1,
+        "A selected game must show both routes while exposing Edit & upload only on its Local-only clip.");
+    var filters = EnumerateControls(form)
+        .OfType<Button>()
+        .Where(button => button.Name is
+            "GalleryAllFilterButton" or
+            "GalleryLocalOnlyFilterButton" or
+            "GalleryUploadedFilterButton")
+        .ToDictionary(button => button.Name, StringComparer.Ordinal);
+    filters["GalleryLocalOnlyFilterButton"].PerformClick();
+    Application.DoEvents();
+    Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 1 &&
+           EnumerateControls(form).OfType<Button>().Count(button => button.Name == "EditGalleryClipButton") == 1 &&
+           filters["GalleryLocalOnlyFilterButton"].AccessibleDescription == "Selected filter",
+        "The Local-only route chip must preserve the game-first view and hide uploaded clips.");
+    EnumerateControls(form).OfType<Button>()
+        .Single(button => button.Name == "EditGalleryClipButton")
+        .PerformClick();
+    WaitForUiCondition(
+        () => EnumerateControls(form).OfType<Button>().Any(button =>
+            button.Name == "UploadEditedClipButton" && button.Enabled),
+        TimeSpan.FromSeconds(5),
+        "The Local-only editor did not finish its on-demand media inspection.");
+    var editor = EnumerateControls(form).OfType<LocalClipEditorView>().Single();
+    var keepOriginal = EnumerateControls(editor)
+        .OfType<CheckBox>()
+        .Single(control => control.Name == "KeepLocalOriginalToggle");
+    var gameField = EnumerateControls(editor)
+        .OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Edited clip game");
+    var noteField = EnumerateControls(editor)
+        .OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Discord description");
+    Assert(!keepOriginal.Checked && gameField.Text == "Battlefield™-6" &&
+           noteField.MaxLength == DiscordClipMessage.MaximumNoteLength &&
+           EnumerateControls(editor).OfType<TrimRangeControl>().Single().Enabled,
+        "The editor must default to no duplicate, preserve game attribution, bound Discord text, and expose trim controls.");
+    Assert(EnumerateControls(form).OfType<Button>()
+               .Single(button => button.Name == "GalleryBackButton").Text == "Back to clips" &&
+           EnumerateControls(editor).OfType<Label>().Any(label =>
+               label.Text.Contains("Recycle Bin", StringComparison.OrdinalIgnoreCase)),
+        "The editor must explain its safe original-file disposition and provide a return path to the selected game.");
+    AssertControlsFit(form);
+    AssertCriticalTextFits(form);
+    var designedEditorSize = form.Size;
+    form.Size = form.MinimumSize;
+    form.PerformLayout();
+    EnumerateControls(form).OfType<GalleryView>().Single().RefreshViewport();
+    Application.DoEvents();
+    AssertLocalClipEditorLayout(form, form.DeviceDpi / 96f);
+    form.Size = designedEditorSize;
+    form.PerformLayout();
+    EnumerateControls(form).OfType<GalleryView>().Single().RefreshViewport();
+    Application.DoEvents();
+    var tryBuildRequest = typeof(LocalClipEditorView).GetMethod(
+        "TryBuildRequest",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var requestArguments = new object?[] { null, null };
+    Assert((bool)tryBuildRequest.Invoke(editor, requestArguments)!,
+        $"The editor's current values must be uploadable before click; error={requestArguments[1]}.");
+    EnumerateControls(editor).OfType<Button>()
+        .Single(button => button.Name == "UploadEditedClipButton")
+        .PerformClick();
+    WaitForUiCondition(
+        () => service.EditCalls == 1 && editor.IsBusy,
+        TimeSpan.FromSeconds(3),
+        "The editor did not enter its single-flight busy lifecycle.");
+    Assert(!EnumerateControls(form).Single(control => control.Name == "SettingsNavItem").Enabled &&
+           !EnumerateControls(form).Single(control => control.Name == "ActivityNavItem").Enabled &&
+           !EnumerateControls(form).Single(control => control.Name == "AboutNavItem").Enabled &&
+           !EnumerateControls(form).Single(control => control.Name == "CloseButton").Enabled,
+        "A manual edit/upload must block conflicting navigation and user-close actions while its transaction is active.");
+    var cancelEditorButton = EnumerateControls(editor).OfType<Button>()
+        .Single(button => button.Name == "CancelClipEditorButton");
+    service.ReportStage(ManualClipEditStage.Compressing, "Compressing test edit…");
+    WaitForUiCondition(
+        () => cancelEditorButton.Enabled && cancelEditorButton.Text == "Cancel upload",
+        TimeSpan.FromSeconds(3),
+        "FFmpeg compression must remain user-cancellable because no Discord POST is in flight.");
+    service.ReportStage(ManualClipEditStage.Uploading, "Uploading test edit…");
+    WaitForUiCondition(
+        () => !cancelEditorButton.Enabled && cancelEditorButton.Text == "Finishing safely",
+        TimeSpan.FromSeconds(3),
+        "An in-flight Discord upload must disable cancellation until its bounded result is known.");
+    service.ReportStage(ManualClipEditStage.Rendering, "Rendering another test edit…");
+    WaitForUiCondition(
+        () => cancelEditorButton.Enabled && cancelEditorButton.Text == "Cancel upload",
+        TimeSpan.FromSeconds(3),
+        "Pre-upload rendering must remain cancellable.");
+    service.ReportStage(ManualClipEditStage.Archiving, "Archiving test edit…");
+    WaitForUiCondition(
+        () => !cancelEditorButton.Enabled && cancelEditorButton.Text == "Finishing safely",
+        TimeSpan.FromSeconds(3),
+        "Post-confirmation archive work must remain non-cancellable so durable disposition can finish.");
+    service.ReportStage(ManualClipEditStage.Rendering, "Rendering test edit…");
+    WaitForUiCondition(
+        () => cancelEditorButton.Enabled && cancelEditorButton.Text == "Cancel upload",
+        TimeSpan.FromSeconds(3),
+        "The cancellation-only test must return to a safe cancellable stage before unwinding.");
+    cancelEditorButton.PerformClick();
+    WaitForUiCondition(
+        () => !editor.IsBusy,
+        TimeSpan.FromSeconds(3),
+        "Cancelling a pre-confirmation editor operation did not unwind its busy lifecycle.");
+    Assert(service.LastRequest is { Source.Route: GalleryClipRoute.LocalOnly, KeepOriginal: false } &&
+           File.Exists(service.LastRequest.Source.Path) &&
+           EnumerateControls(form).Single(control => control.Name == "SettingsNavItem").Enabled,
+        "Editor cancellation must preserve the Local-only source and restore navigation.");
+
+    EnumerateControls(form).OfType<Button>()
+        .Single(button => button.Name == "GalleryBackButton")
+        .PerformClick();
+    Application.DoEvents();
+    Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 1 &&
+           EnumerateControls(form).OfType<Button>()
+               .Single(button => button.Name == "GalleryLocalOnlyFilterButton")
+               .AccessibleDescription == "Selected filter",
+        "Leaving the editor must return to the same game and Local-only filter.");
+    EnumerateControls(form).OfType<Button>()
+        .Single(button => button.Name == "GalleryUploadedFilterButton")
+        .PerformClick();
+    Application.DoEvents();
+    Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 1 &&
+           !EnumerateControls(form).OfType<Button>().Any(button => button.Name == "EditGalleryClipButton"),
+        "Uploaded clips must never expose the Local-only editing action.");
+    form.Close();
 }
 
 static void AssertSettingsFooterLayout(SettingsForm form, bool requireLogicalHeight)
@@ -3739,4 +4867,197 @@ internal sealed class FakeGlobalHotkeyRegistrar : IGlobalHotkeyRegistrar
     }
 
     public int GetLastError() => ConflictError;
+}
+
+internal sealed class RecordingManualDiscordUploader : IManualDiscordUploader
+{
+    public int UploadCount { get; private set; }
+    public DiscordUploadPresentation? LastPresentation { get; private set; }
+    public Action? AfterSuccessfulUpload { get; init; }
+    public Exception? Failure { get; init; }
+    public bool EmitCompressionProgress { get; init; }
+
+    public Task UploadAsync(
+        string webhookUrl,
+        string physicalPath,
+        DiscordUploadPresentation presentation,
+        int compressionTargetMb,
+        string uploaderName,
+        CancellationToken cancellationToken,
+        Action<CompressionProgress>? reportCompression)
+    {
+        UploadCount++;
+        LastPresentation = presentation;
+        AssertForFake(WebhookValidation.IsDiscordWebhook(webhookUrl),
+            "The manual uploader fake received an invalid webhook.");
+        AssertForFake(File.Exists(physicalPath),
+            "The manual uploader fake must receive an existing physical artifact.");
+        if (Failure is not null) throw Failure;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (EmitCompressionProgress)
+        {
+            var originalBytes = new FileInfo(physicalPath).Length;
+            reportCompression?.Invoke(new CompressionProgress(
+                compressionTargetMb,
+                6000,
+                96,
+                originalBytes,
+                null));
+            reportCompression?.Invoke(new CompressionProgress(
+                compressionTargetMb,
+                6000,
+                96,
+                originalBytes,
+                Math.Max(1, originalBytes / 2)));
+        }
+        AfterSuccessfulUpload?.Invoke();
+        return Task.CompletedTask;
+    }
+
+    public void Dispose()
+    {
+    }
+
+    private static void AssertForFake(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+}
+
+internal sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+{
+    public void Report(T value) => report(value);
+}
+
+internal sealed class GatedWebhookHandler(System.Net.HttpStatusCode statusCode) : HttpMessageHandler
+{
+    private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _callCount;
+
+    public Task Started => _started.Task;
+    public int CallCount => Volatile.Read(ref _callCount);
+
+    public void Release() => _release.TrySetResult();
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _callCount);
+        _started.TrySetResult();
+        await _release.Task.WaitAsync(cancellationToken);
+        return new HttpResponseMessage(statusCode)
+        {
+            Content = new ByteArrayContent([])
+        };
+    }
+}
+
+internal sealed class RecordingOriginalClipRecycler(string recycleRoot) : IOriginalClipRecycler
+{
+    public List<string> RecycledPaths { get; } = [];
+    public Action<string>? BeforeRecycle { get; set; }
+
+    public void Recycle(string path)
+    {
+        BeforeRecycle?.Invoke(path);
+        var destination = Path.Combine(
+            recycleRoot,
+            $"{Guid.NewGuid():N}-{Path.GetFileName(path)}");
+        File.Move(path, destination, overwrite: false);
+        RecycledPaths.Add(path);
+    }
+}
+
+internal sealed class FakeManualClipEditService : IManualClipEditService
+{
+    private IProgress<ManualClipEditProgress>? _activeProgress;
+
+    public int EditCalls { get; private set; }
+    public ManualClipEditRequest? LastRequest { get; private set; }
+
+    public void ReportStage(ManualClipEditStage stage, string message) =>
+        _activeProgress?.Report(new ManualClipEditProgress(stage, message));
+
+    public Task<ClipMediaInfo> ProbeAsync(
+        GalleryClipEntry source,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new ClipMediaInfo(TimeSpan.FromSeconds(74.8), source.Length));
+    }
+
+    public Task<string> CreatePreviewFrameAsync(
+        GalleryClipEntry source,
+        TimeSpan position,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var folder = Directory.CreateDirectory(Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordTests",
+            "editor-previews")).FullName;
+        var path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".png");
+        using var bitmap = new Bitmap(960, 540);
+        using var graphics = Graphics.FromImage(bitmap);
+        using var gradient = new System.Drawing.Drawing2D.LinearGradientBrush(
+            new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            Color.FromArgb(30, 52, 88),
+            Color.FromArgb(124, 57, 176),
+            28f);
+        graphics.FillRectangle(gradient, 0, 0, bitmap.Width, bitmap.Height);
+        using var titleFont = new Font("Segoe UI", 38, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var detailFont = new Font("Segoe UI", 20, FontStyle.Regular, GraphicsUnit.Pixel);
+        TextRenderer.DrawText(
+            graphics,
+            source.GameName,
+            titleFont,
+            new Rectangle(44, 370, 870, 60),
+            Color.White,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(
+            graphics,
+            $"Preview at {LocalClipEditorView.FormatTime(position)}",
+            detailFont,
+            new Rectangle(46, 430, 850, 40),
+            Color.FromArgb(220, 230, 245),
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        return Task.FromResult(path);
+    }
+
+    public long EstimateOutputBytes(
+        long sourceBytes,
+        TimeSpan sourceDuration,
+        TimeSpan selectionDuration)
+    {
+        if (sourceDuration <= TimeSpan.Zero) return 0;
+        return (long)Math.Round(sourceBytes * Math.Clamp(
+            selectionDuration.TotalSeconds / sourceDuration.TotalSeconds,
+            0,
+            1));
+    }
+
+    public async Task<ManualClipEditResult> EditAndUploadAsync(
+        ManualClipEditRequest request,
+        IProgress<ManualClipEditProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        EditCalls++;
+        LastRequest = request;
+        _activeProgress = progress;
+        progress?.Report(new ManualClipEditProgress(
+            ManualClipEditStage.Rendering,
+            "Rendering test edit…"));
+        try
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The cancellation-only fake should never complete normally.");
+        }
+        finally
+        {
+            _activeProgress = null;
+        }
+    }
 }

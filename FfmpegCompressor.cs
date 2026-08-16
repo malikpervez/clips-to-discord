@@ -141,7 +141,7 @@ internal static partial class FfmpegCompressor
         }
     }
 
-    private static async Task<ProcessResult> RunAsync(
+    internal static async Task<ProcessResult> RunAsync(
         string executable,
         IEnumerable<string> arguments,
         CancellationToken cancellationToken,
@@ -206,7 +206,7 @@ internal static partial class FfmpegCompressor
     [GeneratedRegex(@"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", RegexOptions.CultureInvariant)]
     private static partial Regex DurationPattern();
 
-    private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+    internal sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 }
 
 internal sealed class CompressionTargetUnachievableException(string message, Exception? innerException = null)

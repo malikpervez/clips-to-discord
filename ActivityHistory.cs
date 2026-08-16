@@ -50,6 +50,7 @@ internal sealed record ClipActivityEntry
 internal sealed record ClipActivityUpdate(
     string SourcePath,
     ClipActivityState State,
+    string? GameName = null,
     long? OriginalBytes = null,
     string? CurrentPath = null,
     ClipActivityRoute? Route = null,
@@ -149,13 +150,14 @@ internal sealed class ActivityHistoryStore : IDisposable
                 Id = Guid.NewGuid(),
                 CreatedUtc = now,
                 FileName = fileName,
-                GameName = UploadedFolder.GetGameFolderName(fileName),
+                GameName = SanitizeText(update.GameName, 80) ?? UploadedFolder.GetGameFolderName(fileName),
                 SourcePath = sourcePath,
                 OriginalBytes = Math.Max(0, update.OriginalBytes ?? 0)
             }) with
             {
                 UpdatedUtc = now,
                 State = update.State,
+                GameName = SanitizeText(update.GameName, 80) ?? current?.GameName ?? UploadedFolder.GetGameFolderName(fileName),
                 Route = update.Route ?? current?.Route,
                 AttemptCount = Math.Max(0, (current?.AttemptCount ?? 0) + (update.IncrementAttempt ? 1 : 0)),
                 Detail = update.Detail is null ? current?.Detail : SanitizeText(update.Detail, MaximumDetailLength),

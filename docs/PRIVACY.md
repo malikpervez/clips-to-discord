@@ -2,7 +2,7 @@
 
 ## Data flow
 
-ClipCord runs locally. When Discord uploads are enabled, it scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS. In local-only mode, clip processing makes no Discord request.
+ClipCord runs locally. When Discord uploads are enabled, it scans the configured clips folder and sends eligible video files directly to the configured Discord webhook endpoint over HTTPS. In local-only mode, automatic clip processing makes no Discord request; a Local-only clip is sent only when the user explicitly chooses **Edit & upload** in Gallery.
 
 The app has no analytics, advertising, account system, telemetry service, or project-operated server.
 
@@ -38,7 +38,7 @@ The global mode shortcut is registered locally with Windows only while ClipCord 
 
 The Activity Center reads only the local bounded activity history. It never stores or displays the Discord webhook, and its text fields pass through the same webhook redactor before atomic persistence. Closing the Activity window does not affect clip watching or uploads.
 
-The Gallery reads the local `uploaded` and `local-only` archives only while its page is open. It does not build a background media index, contact an artwork service, upload local-only clips, or send clip names and paths over the network. Playing a clip asks Windows to open the exact local file with the user's default video application.
+The Gallery reads the local `uploaded` and `local-only` archives only while its page is open. It does not build a background media index, contact an artwork service, or upload anything merely because a clip was browsed or played. Playing a clip asks Windows to open the exact local file with the user's default video application. Selecting **Edit & upload** is an explicit upload action: ClipCord uses the bundled FFmpeg locally for still-frame preview and any trim/mute render, then sends only the prepared video, uploader/game attribution, and optional description to the configured Discord webhook. The Local-only original remains untouched until Discord confirms success; by default it then goes to the Windows Recycle Bin after the edited archive is committed, or remains in Local only when the user enables **Keep original**.
 
 The About page computes its status locally. **Copy diagnostics** places a fixed, allowlisted summary on the Windows clipboard only when the user selects it. The summary can include the ClipCord, Windows, and .NET versions; operating-system and process architecture; installed or portable state; normalized watcher and routing states; Discord, startup, and FFmpeg availability; and a UTC timestamp. It excludes the webhook, uploader name, Windows user and machine names, clip and application-data paths, clip names, raw watcher text, activity history, and logs. Nothing is submitted automatically; project and documentation actions open fixed HTTPS pages in the official GitHub repository.
 
@@ -48,6 +48,7 @@ The About page computes its status locally. **Copy diagnostics** places a fixed,
 - New top-level `.mp4` clips are read after the source application finishes writing them.
 - Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
 - In local-only mode, newly detected originals move into local `local-only\<game name>` subfolders without being sent to Discord.
+- User-requested Gallery edits stage beneath `.clipcord-editing` in the configured clips folder so the watcher ignores them and the final archive move stays on the same volume. Failed or cancelled pre-upload edits clean their stage and leave the original unchanged; confirmed uploads persist a recovery record before archive or Recycle Bin work.
 - Temporary compressed files are deleted after the upload attempt.
 - Partial or failed update downloads are deleted; a completed staged installer may be reused after re-verification.
 - Duplicate destination names receive a unique suffix and are never overwritten.
