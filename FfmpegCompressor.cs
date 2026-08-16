@@ -6,13 +6,64 @@ namespace ClipsToDiscord;
 
 internal static partial class FfmpegCompressor
 {
+    private static string? _cachedExecutablePath;
+
     public static string? FindExecutable()
     {
-        var besideApp = Path.Combine(AppContext.BaseDirectory, "ffmpeg.exe");
-        if (File.Exists(besideApp)) return besideApp;
+        if (_cachedExecutablePath is not null) return _cachedExecutablePath;
 
-        var toolsFolder = Path.Combine(AppContext.BaseDirectory, "tools", "ffmpeg.exe");
-        if (File.Exists(toolsFolder)) return toolsFolder;
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var appBase = Path.GetFullPath(AppContext.BaseDirectory);
+        candidates.Add(appBase);
+        candidates.Add(Path.Combine(appBase, "tools"));
+
+        var cursor = Directory.GetParent(appBase);
+        while (cursor is not null)
+        {
+            candidates.Add(cursor.FullName);
+            candidates.Add(Path.Combine(cursor.FullName, "tools"));
+            candidates.Add(Path.Combine(cursor.FullName, "artifacts", "tools"));
+            cursor = cursor.Parent;
+            if (candidates.Count > 128) break;
+        }
+
+        foreach (var directory in candidates)
+        {
+            var path = Path.Combine(directory, "ffmpeg.exe");
+            if (File.Exists(path))
+            {
+                _cachedExecutablePath = path;
+                return path;
+            }
+
+            path = Path.Combine(directory, "tools", "ffmpeg.exe");
+            if (File.Exists(path))
+            {
+                _cachedExecutablePath = path;
+                return path;
+            }
+
+            var artifactsTools = Path.Combine(directory, "artifacts", "tools");
+            if (Directory.Exists(artifactsTools))
+            {
+                foreach (var candidate in Directory.EnumerateDirectories(artifactsTools))
+                {
+                    path = Path.Combine(candidate, "ffmpeg.exe");
+                    if (File.Exists(path))
+                    {
+                        _cachedExecutablePath = path;
+                        return path;
+                    }
+                }
+
+                path = Path.Combine(artifactsTools, "ffmpeg.exe");
+                if (File.Exists(path))
+                {
+                    _cachedExecutablePath = path;
+                    return path;
+                }
+            }
+        }
 
         return null;
     }

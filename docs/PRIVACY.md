@@ -49,6 +49,7 @@ The About page computes its status locally. **Copy diagnostics** places a fixed,
 - Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
 - In local-only mode, newly detected originals move into local `local-only\<game name>` subfolders without being sent to Discord.
 - User-requested Gallery edits stage beneath `.clipcord-editing` in the configured clips folder so the watcher ignores them and the final archive move stays on the same volume. Failed or cancelled pre-upload edits clean their stage and leave the original unchanged; confirmed uploads persist a recovery record before archive or Recycle Bin work.
+- Choosing **Play selection** in the editor renders only the selected range with the bundled FFmpeg into `%TEMP%\ClipsToDiscord\editor-playback`, and plays it in place. If in-editor playback is unavailable, ClipCord asks Windows to open that trimmed copy with the default video application; the untrimmed original is never handed to another program. Each trimmed preview is deleted when the next one starts, when playback stops, and when the editor closes.
 - Temporary compressed files are deleted after the upload attempt.
 - Partial or failed update downloads are deleted; a completed staged installer may be reused after re-verification.
 - Duplicate destination names receive a unique suffix and are never overwritten.

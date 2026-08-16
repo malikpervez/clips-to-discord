@@ -58,6 +58,14 @@ internal interface IManualClipEditService
     Task<string> CreatePreviewFrameAsync(
         GalleryClipEntry source,
         TimeSpan position,
+        CancellationToken cancellationToken,
+        int maxDimension = 960);
+
+    Task<string> CreateTrimmedPlaybackAsync(
+        GalleryClipEntry source,
+        TimeSpan start,
+        TimeSpan end,
+        bool muteAudio,
         CancellationToken cancellationToken);
 
     long EstimateOutputBytes(

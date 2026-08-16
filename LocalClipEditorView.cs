@@ -1,6 +1,22 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Windows.Forms.Integration;
+using System.Windows.Threading;
+using WpfMediaExceptionEventArgs = System.Windows.Media.ExceptionEventArgs;
+using WpfExceptionRoutedEventArgs = System.Windows.ExceptionRoutedEventArgs;
+using WpfMediaPlayer = System.Windows.Media.MediaPlayer;
+using WpfMediaState = System.Windows.Controls.MediaState;
+using WpfRoutedEventArgs = System.Windows.RoutedEventArgs;
+using WpfStretch = System.Windows.Media.Stretch;
+using WpfStretchDirection = System.Windows.Controls.StretchDirection;
+using MediaElement = System.Windows.Controls.MediaElement;
+using Control = System.Windows.Forms.Control;
+using Image = System.Drawing.Image;
+using Label = System.Windows.Forms.Label;
+using TextBox = System.Windows.Forms.TextBox;
+using UserControl = System.Windows.Forms.UserControl;
+using SizeType = System.Windows.Forms.SizeType;
 
 namespace ClipsToDiscord;
 
@@ -28,16 +44,28 @@ internal sealed class LocalClipEditorView : UserControl
     private readonly RoundedPanel _optionsCard;
     private readonly RoundedPanel _trimCard;
     private readonly RoundedPanel _commitCard;
+    private readonly Func<string, bool> _launchMediaFile;
     private readonly System.Windows.Forms.Timer _previewDebounce;
+    private readonly System.Windows.Forms.Timer _playbackTimer;
     private CancellationTokenSource? _lifetimeCancellation;
     private CancellationTokenSource? _previewCancellation;
     private CancellationTokenSource? _operationCancellation;
+    private CancellationTokenSource? _playbackCancellation;
     private ClipMediaInfo? _media;
+    private ElementHost? _mediaHost;
+    private MediaElement? _mediaElement;
     private string? _previewPath;
+    private string? _trimPlaybackPath;
+    private int _playbackGeneration;
+    private int _playbackGenerationCounter;
+    private bool _isPlaybackRunning;
+    private TimeSpan _trimPlaybackStart;
+    private TimeSpan _trimPlaybackEnd;
     private int _previewGeneration;
     private int _operationGeneration;
     private bool _startupDpiScaleApplied;
     private bool _updatingTrimText;
+    private bool _trimPlaybackInFlight;
     private bool _operationCanCancel = true;
     private bool _busy;
     private bool _disposed;
@@ -50,7 +78,8 @@ internal sealed class LocalClipEditorView : UserControl
 
     internal LocalClipEditorView(
         GalleryClipEntry source,
-        IManualClipEditService service)
+        IManualClipEditService service,
+        Func<string, bool>? launchMediaFile = null)
     {
         if (source.Route != GalleryClipRoute.LocalOnly)
         {
@@ -58,6 +87,7 @@ internal sealed class LocalClipEditorView : UserControl
         }
         _source = source;
         _service = service;
+        _launchMediaFile = launchMediaFile ?? DefaultLaunchMediaFile;
         Name = "LocalClipEditorView";
         AccessibleName = $"Edit and upload {source.FileName}";
         BackColor = ClipCordTheme.Shell;
@@ -117,6 +147,14 @@ internal sealed class LocalClipEditorView : UserControl
             AccessibleRole = AccessibleRole.Graphic,
             AccessibleName = "Selected clip preview frame"
         };
+        _mediaHost = new ElementHost
+        {
+            Name = "EditorPreviewHost",
+            Dock = DockStyle.Fill,
+            Visible = false,
+            BackColor = Color.Transparent,
+            Child = (_mediaElement = CreateMediaElement())
+        };
         _previewStatus = new Label
         {
             Text = "Preparing preview…",
@@ -127,6 +165,7 @@ internal sealed class LocalClipEditorView : UserControl
             Font = ClipCordTheme.InterfaceFont(10f)
         };
         previewSurface.Controls.Add(_previewStatus);
+        previewSurface.Controls.Add(_mediaHost);
         previewSurface.Controls.Add(_preview);
         _preview.SendToBack();
         previewLayout.Controls.Add(previewSurface, 0, 1);
@@ -143,7 +182,7 @@ internal sealed class LocalClipEditorView : UserControl
         previewFooter.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         _durationLabel = CreateMutedLabel("Duration: —");
         _durationLabel.Anchor = AnchorStyles.Left;
-        _playButton = CreateOutlineButton("Play source", 112);
+        _playButton = CreateOutlineButton("Play selection", 126);
         _playButton.Name = "PlayEditorSourceButton";
         _playButton.Click += PlaySource;
         previewFooter.Controls.Add(_durationLabel, 0, 0);
@@ -195,6 +234,7 @@ internal sealed class LocalClipEditorView : UserControl
             ForeColor = ClipCordTheme.Text,
             Margin = new Padding(0, 12, 0, 0)
         };
+        _muteAudio.CheckedChanged += MuteAudioChanged;
         options.Controls.Add(_muteAudio, 0, 7);
         options.Controls.Add(CreateMutedLabel(
             "Discord still applies the configured size limit and compression fallback."), 0, 8);
@@ -355,6 +395,8 @@ internal sealed class LocalClipEditorView : UserControl
 
         _previewDebounce = new System.Windows.Forms.Timer { Interval = 350 };
         _previewDebounce.Tick += PreviewDebounceTick;
+        _playbackTimer = new System.Windows.Forms.Timer { Interval = 80 };
+        _playbackTimer.Tick += PlaybackTimerTick;
         HandleCreated += EditorHandleCreated;
     }
 
@@ -371,6 +413,7 @@ internal sealed class LocalClipEditorView : UserControl
 
     internal void CancelActiveOperation()
     {
+        StopInEditorPlayback();
         TryCancel(_operationCancellation);
         TryCancel(_previewCancellation);
     }
@@ -434,8 +477,120 @@ internal sealed class LocalClipEditorView : UserControl
             _previewStatus.Text = "Preview unavailable";
             _previewStatus.Visible = true;
             _previewStatus.BringToFront();
-            _progressLabel.Text = exception.Message;
-            _uploadButton.Enabled = false;
+            var ffmpegUnavailable = string.Equals(
+                exception.Message,
+                "ClipCord's bundled FFmpeg tool is unavailable.",
+                StringComparison.Ordinal);
+            if (await TryInitializeWithoutPreviewMediaAsync(cancellationToken))
+            {
+                _progressLabel.Text = ffmpegUnavailable
+                    ? "Playback is available, but preview frame generation is unavailable (FFmpeg missing)."
+                    : "Playback is available without FFmpeg probing.";
+            }
+            else if (ffmpegUnavailable)
+            {
+                _progressLabel.Text = "Preview upload flow requires ffmpeg.exe next to ClipCord.exe.";
+            }
+            else
+            {
+                _progressLabel.Text = exception.Message;
+            }
+            if (_media is null)
+            {
+                _uploadButton.Enabled = false;
+            }
+        }
+    }
+
+    private async Task<bool> TryInitializeWithoutPreviewMediaAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var source = new FileInfo(_source.Path);
+            if (!source.Exists || source.Length <= 0)
+            {
+                return false;
+            }
+
+            var duration = await ProbeMediaDurationAsync(source.FullName, cancellationToken);
+            if (duration <= TimeSpan.FromSeconds(0.25) || !CanUpdate())
+            {
+                return false;
+            }
+
+            _media = new ClipMediaInfo(duration, source.Length);
+            _updatingTrimText = true;
+            try { _trimRange.SetRange(TimeSpan.Zero, duration, duration); }
+            finally { _updatingTrimText = false; }
+            UpdateTrimTextFromRange();
+            _durationLabel.Text = $"Duration: {FormatTime(duration)} · {GalleryView.FormatBytes(source.Length)}";
+            _trimRange.Enabled = true;
+            _uploadButton.Enabled = true;
+            UpdateEstimate();
+            _progressLabel.Text = "Ready to edit and upload. FFmpeg preview is unavailable.";
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Could not inspect {_source.FileName} with in-editor media player.", exception);
+            return false;
+        }
+    }
+
+    private static async Task<TimeSpan> ProbeMediaDurationAsync(string sourcePath, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(8));
+        var player = new WpfMediaPlayer();
+        var durationTask = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Exception? failureException = null;
+        EventHandler? opened = null;
+        EventHandler<WpfMediaExceptionEventArgs>? failed = null;
+
+        void Cleanup()
+        {
+            if (opened is not null) player.MediaOpened -= opened;
+            if (failed is not null) player.MediaFailed -= failed;
+            player.Stop();
+            player.Close();
+        }
+
+        opened = (_, _) =>
+        {
+            if (durationTask.TrySetResult(player.NaturalDuration.HasTimeSpan ? player.NaturalDuration.TimeSpan : TimeSpan.Zero))
+            {
+                Cleanup();
+            }
+        };
+
+        failed = (_, args) =>
+        {
+            failureException = args.ErrorException;
+            durationTask.TrySetException(new InvalidOperationException(
+                "The clip duration could not be read by the in-editor media player.",
+                failureException));
+            Cleanup();
+        };
+
+        player.MediaOpened += opened;
+        player.MediaFailed += failed;
+        player.Open(new Uri(sourcePath, UriKind.Absolute));
+
+        using (timeout.Token.Register(() => durationTask.TrySetCanceled(timeout.Token)))
+        {
+            var duration = await durationTask.Task.WaitAsync(timeout.Token);
+            if (duration <= TimeSpan.Zero)
+            {
+                throw new InvalidOperationException(
+                    "The clip duration is invalid.",
+                    failureException);
+            }
+            return duration;
         }
     }
 
@@ -617,6 +772,7 @@ internal sealed class LocalClipEditorView : UserControl
         _playButton.Enabled = !busy;
         if (busy)
         {
+            StopInEditorPlayback();
             _operationCanCancel = true;
             _cancelButton.Text = "Cancel upload";
             _cancelButton.Enabled = true;
@@ -650,20 +806,197 @@ internal sealed class LocalClipEditorView : UserControl
         Cancelled?.Invoke();
     }
 
-    private void PlaySource(object? sender, EventArgs eventArgs)
+    private async void PlaySource(object? sender, EventArgs eventArgs)
     {
-        if (!File.Exists(_source.Path)) return;
-        try { Process.Start(GalleryView.CreatePlayClipStartInfo(_source.Path)); }
+        if (_busy) return;
+        if (!File.Exists(_source.Path))
+        {
+            MessageBox.Show(this, "This clip is unavailable to play.", "Could not play clip", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        _playButton.Enabled = false;
+        try
+        {
+            if (_media is not null && _mediaElement is not null)
+            {
+                if (_trimRange.End - _trimRange.Start < TimeSpan.FromSeconds(0.25))
+                {
+                    MessageBox.Show(
+                        this,
+                        "Choose at least 0.25 seconds of the clip to preview.",
+                        "Preview selection",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                if (IsPlaybackRunning())
+                {
+                    StopInEditorPlayback(showLastFrame: true);
+                    return;
+                }
+
+                StartInEditorPlayback();
+                if (!IsPlaybackRunning())
+                {
+                    // If embedded playback failed to initialize, fall back to a generated clip preview.
+                    if (await TryPlaySelectionInTempMediaAsync()) return;
+                }
+                return;
+            }
+
+            if (await TryPlaySelectionInTempMediaAsync())
+            {
+                return;
+            }
+
+            _previewStatus.Text = "Preview unavailable for this selection.";
+            _previewStatus.BringToFront();
+            _previewStatus.Visible = true;
+        }
+        finally
+        {
+            _playButton.Enabled = true;
+        }
+    }
+
+    private async Task<bool> TryPlaySelectionInTempMediaAsync()
+    {
+        var rangeStart = _trimRange.Start;
+        var rangeEnd = _trimRange.End;
+        if (_media is not null)
+        {
+            rangeStart = Clamp(rangeStart, TimeSpan.Zero, _media.Duration);
+            rangeEnd = Clamp(rangeEnd, rangeStart, _media.Duration);
+        }
+        if (rangeEnd - rangeStart < TimeSpan.FromSeconds(0.25))
+        {
+            return false;
+        }
+        if (IsPlaybackRunning()) return false;
+        // MediaElementMediaFailed and PlaySource can both reach this fallback, so a second
+        // render must not start while one is already producing a clip for this editor.
+        if (_trimPlaybackInFlight) return false;
+        if (_trimPlaybackPath is not null)
+        {
+            var stalePlayback = _trimPlaybackPath;
+            _trimPlaybackPath = null;
+            TryDelete(stalePlayback);
+        }
+
+        string? playbackPath = null;
+        var adopted = false;
+        _trimPlaybackInFlight = true;
+        var previousPlaybackCancellation = Interlocked.Exchange(ref _playbackCancellation, null);
+        using var playbackCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _lifetimeCancellation?.Token ?? CancellationToken.None);
+        _playbackCancellation = playbackCancellation;
+        TryCancel(previousPlaybackCancellation);
+        previousPlaybackCancellation?.Dispose();
+        try
+        {
+            playbackPath = await _service.CreateTrimmedPlaybackAsync(
+                _source,
+                rangeStart,
+                rangeEnd,
+                _muteAudio.Checked,
+                playbackCancellation.Token);
+            if (!ReferenceEquals(_playbackCancellation, playbackCancellation))
+            {
+                return false;
+            }
+            if (!File.Exists(playbackPath) || !TryPlayMediaFile(playbackPath))
+            {
+                return false;
+            }
+
+            _trimPlaybackPath = playbackPath;
+            playbackPath = null;
+            _progressLabel.Text = "Playing selected trim in external player.";
+            adopted = true;
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
         catch (Exception exception)
         {
-            Log.Error($"Could not play Gallery clip {_source.FileName}.", exception);
-            MessageBox.Show(this, "Windows could not open this clip.", "Could not play clip", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Log.Error($"Could not generate trimmed playback clip for {_source.FileName}.", exception);
+            return false;
         }
+        finally
+        {
+            if (!adopted && playbackPath is not null)
+            {
+                TryDelete(playbackPath);
+            }
+            if (ReferenceEquals(_playbackCancellation, playbackCancellation))
+            {
+                _playbackCancellation = null;
+            }
+            _trimPlaybackInFlight = false;
+            // Only clear the status when this attempt produced nothing; otherwise it would
+            // immediately erase the "Playing selected trim…" message set on the success path.
+            if (!adopted && CanUpdate()) _progressLabel.Text = string.Empty;
+        }
+    }
+
+    private bool TryPlayMediaFile(string mediaPath)
+    {
+        // Refuse to hand a missing path to any launcher; the injected seam is only
+        // reached for a clip that actually exists on disk.
+        if (string.IsNullOrWhiteSpace(mediaPath) || !File.Exists(mediaPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!_launchMediaFile(mediaPath))
+            {
+                return false;
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Could not launch media file for {_source.FileName}.", exception);
+            return false;
+        }
+    }
+
+    private static bool DefaultLaunchMediaFile(string mediaPath)
+    {
+        if (!TryCreateMediaPlayerStartInfo(mediaPath, out var startInfo))
+        {
+            return false;
+        }
+
+        Process.Start(startInfo);
+        return true;
+    }
+
+    private static bool TryCreateMediaPlayerStartInfo(string mediaPath, out ProcessStartInfo startInfo)
+    {
+        if (string.IsNullOrWhiteSpace(mediaPath) || !File.Exists(mediaPath))
+        {
+            startInfo = new ProcessStartInfo();
+            return false;
+        }
+
+        startInfo = new ProcessStartInfo
+        {
+            FileName = mediaPath,
+            UseShellExecute = true
+        };
+        return true;
     }
 
     private void TrimRangeChanged(object? sender, EventArgs eventArgs)
     {
         if (_updatingTrimText) return;
+        StopInEditorPlayback();
         UpdateTrimTextFromRange();
         UpdateEstimate();
         _previewDebounce.Stop();
@@ -729,7 +1062,7 @@ internal sealed class LocalClipEditorView : UserControl
     private async void PreviewDebounceTick(object? sender, EventArgs eventArgs)
     {
         _previewDebounce.Stop();
-        if (_busy) return;
+        if (_busy || IsPlaybackRunning()) return;
         try
         {
             await RefreshPreviewRequestAsync(
@@ -773,7 +1106,7 @@ internal sealed class LocalClipEditorView : UserControl
             using var stream = new FileStream(returnedPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             using var loaded = Image.FromStream(stream);
             var clone = new Bitmap(loaded);
-            if (!CanUpdate() || generation != _previewGeneration ||
+            if (!CanUpdate() || generation != _previewGeneration || IsPlaybackRunning() ||
                 !ReferenceEquals(_previewCancellation, requestCancellation))
             {
                 clone.Dispose();
@@ -784,9 +1117,11 @@ internal sealed class LocalClipEditorView : UserControl
             _preview.Image = clone;
             _previewPath = returnedPath;
             adopted = true;
+            _mediaHost?.SendToBack();
+            _preview.BringToFront();
+            _preview.Visible = true;
             _previewStatus.Text = string.Empty;
             _previewStatus.Visible = false;
-            _preview.BringToFront();
             previousImage?.Dispose();
             if (previousPath is not null) TryDelete(previousPath);
         }
@@ -801,7 +1136,224 @@ internal sealed class LocalClipEditorView : UserControl
         }
     }
 
+    private MediaElement CreateMediaElement()
+    {
+        var element = new MediaElement
+        {
+            LoadedBehavior = WpfMediaState.Manual,
+            UnloadedBehavior = WpfMediaState.Manual,
+            Stretch = WpfStretch.Uniform,
+            StretchDirection = WpfStretchDirection.Both,
+            Volume = 1.0,
+            IsMuted = false
+        };
+        element.MediaOpened += MediaElementMediaOpened;
+        element.MediaEnded += MediaElementMediaEnded;
+        element.MediaFailed += MediaElementMediaFailed;
+        return element;
+    }
+
+    private bool IsPlaybackRunning() => _isPlaybackRunning;
+
+    private void StartInEditorPlayback()
+    {
+        if (_media is null || _mediaElement is null) return;
+        if ((_trimRange.End - _trimRange.Start) < TimeSpan.FromSeconds(0.25))
+        {
+            return;
+        }
+        TryCancel(_previewCancellation);
+        _trimPlaybackStart = _trimRange.Start;
+        _trimPlaybackEnd = _trimRange.End;
+        _playbackGeneration = ++_playbackGenerationCounter;
+        _isPlaybackRunning = true;
+        _playButton.Text = "Stop preview";
+        _previewStatus.Text = "Loading selection playback…";
+        _previewStatus.Visible = true;
+        _previewStatus.BringToFront();
+        _preview.Visible = false;
+        _mediaHost?.BringToFront();
+        if (_mediaHost is not null)
+        {
+            _mediaHost.Visible = true;
+        }
+        var previousPlaybackCancellation = Interlocked.Exchange(ref _playbackCancellation, null);
+        TryCancel(previousPlaybackCancellation);
+        previousPlaybackCancellation?.Dispose();
+        _playbackCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _lifetimeCancellation?.Token ?? CancellationToken.None);
+        PostToMediaDispatcher(() =>
+        {
+            if (!CanUpdate() || !_isPlaybackRunning) return;
+            try
+            {
+                if (_mediaElement is null) return;
+                _mediaElement.Stop();
+                _mediaElement.Volume = 1.0;
+                _mediaElement.IsMuted = _muteAudio.Checked;
+                _mediaElement.Source = new Uri(_source.Path, UriKind.Absolute);
+            }
+            catch (Exception exception)
+            {
+                Log.Error($"Could not start preview playback for {_source.FileName}.", exception);
+                TryPostToUi(() =>
+                {
+                    StopInEditorPlayback(showLastFrame: true);
+                    _previewStatus.Text = "Preview unavailable";
+                    _previewStatus.Visible = true;
+                    _previewStatus.BringToFront();
+                });
+            }
+        });
+    }
+
+    private void StopInEditorPlayback(bool showLastFrame = false)
+    {
+        var wasPlaybackRunning = _isPlaybackRunning;
+        _isPlaybackRunning = false;
+        _playbackTimer.Stop();
+        _trimPlaybackStart = TimeSpan.Zero;
+        _trimPlaybackEnd = TimeSpan.Zero;
+        TryCancel(_playbackCancellation);
+        var previousPlaybackCancellation = Interlocked.Exchange(ref _playbackCancellation, null);
+        previousPlaybackCancellation?.Dispose();
+        PostToMediaDispatcher(() =>
+        {
+            if (_mediaElement is null) return;
+            _mediaElement.Stop();
+            _mediaElement.Position = TimeSpan.Zero;
+            _mediaElement.Source = null;
+        });
+        if (wasPlaybackRunning && _mediaHost is not null)
+        {
+            _mediaHost.Visible = false;
+            _mediaHost.SendToBack();
+        }
+        if (wasPlaybackRunning)
+        {
+            _preview.BringToFront();
+            _playButton.Text = "Play selection";
+        }
+        if (_trimPlaybackPath is not null)
+        {
+            var stalePath = _trimPlaybackPath;
+            _trimPlaybackPath = null;
+            TryDelete(stalePath);
+        }
+        if (showLastFrame)
+        {
+            _ = RefreshPreviewRequestAsync(
+                _trimRange.Start,
+                _lifetimeCancellation?.Token ?? CancellationToken.None);
+        }
+    }
+
+    private void PlaybackTimerTick(object? sender, EventArgs eventArgs)
+    {
+        if (!_isPlaybackRunning || _mediaElement is null || _mediaElement.Source is null)
+        {
+            _playbackTimer.Stop();
+            return;
+        }
+        if (_mediaElement.Position >= _trimPlaybackEnd)
+        {
+            StopInEditorPlayback(showLastFrame: true);
+        }
+    }
+
+    private void MediaElementMediaOpened(object? sender, WpfRoutedEventArgs eventArgs)
+    {
+        if (!CanUpdate() || !_isPlaybackRunning || _mediaElement is null) return;
+        var currentGeneration = _playbackGeneration;
+        PostToMediaDispatcher(() =>
+        {
+            if (_mediaElement is null || !_isPlaybackRunning || currentGeneration != _playbackGeneration) return;
+            var duration = _media?.Duration ?? TimeSpan.Zero;
+            var start = Clamp(_trimPlaybackStart, TimeSpan.Zero, duration);
+            var end = Clamp(_trimPlaybackEnd, TimeSpan.Zero, duration);
+            if (end < start + TimeSpan.FromSeconds(0.25))
+            {
+                StopInEditorPlayback(showLastFrame: true);
+                return;
+            }
+            _trimPlaybackStart = start;
+            _trimPlaybackEnd = end;
+            _mediaElement.Position = start;
+            _mediaElement.Play();
+            // WPF can silently ignore a pre-roll seek, which would otherwise play the clip
+            // from its beginning instead of the selected trim start.
+            if (!IsApproximately(_mediaElement.Position, start))
+            {
+                _mediaElement.Position = start;
+                _mediaElement.Play();
+            }
+            _mediaHost?.BringToFront();
+            if (_mediaHost is not null)
+            {
+                _mediaHost.Visible = true;
+            }
+            _previewStatus.Visible = false;
+            _playbackTimer.Start();
+        });
+    }
+
+    private void MediaElementMediaEnded(object? sender, WpfRoutedEventArgs eventArgs)
+    {
+        if (!_isPlaybackRunning || _mediaElement is null || !CanUpdate()) return;
+        StopInEditorPlayback(showLastFrame: true);
+    }
+
+    private void MediaElementMediaFailed(object? sender, WpfExceptionRoutedEventArgs eventArgs)
+    {
+        if (!CanUpdate() || !_isPlaybackRunning || _mediaElement is null) return;
+        Log.Error($"In-editor preview playback failed for {_source.FileName}: {eventArgs.ErrorException?.Message}", eventArgs.ErrorException);
+        StopInEditorPlayback(showLastFrame: true);
+        _previewStatus.Text = "Preview playback failed";
+        _previewStatus.Visible = true;
+        _previewStatus.BringToFront();
+        _ = TryPlaySelectionInTempMediaAsync();
+    }
+
+    private static bool IsApproximately(TimeSpan left, TimeSpan right) =>
+        Math.Abs((left - right).TotalMilliseconds) <= 250;
+
+    private static TimeSpan Clamp(TimeSpan value, TimeSpan minimum, TimeSpan maximum) =>
+        value < minimum ? minimum : value > maximum ? maximum : value;
+
     private bool CanUpdate() => !_disposed && !IsDisposed && !Disposing;
+
+    private void MuteAudioChanged(object? sender, EventArgs eventArgs)
+    {
+        if (!_isPlaybackRunning || _mediaElement is null) return;
+        PostToMediaDispatcher(() =>
+        {
+            if (_mediaElement is not null) _mediaElement.IsMuted = _muteAudio.Checked;
+        });
+    }
+
+    private void PostToMediaDispatcher(Action action)
+    {
+        if (!CanUpdate() || _mediaElement is null) return;
+        try
+        {
+            var dispatcher = _mediaElement.Dispatcher;
+            if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished) return;
+            if (dispatcher.CheckAccess())
+            {
+                if (CanUpdate()) action();
+            }
+            else
+            {
+                dispatcher.BeginInvoke((Action)(() =>
+                {
+                    if (CanUpdate()) action();
+                }), DispatcherPriority.Normal);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
 
     private bool TryPostToUi(Action action)
     {
@@ -971,16 +1523,27 @@ internal sealed class LocalClipEditorView : UserControl
         {
             _disposed = true;
             _operationGeneration++;
+            StopInEditorPlayback();
             _previewDebounce.Stop();
             _previewDebounce.Dispose();
+            _playbackTimer.Stop();
+            _playbackTimer.Dispose();
             _lifetimeCancellation?.Cancel();
             TryCancel(_previewCancellation);
             TryCancel(_operationCancellation);
+            TryCancel(_playbackCancellation);
             _lifetimeCancellation?.Dispose();
+            _playbackCancellation?.Dispose();
             // Preview/upload continuations own and dispose their CTS instances. Disposing
             // them here can race a continuation that is unwinding after cancellation.
             _preview.Image?.Dispose();
             if (_previewPath is not null) TryDelete(_previewPath);
+            if (_trimPlaybackPath is not null) TryDelete(_trimPlaybackPath);
+            if (_mediaHost is not null)
+            {
+                _mediaHost.Child = null;
+                _mediaHost.Dispose();
+            }
         }
         base.Dispose(disposing);
     }

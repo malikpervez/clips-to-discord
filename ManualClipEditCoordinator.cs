@@ -18,13 +18,32 @@ internal sealed class ManualClipEditCoordinator(
     public Task<string> CreatePreviewFrameAsync(
         GalleryClipEntry source,
         TimeSpan position,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int maxDimension = 960)
     {
         ValidateSourceEntry(source);
         return _processor.CreatePreviewFrameAsync(
             settings.ClipsFolder,
             source.Path,
             position,
+            cancellationToken,
+            maxDimension);
+    }
+
+    public Task<string> CreateTrimmedPlaybackAsync(
+        GalleryClipEntry source,
+        TimeSpan start,
+        TimeSpan end,
+        bool muteAudio,
+        CancellationToken cancellationToken)
+    {
+        ValidateSourceEntry(source);
+        return _processor.CreateTrimmedPlaybackAsync(
+            settings.ClipsFolder,
+            source.Path,
+            start,
+            end,
+            muteAudio,
             cancellationToken);
     }
 
