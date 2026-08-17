@@ -779,6 +779,30 @@ try
            !secondPass.Contains("-an") && HasArgumentPair(secondPass, "-c:a", "aac") &&
            secondPass[^1] == @"C:\temp\out.mp4",
         "The analysis pass must discard audio to NUL while the encode pass writes the real clip.");
+    // A recording that keeps the microphone on its own track (Discord voice chat, NVIDIA
+    // captures) loses that track to FFmpeg's default single-stream selection.
+    Assert(!secondPass.Contains("-filter_complex") && !secondPass.Contains("-map"),
+        "A single-track source must keep FFmpeg's default stream selection.");
+    var multiTrackPass = FfmpegCompressor.BuildCompressionArguments(
+        2, @"C:\clips\in.mp4", @"C:\temp\passlog", "6000k", 96, @"C:\temp\out.mp4", 2).ToArray();
+    var compressionMixFilter = multiTrackPass
+        .SkipWhile(value => value != "-filter_complex")
+        .Skip(1)
+        .FirstOrDefault() ?? string.Empty;
+    Assert(compressionMixFilter.StartsWith("[0:a:0][0:a:1]amix=inputs=2:", StringComparison.Ordinal) &&
+           compressionMixFilter.Contains("normalize=0", StringComparison.Ordinal) &&
+           compressionMixFilter.EndsWith("[clipcordmix]", StringComparison.Ordinal) &&
+           HasArgumentPair(multiTrackPass, "-map", "0:v:0") &&
+           HasArgumentPair(multiTrackPass, "-map", "[clipcordmix]"),
+        "Compressing a clip that carries a separate microphone track must mix every track into the upload.");
+    var separateTrackProbe = FfmpegCompressor.ParseProbe(
+        "  Duration: 00:00:31.50, start: 0.000000, bitrate: 320 kb/s\n" +
+        "  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p, 1920x1080\n" +
+        "  Stream #0:1[0x2](eng): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo\n" +
+        "  Stream #0:2[0x3](eng): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, mono\n");
+    Assert(separateTrackProbe.AudioStreamCount == 2 &&
+           separateTrackProbe.Duration == TimeSpan.FromSeconds(31.5),
+        "Probing must report every audio track a recording carries alongside its duration.");
     var untrustedFfmpegFolder = Directory.CreateDirectory(Path.Combine(temporaryRoot, "path-ffmpeg"));
     var untrustedFfmpegPath = Path.Combine(untrustedFfmpegFolder.FullName, "ffmpeg.exe");
     await File.WriteAllTextAsync(untrustedFfmpegPath, "not an executable");
@@ -2510,6 +2534,59 @@ static void AssertClipEditProcessorContracts(string temporaryRoot)
            !mutedPlayback.Contains("-af") &&
            !mutedPlayback.Contains("-c:a"),
         "A muted trim preview must drop audio and omit every audio map/filter/codec option.");
+
+    // Discord voice chat and NVIDIA captures record the microphone on its own audio
+    // track. Mapping the first track alone dropped the microphone from every edit, and
+    // because Discord's player only plays the first track, the tracks are summed into
+    // one rather than carried through separately.
+    var multiTrackEdit = ClipEditProcessor.BuildRenderArguments(
+        localPath,
+        stagedPath,
+        request,
+        audioTrackCount: 2).ToArray();
+    var editMixFilter = multiTrackEdit
+        .SkipWhile(value => value != "-filter_complex")
+        .Skip(1)
+        .FirstOrDefault() ?? string.Empty;
+    Assert(editMixFilter.StartsWith("[0:a:0][0:a:1]amix=inputs=2:", StringComparison.Ordinal) &&
+           editMixFilter.Contains("normalize=0", StringComparison.Ordinal) &&
+           editMixFilter.EndsWith("asetpts=PTS-STARTPTS[clipcordmix]", StringComparison.Ordinal) &&
+           HasPair(multiTrackEdit, "-map", "0:v:0") &&
+           HasPair(multiTrackEdit, "-map", "[clipcordmix]") &&
+           HasPair(multiTrackEdit, "-c:a", "aac") &&
+           !multiTrackEdit.Contains("0:a:0?") &&
+           !multiTrackEdit.Contains("-an") &&
+           multiTrackEdit[^3] == "-f" && multiTrackEdit[^2] == "mp4" && multiTrackEdit[^1] == stagedPath,
+        "Trimming a clip with a separate microphone track must keep every audio track in the edit.");
+    var multiTrackMuted = ClipEditProcessor.BuildRenderArguments(
+        localPath,
+        stagedPath,
+        request with { MuteAudio = true },
+        audioTrackCount: 3).ToArray();
+    Assert(multiTrackMuted.Contains("-an") &&
+           !multiTrackMuted.Contains("-filter_complex") &&
+           !multiTrackMuted.Contains("-c:a"),
+        "Muting a multi-track clip must still drop every audio track instead of mixing them.");
+    var threeTrackPlayback = ClipEditProcessor.BuildPlaybackArguments(
+        localPath,
+        playbackPath,
+        TimeSpan.FromSeconds(4.5),
+        TimeSpan.FromSeconds(9.75),
+        muteAudio: false,
+        audioTrackCount: 3).ToArray();
+    Assert((threeTrackPlayback.SkipWhile(value => value != "-filter_complex").Skip(1).FirstOrDefault() ?? string.Empty)
+               .StartsWith("[0:a:0][0:a:1][0:a:2]amix=inputs=3:", StringComparison.Ordinal) &&
+           HasPair(threeTrackPlayback, "-map", "[clipcordmix]"),
+        "The trim preview must play the same mix the edit will upload, including a third track.");
+    var silentSource = ClipEditProcessor.BuildRenderArguments(
+        localPath,
+        stagedPath,
+        request,
+        audioTrackCount: 0).ToArray();
+    Assert(silentSource.Contains("-an") &&
+           !silentSource.Contains("-filter_complex") &&
+           !silentSource.Contains("0:a:0?"),
+        "A source without audio must not map or mix a track that does not exist.");
     var playbackRangeRejected = false;
     try
     {

@@ -11,7 +11,12 @@ internal enum ManualClipEditStage
     Completed
 }
 
-internal sealed record ClipMediaInfo(TimeSpan Duration, long SourceBytes);
+/// <summary>
+/// <paramref name="AudioTrackCount"/> is how many audio streams the source carries; a
+/// recording with the microphone on its own track reports more than one, and every track
+/// has to survive the edit.
+/// </summary>
+internal sealed record ClipMediaInfo(TimeSpan Duration, long SourceBytes, int AudioTrackCount = 1);
 
 internal sealed record ManualClipEditRequest(
     GalleryClipEntry Source,
