@@ -16,8 +16,8 @@ internal sealed class ClipEditProcessor
         var source = ValidateLocalOnlySource(clipsFolder, sourcePath);
         var ffmpeg = FfmpegCompressor.FindExecutable()
             ?? throw new InvalidOperationException("ClipCord's bundled FFmpeg tool is unavailable.");
-        var duration = await FfmpegCompressor.ProbeDurationAsync(source.FullName, ffmpeg, cancellationToken);
-        return new ClipMediaInfo(duration, source.Length);
+        var probe = await FfmpegCompressor.ProbeMediaAsync(source.FullName, ffmpeg, cancellationToken);
+        return new ClipMediaInfo(probe.Duration, source.Length, probe.AudioStreamCount);
     }
 
     internal long EstimateOutputBytes(
@@ -109,6 +109,11 @@ internal sealed class ClipEditProcessor
         var previewFolder = Path.Combine(Path.GetTempPath(), "ClipsToDiscord", "editor-playback");
         Directory.CreateDirectory(previewFolder);
         var playbackPath = Path.Combine(previewFolder, $"{Guid.NewGuid():N}.mp4");
+        // A muted preview never maps audio, so the extra inspection is only worth its
+        // cost when the preview will actually carry sound.
+        var audioTrackCount = muteAudio
+            ? 0
+            : (await FfmpegCompressor.ProbeMediaAsync(source.FullName, ffmpeg, cancellationToken)).AudioStreamCount;
         try
         {
             var arguments = BuildPlaybackArguments(
@@ -116,7 +121,8 @@ internal sealed class ClipEditProcessor
                 playbackPath,
                 start,
                 end,
-                muteAudio);
+                muteAudio,
+                audioTrackCount);
             await FfmpegCompressor.RunAsync(
                 ffmpeg,
                 arguments,
@@ -134,12 +140,34 @@ internal sealed class ClipEditProcessor
         }
     }
 
+    /// <summary>
+    /// Builds the audio half of an edit. A clip recorded with the microphone on its own
+    /// track — Discord voice chat and NVIDIA captures both do this — keeps every track,
+    /// because mapping only the first stream dropped the microphone from the edit.
+    /// </summary>
+    internal static IReadOnlyList<string> BuildAudioArguments(bool muteAudio, int audioTrackCount)
+    {
+        if (audioTrackCount < 0) throw new ArgumentOutOfRangeException(nameof(audioTrackCount));
+        if (muteAudio || audioTrackCount == 0) return ["-an"];
+        if (audioTrackCount == 1)
+        {
+            return ["-map", "0:a:0?", "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k"];
+        }
+        return [
+            "-filter_complex",
+            FfmpegCompressor.BuildAudioMixFilter(audioTrackCount, "asetpts=PTS-STARTPTS"),
+            "-map", FfmpegCompressor.MixedAudioLabel,
+            "-c:a", "aac", "-b:a", "192k"
+        ];
+    }
+
     internal static IReadOnlyList<string> BuildPlaybackArguments(
         string sourcePath,
         string playbackPath,
         TimeSpan start,
         TimeSpan end,
-        bool muteAudio)
+        bool muteAudio,
+        int audioTrackCount = 1)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(playbackPath);
@@ -158,19 +186,8 @@ internal sealed class ClipEditProcessor
             "-map", "0:v:0",
             "-vf", "scale='min(960,iw)':-2,setpts=PTS-STARTPTS"
         };
-        if (muteAudio)
-        {
-            arguments.Add("-an");
-        }
-        else
-        {
-            // The audio filter only belongs on the branch that actually maps an audio stream.
-            arguments.AddRange([
-                "-map", "0:a:0?",
-                "-af", "asetpts=PTS-STARTPTS",
-                "-c:a", "aac", "-b:a", "192k"
-            ]);
-        }
+        // The audio filter only belongs on the branch that actually maps an audio stream.
+        arguments.AddRange(BuildAudioArguments(muteAudio, audioTrackCount));
         arguments.AddRange([
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
@@ -185,39 +202,9 @@ internal sealed class ClipEditProcessor
         string playbackPath,
         TimeSpan start,
         TimeSpan end,
-        bool muteAudio)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(playbackPath);
-        if (start < TimeSpan.Zero || end <= start)
-        {
-            throw new ArgumentOutOfRangeException(nameof(end), "The playback start and end must define a valid range.");
-        }
-
-        var duration = end - start;
-        var arguments = new List<string>
-        {
-            "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", FormatSeconds(start.TotalSeconds),
-            "-i", sourcePath,
-            "-t", FormatSeconds(duration.TotalSeconds),
-            "-map", "0:v:0",
-            "-vf", "scale='min(960,iw)':-2,setpts=PTS-STARTPTS",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-            "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn"
-        };
-        if (muteAudio)
-        {
-            arguments.AddRange(["-an"]);
-        }
-        else
-        {
-            arguments.AddRange(["-map", "0:a:0?", "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k"]);
-        }
-        arguments.AddRange(["-f", "mp4", playbackPath]);
-        return arguments;
-    }
+        bool muteAudio,
+        int audioTrackCount = 1) =>
+        BuildPlaybackArguments(sourcePath, playbackPath, start, end, muteAudio, audioTrackCount);
 
     internal async Task<PreparedClipEdit> PrepareAsync(
         string clipsFolder,
@@ -239,7 +226,11 @@ internal sealed class ClipEditProcessor
         var operationId = Guid.NewGuid();
         var noMediaChanges = request.TrimStart <= TimeSpan.FromMilliseconds(50) &&
                              media.Duration - request.TrimEnd <= TimeSpan.FromMilliseconds(50) &&
-                             !request.MuteAudio;
+                             !request.MuteAudio &&
+                             // Extra audio tracks still have to be mixed down: Discord plays
+                             // only the first track, so copying the source through would post
+                             // a clip without its microphone audio.
+                             media.AudioTrackCount <= 1;
         if (noMediaChanges && !request.KeepOriginal)
         {
             return new PreparedClipEdit(
@@ -273,7 +264,12 @@ internal sealed class ClipEditProcessor
                 progress?.Report(new ManualClipEditProgress(
                     ManualClipEditStage.Rendering,
                     "Rendering the selected trim at high quality…"));
-                await RenderAsync(source.FullName, stagedPath, request, cancellationToken);
+                await RenderAsync(
+                    source.FullName,
+                    stagedPath,
+                    request,
+                    media.AudioTrackCount,
+                    cancellationToken);
             }
 
             source.Refresh();
@@ -357,11 +353,12 @@ internal sealed class ClipEditProcessor
         string sourcePath,
         string stagedPath,
         ManualClipEditRequest request,
+        int audioTrackCount,
         CancellationToken cancellationToken)
     {
         var ffmpeg = FfmpegCompressor.FindExecutable()
             ?? throw new InvalidOperationException("ClipCord's bundled FFmpeg tool is unavailable.");
-        var arguments = BuildRenderArguments(sourcePath, stagedPath, request);
+        var arguments = BuildRenderArguments(sourcePath, stagedPath, request, audioTrackCount);
         await FfmpegCompressor.RunAsync(ffmpeg, arguments, cancellationToken);
         if (!File.Exists(stagedPath) || new FileInfo(stagedPath).Length == 0)
         {
@@ -372,7 +369,8 @@ internal sealed class ClipEditProcessor
     internal static IReadOnlyList<string> BuildRenderArguments(
         string sourcePath,
         string stagedPath,
-        ManualClipEditRequest request)
+        ManualClipEditRequest request,
+        int audioTrackCount = 1)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(stagedPath);
@@ -384,29 +382,12 @@ internal sealed class ClipEditProcessor
             "-ss", FormatSeconds(request.TrimStart.TotalSeconds),
             "-i", sourcePath,
             "-t", FormatSeconds(selectionDuration.TotalSeconds),
-            "-map", "0:v:0"
+            "-map", "0:v:0",
+            "-vf", "setpts=PTS-STARTPTS"
         };
-        if (request.MuteAudio)
-        {
-            arguments.AddRange(["-an"]);
-        }
-        else
-        {
-            arguments.AddRange(["-map", "0:a:0?"]);
-        }
-        arguments.AddRange(["-vf", "setpts=PTS-STARTPTS"]);
-        if (!request.MuteAudio)
-        {
-            arguments.AddRange(["-af", "asetpts=PTS-STARTPTS"]);
-        }
+        arguments.AddRange(BuildAudioArguments(request.MuteAudio, audioTrackCount));
         arguments.AddRange([
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18"
-        ]);
-        if (!request.MuteAudio)
-        {
-            arguments.AddRange(["-c:a", "aac", "-b:a", "192k"]);
-        }
-        arguments.AddRange([
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
             "-f", "mp4", stagedPath

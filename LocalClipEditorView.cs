@@ -518,6 +518,8 @@ internal sealed class LocalClipEditorView : UserControl
                 return false;
             }
 
+            // FFmpeg is unavailable on this path, so the track count is unknown; the
+            // editor only uses it for display and PrepareAsync probes for itself.
             _media = new ClipMediaInfo(duration, source.Length);
             _updatingTrimText = true;
             try { _trimRange.SetRange(TimeSpan.Zero, duration, duration); }

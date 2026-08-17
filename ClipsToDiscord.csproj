@@ -11,7 +11,7 @@
     <Product>ClipCord</Product>
     <AssemblyTitle>ClipCord</AssemblyTitle>
     <Description>Automatically relay completed gaming clips to Discord.</Description>
-    <Version>1.13.0</Version>
+    <Version>1.13.1</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>assets\ClipsToDiscord.ico</ApplicationIcon>
   </PropertyGroup>

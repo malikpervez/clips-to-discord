@@ -6,6 +6,11 @@ All notable user-facing changes are documented here.
 
 - No unreleased changes.
 
+## 1.13.1 — 2026-08-17
+
+- Keep every audio track when a clip is edited. A recording that carries the microphone on its own track next to game and chat audio — Discord voice chat and NVIDIA captures both do this — previously kept only the first track, so trimming silently dropped the microphone. All tracks are now mixed into the single track Discord plays, each at its recorded level.
+- Keep every audio track when an oversized clip is compressed for upload, for the same reason.
+
 ## 1.13.0 — 2026-08-17
 
 - Choose how you record in **Clip source**: SteelSeries GG keeps watching the folder itself, while NVIDIA finds clips one level inside it, in the per-game folders NVIDIA organizes them into — point ClipCord at the folder holding those game folders, such as `Videos\NVIDIA`. Everything after discovery — auto-upload, Local only, Gallery, and Edit & upload — is identical for both.
