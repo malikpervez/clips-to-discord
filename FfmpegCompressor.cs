@@ -116,6 +116,57 @@ internal static partial class FfmpegCompressor
         return duration;
     }
 
+    /// <summary>
+    /// Builds one pass of the two-pass compression. Both passes are produced here so they
+    /// cannot drift apart: a 10-bit HDR source (NVIDIA records HEVC Main 10) analysed in
+    /// 10-bit but encoded in 8-bit leaves libx264 unable to open against the mismatched
+    /// two-pass statistics, which fails the whole upload.
+    /// </summary>
+    internal static IReadOnlyList<string> BuildCompressionArguments(
+        int pass,
+        string inputPath,
+        string passLogPath,
+        string videoRate,
+        int audioKbps,
+        string outputPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(passLogPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(videoRate);
+        if (pass is not (1 or 2)) throw new ArgumentOutOfRangeException(nameof(pass));
+
+        var arguments = new List<string>
+        {
+            "-y", "-i", inputPath,
+            // setparams rewrites the frame metadata itself. The -color_* output options
+            // alone only reach the matrix, because libx264 signals primaries and transfer
+            // from the incoming frames.
+            "-vf", "scale=min(1280\\,iw):-2,setparams=" +
+                   "color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-c:v", "libx264", "-preset", "veryfast", "-b:v", videoRate,
+            "-pass", pass.ToString(CultureInfo.InvariantCulture), "-passlogfile", passLogPath,
+            // Both passes must request the same pixel format for the statistics to match.
+            "-pix_fmt", "yuv420p",
+            // The encode is 8-bit SDR, so label it that way. A 10-bit HDR source (NVIDIA
+            // records HEVC Main 10 with PQ/BT.2020) would otherwise leave its HDR tags on
+            // SDR pixels, and players would tone-map footage that was already converted.
+            "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"
+        };
+        if (pass == 1)
+        {
+            arguments.AddRange(["-an", "-f", "mp4", "NUL"]);
+        }
+        else
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+            arguments.AddRange([
+                "-c:a", "aac", "-b:a", $"{audioKbps.ToString(CultureInfo.InvariantCulture)}k",
+                "-movflags", "+faststart", outputPath
+            ]);
+        }
+        return arguments;
+    }
+
     internal static async Task<string> CompressAsync(
         string inputPath,
         string ffmpegPath,
@@ -149,24 +200,15 @@ internal static partial class FfmpegCompressor
 
         try
         {
-            await RunAsync(ffmpegPath,
-            [
-                "-y", "-i", inputPath,
-                "-vf", "scale=min(1280\\,iw):-2",
-                "-c:v", "libx264", "-preset", "veryfast", "-b:v", videoRate,
-                "-pass", "1", "-passlogfile", passLog,
-                "-an", "-f", "mp4", "NUL"
-            ], cancellationToken);
+            await RunAsync(
+                ffmpegPath,
+                BuildCompressionArguments(1, inputPath, passLog, videoRate, bitrates.AudioKbps, outputPath),
+                cancellationToken);
 
-            await RunAsync(ffmpegPath,
-            [
-                "-y", "-i", inputPath,
-                "-vf", "scale=min(1280\\,iw):-2",
-                "-c:v", "libx264", "-preset", "veryfast", "-b:v", videoRate,
-                "-pass", "2", "-passlogfile", passLog,
-                "-c:a", "aac", "-b:a", $"{bitrates.AudioKbps}k",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart", outputPath
-            ], cancellationToken);
+            await RunAsync(
+                ffmpegPath,
+                BuildCompressionArguments(2, inputPath, passLog, videoRate, bitrates.AudioKbps, outputPath),
+                cancellationToken);
 
             if (!File.Exists(outputPath))
             {

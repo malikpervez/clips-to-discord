@@ -30,7 +30,8 @@ internal sealed class UploaderWorker(
         var state = await _stateStore.LoadOrInitializeAsync(
             settings.ClipsFolder,
             reportStatus,
-            cancellationToken);
+            cancellationToken,
+            settings.CaptureSource);
         using var discord = settings.UploadToDiscord
             ? (discordClientFactory ?? (() => new DiscordWebhookClient()))()
             : null;
@@ -56,7 +57,7 @@ internal sealed class UploaderWorker(
                 await ProcessPendingMovesAsync(state, cancellationToken);
                 _readiness.RemoveMissingFiles();
 
-                foreach (var path in WatchStateStore.EnumerateClips(settings.ClipsFolder))
+                foreach (var path in WatchStateStore.EnumerateClips(settings.ClipsFolder, settings.CaptureSource))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     await InspectAndQueueAsync(path, state, queue.Writer, cancellationToken);
@@ -633,13 +634,26 @@ internal sealed class UploaderWorker(
         }
     }
 
-    private static async Task<string> MovePendingClipAsync(
+    private async Task<string> MovePendingClipAsync(
         string sourcePath,
         ArchiveDestination destination,
         CancellationToken cancellationToken)
     {
-        var clipsFolder = Path.GetDirectoryName(sourcePath)
+        // The archive hangs off the watched folder, not the clip's own folder: those coincide
+        // only for a flat layout, and a per-game layout would otherwise build uploaded\ and
+        // local-only\ inside each game folder where neither Gallery nor the editor looks.
+        //
+        // A pending move recovered after the clips folder changed still points at the old
+        // tree, so it archives beside itself rather than being relocated into the new folder
+        // — which could otherwise cross volumes and break the atomic rename.
+        var fallbackFolder = Path.GetDirectoryName(sourcePath)
             ?? throw new InvalidOperationException("The clip folder could not be determined.");
+        var clipsFolder = fallbackFolder;
+        if (!string.IsNullOrWhiteSpace(settings.ClipsFolder))
+        {
+            var configuredFolder = Path.GetFullPath(settings.ClipsFolder);
+            if (IsInside(configuredFolder, sourcePath)) clipsFolder = configuredFolder;
+        }
         var archiveFolder = destination == ArchiveDestination.Uploaded
             ? UploadedFolder.GetOrCreateForClip(clipsFolder, Path.GetFileName(sourcePath))
             : UploadedFolder.GetOrCreateLocalOnlyForClip(clipsFolder, Path.GetFileName(sourcePath));
@@ -665,6 +679,22 @@ internal sealed class UploaderWorker(
         }
 
         throw new IOException($"Could not move the clip to {archiveFolder}.", lastError);
+    }
+
+    /// <summary>True when <paramref name="path"/> sits anywhere beneath <paramref name="root"/>.</summary>
+    private static bool IsInside(string root, string path)
+    {
+        try
+        {
+            var relative = Path.GetRelativePath(root, Path.GetFullPath(path));
+            return !Path.IsPathRooted(relative) &&
+                   !relative.Equals("..", StringComparison.Ordinal) &&
+                   !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
     }
 
     private bool IsBackedOff(string key) =>

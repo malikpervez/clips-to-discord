@@ -505,6 +505,9 @@ try
         "Malik",
         true));
 
+    TraceSmokeStep("Capture source discovery");
+    await AssertCaptureSourceDiscoveryAsync(Path.Combine(temporaryRoot, "capture-sources"));
+
     TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
     var recoveryClips = Path.Combine(recoveryRoot, "clips");
@@ -732,6 +735,50 @@ try
         compressionLog ==
         "Compression complete for Battlefield.mp4: 175.4 MB -> 25.0 MB (85.7% smaller; 95 MB target ceiling; 6000 kbps video / 96 kbps audio).",
         $"Compression logs must report the actual before/after sizes and encoder plan; got '{compressionLog}'.");
+
+    // A 10-bit HDR source (NVIDIA records HEVC Main 10) analysed in 10-bit but encoded in
+    // 8-bit leaves libx264 unable to open against mismatched two-pass statistics, which
+    // fails the whole upload. Both passes must therefore request the same pixel format.
+    var firstPass = FfmpegCompressor.BuildCompressionArguments(
+        1, @"C:\clips\in.mp4", @"C:\temp\passlog", "6000k", 96, @"C:\temp\out.mp4").ToArray();
+    var secondPass = FfmpegCompressor.BuildCompressionArguments(
+        2, @"C:\clips\in.mp4", @"C:\temp\passlog", "6000k", 96, @"C:\temp\out.mp4").ToArray();
+    static bool HasArgumentPair(IReadOnlyList<string> values, string option, string value)
+    {
+        for (var index = 0; index + 1 < values.Count; index++)
+        {
+            if (values[index] == option && values[index + 1] == value) return true;
+        }
+        return false;
+    }
+    Assert(HasArgumentPair(firstPass, "-pix_fmt", "yuv420p") &&
+           HasArgumentPair(secondPass, "-pix_fmt", "yuv420p"),
+        "Both compression passes must request the same pixel format so 10-bit HDR sources encode.");
+    // The encode is 8-bit SDR. Leaving a source's PQ/BT.2020 tags on it makes players
+    // tone-map footage that was already converted. setparams is what actually reaches the
+    // primaries and transfer; the -color_* options alone only set the matrix.
+    static bool TagsSdr(IReadOnlyList<string> values)
+    {
+        var filter = values.SkipWhile(value => value != "-vf").Skip(1).FirstOrDefault() ?? string.Empty;
+        return filter.Contains("setparams=", StringComparison.Ordinal) &&
+               filter.Contains("color_primaries=bt709", StringComparison.Ordinal) &&
+               filter.Contains("color_trc=bt709", StringComparison.Ordinal) &&
+               filter.Contains("colorspace=bt709", StringComparison.Ordinal);
+    }
+    Assert(TagsSdr(firstPass) && TagsSdr(secondPass) &&
+           HasArgumentPair(secondPass, "-color_trc", "bt709") &&
+           HasArgumentPair(secondPass, "-color_primaries", "bt709") &&
+           HasArgumentPair(secondPass, "-colorspace", "bt709"),
+        "A compressed clip must be labelled SDR bt709 rather than keeping its source HDR tags.");
+    Assert(HasArgumentPair(firstPass, "-pass", "1") && HasArgumentPair(secondPass, "-pass", "2") &&
+           HasArgumentPair(firstPass, "-b:v", "6000k") && HasArgumentPair(secondPass, "-b:v", "6000k") &&
+           HasArgumentPair(firstPass, "-passlogfile", @"C:\temp\passlog") &&
+           HasArgumentPair(secondPass, "-passlogfile", @"C:\temp\passlog"),
+        "Both compression passes must share the same bitrate plan and statistics file.");
+    Assert(firstPass.Contains("-an") && firstPass[^1] == "NUL" &&
+           !secondPass.Contains("-an") && HasArgumentPair(secondPass, "-c:a", "aac") &&
+           secondPass[^1] == @"C:\temp\out.mp4",
+        "The analysis pass must discard audio to NUL while the encode pass writes the real clip.");
     var untrustedFfmpegFolder = Directory.CreateDirectory(Path.Combine(temporaryRoot, "path-ffmpeg"));
     var untrustedFfmpegPath = Path.Combine(untrustedFfmpegFolder.FullName, "ffmpeg.exe");
     await File.WriteAllTextAsync(untrustedFfmpegPath, "not an executable");
@@ -1546,7 +1593,63 @@ static void AssertSettingsFormLayout(AppSettings settings)
             Assert(uploadModeHelper.Text.Contains("No Discord request", StringComparison.Ordinal) &&
                    privacySummary.Text.Contains("Local-only mode", StringComparison.Ordinal),
                 "Turning uploads off must immediately explain the local-only behavior.");
+
+            var steelSeriesButton = EnumerateControls(form).OfType<Button>()
+                .Single(button => button.Name == "SteelSeriesCaptureSourceButton");
+            var nvidiaButton = EnumerateControls(form).OfType<Button>()
+                .Single(button => button.Name == "NvidiaCaptureSourceButton");
+            var captureHelper = EnumerateControls(form).OfType<Label>()
+                .Single(label => label.Name == "CaptureSourceHelperLabel");
+            Assert(steelSeriesButton.AccessibleDescription == "Selected capture source" &&
+                   nvidiaButton.AccessibleDescription != "Selected capture source" &&
+                   !captureHelper.Text.Contains("subfolders", StringComparison.Ordinal),
+                "The clip source card must default to SteelSeries GG and describe the flat scan.");
+            var raiseClick = typeof(Control).GetMethod(
+                "OnClick",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            raiseClick.Invoke(nvidiaButton, [EventArgs.Empty]);
+            Application.DoEvents();
+            Assert(nvidiaButton.AccessibleDescription == "Selected capture source" &&
+                   steelSeriesButton.AccessibleDescription != "Selected capture source" &&
+                   captureHelper.Text.Contains("<game> subfolders", StringComparison.Ordinal),
+                "Choosing NVIDIA must move the selection and explain the per-game scan.");
+            // Choosing NVIDIA must never block saving, whatever the folder currently holds.
+            // A folder with no game subfolders is normal for a new user, or for anyone who
+            // just cleared their recordings, and previously it refused to save at all.
+            var buildSettings = typeof(SettingsForm).GetMethod(
+                "TryValidate",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (buildSettings is not null)
+            {
+                var validateArguments = new object?[] { null };
+                Assert((bool)buildSettings.Invoke(form, validateArguments)! &&
+                       ((AppSettings)validateArguments[0]!).CaptureSource == ClipCaptureSource.Nvidia,
+                    "Choosing NVIDIA must save cleanly and carry the chosen capture source.");
+
+                var folderBox = EnumerateControls(form).OfType<TextBox>()
+                    .Single(box => box.AccessibleName == "Clips folder");
+                var configuredFolder = folderBox.Text;
+                var emptyCaptureFolder = Directory.CreateDirectory(Path.Combine(
+                    Path.GetTempPath(),
+                    "ClipsToDiscordTests",
+                    "empty-capture-" + Guid.NewGuid().ToString("N"))).FullName;
+                try
+                {
+                    folderBox.Text = emptyCaptureFolder;
+                    var emptyArguments = new object?[] { null };
+                    Assert((bool)buildSettings.Invoke(form, emptyArguments)!,
+                        "A capture folder with no recordings yet must still be savable.");
+                }
+                finally
+                {
+                    folderBox.Text = configuredFolder;
+                    try { Directory.Delete(emptyCaptureFolder, recursive: true); } catch { }
+                }
+            }
+            raiseClick.Invoke(steelSeriesButton, [EventArgs.Empty]);
+            Application.DoEvents();
             AssertControlsFit(form);
+            AssertCriticalTextFits(form);
             var activityItem = EnumerateControls(form)
                 .Single(control => control.Name == "ActivityNavItem");
             Assert(!activityItem.AccessibilityObject.State.HasFlag(AccessibleStates.Unavailable) &&
@@ -4407,6 +4510,228 @@ static void AssertGalleryEditorFlow(AppSettings settings)
            !EnumerateControls(form).OfType<Button>().Any(button => button.Name == "EditGalleryClipButton"),
         "Uploaded clips must never expose the Local-only editing action.");
     form.Close();
+}
+
+static async Task AssertCaptureSourceDiscoveryAsync(string root)
+{
+    // Mirrors a real NVIDIA layout: Videos\NVIDIA\<game>, with unrelated video folders
+    // sitting beside NVIDIA rather than inside it. The watched folder is Videos\NVIDIA.
+    var videosRoot = Directory.CreateDirectory(Path.Combine(root, "Videos")).FullName;
+    var clips = Directory.CreateDirectory(Path.Combine(videosRoot, "NVIDIA")).FullName;
+    var nvidiaGame = Directory.CreateDirectory(Path.Combine(clips, "Battlefield 6")).FullName;
+    var nvidiaOtherGame = Directory.CreateDirectory(Path.Combine(clips, "Marvel Rivals")).FullName;
+
+    var rootClip = Path.Combine(clips, "SteelSeries__2026-08-16__12-00-00.mp4");
+    var nvidiaClip = Path.Combine(nvidiaGame, "Battlefield 6 2026.08.16 - 20.14.33.04.DVR.mp4");
+    var nvidiaClip2 = Path.Combine(nvidiaOtherGame, "Marvel Rivals 2026.08.16 - 20.15.00.01.DVR.mp4");
+    // A video folder beside NVIDIA must never be swept in by the scan.
+    var unrelated = Path.Combine(
+        Directory.CreateDirectory(Path.Combine(videosRoot, "Old Home Movies")).FullName,
+        "birthday.mp4");
+    // A clip nested below the game folder is deeper than any capture tool writes.
+    var tooDeep = Path.Combine(
+        Directory.CreateDirectory(Path.Combine(nvidiaGame, "extra")).FullName,
+        "nested.mp4");
+    // Distinct content per file so content-hash assertions cannot pass by coincidence.
+    var distinctByte = (byte)1;
+    foreach (var path in new[] { rootClip, nvidiaClip, nvidiaClip2, unrelated, tooDeep })
+    {
+        await File.WriteAllBytesAsync(path, [distinctByte, 2, 3, 4]);
+        distinctByte++;
+    }
+
+    var steelSeriesFound = WatchStateStore.EnumerateClips(clips, ClipCaptureSource.SteelSeriesGg).ToArray();
+    Assert(steelSeriesFound.Length == 1 && steelSeriesFound[0] == rootClip,
+        $"SteelSeries discovery must read only the watched folder itself; found {steelSeriesFound.Length}.");
+
+    var nvidiaFound = WatchStateStore.EnumerateClips(clips, ClipCaptureSource.Nvidia).ToArray();
+    Assert(nvidiaFound.Length == 2 &&
+           nvidiaFound.Contains(nvidiaClip) && nvidiaFound.Contains(nvidiaClip2),
+        $"NVIDIA discovery must read every NVIDIA game folder; found {nvidiaFound.Length}.");
+    Assert(!nvidiaFound.Contains(unrelated) && !nvidiaFound.Contains(tooDeep) && !nvidiaFound.Contains(rootClip),
+        "NVIDIA discovery must ignore folders beside NVIDIA, deeper nesting, and loose watched-folder files.");
+    Assert(!WatchStateStore.EnumerateClips(videosRoot, ClipCaptureSource.Nvidia).Contains(nvidiaClip),
+        "Watching the parent of NVIDIA must not reach clips two levels down.");
+
+    // ClipCord's own archives live beside NVIDIA, so a per-game scan must never reach them.
+    var archivedGame = Directory.CreateDirectory(Path.Combine(clips, "uploaded", "Battlefield 6")).FullName;
+    var archivedClip = Path.Combine(archivedGame, "already-uploaded.mp4");
+    var localOnlyGame = Directory.CreateDirectory(Path.Combine(clips, "local-only", "Battlefield 6")).FullName;
+    var localOnlyClip = Path.Combine(localOnlyGame, "already-local.mp4");
+    // A game folder sharing a managed name must not be treated as a capture folder.
+    var decoy = Path.Combine(
+        Directory.CreateDirectory(Path.Combine(clips, ".clipcord-editing")).FullName,
+        "decoy.mp4");
+    foreach (var path in new[] { archivedClip, localOnlyClip, decoy })
+    {
+        await File.WriteAllBytesAsync(path, [distinctByte, 6, 7, 8]);
+        distinctByte++;
+    }
+    var afterArchive = WatchStateStore.EnumerateClips(clips, ClipCaptureSource.Nvidia).ToArray();
+    Assert(!afterArchive.Contains(archivedClip) && !afterArchive.Contains(localOnlyClip) &&
+           !afterArchive.Contains(decoy),
+        "NVIDIA discovery must never rediscover ClipCord's own uploaded or local-only archives.");
+
+    // Switching capture source must baseline what the new scan exposes instead of queueing it.
+    var stateDirectory = Directory.CreateDirectory(Path.Combine(root, "state")).FullName;
+    var store = new WatchStateStore(
+        Path.Combine(stateDirectory, "state.json"),
+        Path.Combine(stateDirectory, ".safe-baseline-required"));
+    var steelSeriesState = await store.LoadOrInitializeAsync(
+        clips, _ => { }, CancellationToken.None, ClipCaptureSource.SteelSeriesGg);
+    Assert(steelSeriesState.CaptureSource == ClipCaptureSource.SteelSeriesGg,
+        "A new baseline must record the capture source it was built for.");
+    var nvidiaHash = await ContentIdentity.ComputeSha256Async(nvidiaClip, CancellationToken.None);
+    Assert(!steelSeriesState.KnownContentHashes.Contains(nvidiaHash),
+        "A SteelSeries baseline must not have seen clips inside NVIDIA game folders.");
+
+    var statuses = new List<string>();
+    var switched = await store.LoadOrInitializeAsync(
+        clips, statuses.Add, CancellationToken.None, ClipCaptureSource.Nvidia);
+    Assert(switched.CaptureSource == ClipCaptureSource.Nvidia &&
+           statuses.Any(status => status.Contains("Capture source changed", StringComparison.Ordinal)),
+        "Switching capture source must rebuild the baseline and say so.");
+    Assert(switched.KnownContentHashes.Contains(nvidiaHash),
+        "Switching to NVIDIA must baseline the clips it newly exposes instead of uploading them.");
+
+    var unchanged = await store.LoadOrInitializeAsync(
+        clips, _ => { }, CancellationToken.None, ClipCaptureSource.Nvidia);
+    Assert(unchanged.CaptureSource == ClipCaptureSource.Nvidia,
+        "Reloading with the same capture source must not disturb the stored baseline.");
+
+    Assert(AppSettings.NormalizeCaptureSource((ClipCaptureSource)42) == ClipCaptureSource.SteelSeriesGg &&
+           AppSettings.Empty.CaptureSource == ClipCaptureSource.SteelSeriesGg,
+        "An unknown or missing capture source must fall back to the historical scan.");
+
+    // A folder with no game subfolders yet is a normal state: a new NVIDIA user, or someone
+    // who has just cleared their recordings. It must scan cleanly rather than error.
+    var emptyRoot = Directory.CreateDirectory(Path.Combine(root, "fresh-install", "NVIDIA")).FullName;
+    Directory.CreateDirectory(Path.Combine(emptyRoot, "local-only"));
+    Directory.CreateDirectory(Path.Combine(emptyRoot, "uploaded"));
+    Assert(!WatchStateStore.EnumerateClips(emptyRoot, ClipCaptureSource.Nvidia).Any(),
+        "A capture folder with no recordings yet must scan cleanly and find nothing.");
+    var freshState = new WatchStateStore(
+        Path.Combine(Directory.CreateDirectory(Path.Combine(root, "fresh-state")).FullName, "state.json"),
+        Path.Combine(root, "fresh-state", ".safe-baseline-required"));
+    var freshBaseline = await freshState.LoadOrInitializeAsync(
+        emptyRoot, _ => { }, CancellationToken.None, ClipCaptureSource.Nvidia);
+    Assert(freshBaseline.CaptureSource == ClipCaptureSource.Nvidia &&
+           freshBaseline.KnownContentHashes.Count == 0,
+        "A brand-new NVIDIA setup must baseline an empty capture folder without complaint.");
+
+    // Drive the real worker in NVIDIA mode. The archive must hang off the watched folder,
+    // not off the game folder the clip happened to be recorded into — otherwise Gallery and
+    // the editor both look in the watched folder and find nothing.
+    var workerRoot = Directory.CreateDirectory(Path.Combine(root, "worker", "NVIDIA")).FullName;
+    var workerGame = Directory.CreateDirectory(Path.Combine(workerRoot, "Duskfade")).FullName;
+    var workerClip = Path.Combine(workerGame, "Duskfade 2026.08.17 - 12.07.33.12.DVR.mp4");
+    var workerStateDirectory = Directory.CreateDirectory(Path.Combine(root, "worker-state")).FullName;
+    var workerSettings = new AppSettings(
+        workerRoot, string.Empty, false, AppSettings.DefaultCompressionTargetMb,
+        "Tester", false, GlobalHotkeyBinding.DefaultDisplayText, ClipCaptureSource.Nvidia);
+    var workerStore = new WatchStateStore(
+        Path.Combine(workerStateDirectory, "state.json"),
+        Path.Combine(workerStateDirectory, ".safe-baseline-required"));
+    // Baseline the empty folder first; a clip present at baseline time is deliberately
+    // ignored, so the clip under test has to arrive afterwards like a real recording.
+    await workerStore.LoadOrInitializeAsync(
+        workerRoot, _ => { }, CancellationToken.None, ClipCaptureSource.Nvidia);
+    await File.WriteAllBytesAsync(workerClip, [230, 9, 9, 9]);
+    using (var workerCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+    {
+        var worker = new UploaderWorker(workerSettings, _ => { }, workerStore);
+        var run = worker.RunAsync(workerCancellation.Token);
+        var expectedArchive = Path.Combine(workerRoot, "local-only", "Duskfade");
+        await WaitUntilAsync(
+            () => Directory.Exists(expectedArchive) &&
+                  Directory.EnumerateFiles(expectedArchive, "*.mp4").Any(),
+            TimeSpan.FromSeconds(25),
+            "The NVIDIA worker never archived its clip into <watched>\\local-only\\<game>.");
+        await workerCancellation.CancelAsync();
+        try { await run; } catch (OperationCanceledException) { }
+
+        var archived = Directory.EnumerateFiles(expectedArchive, "*.mp4").Single();
+        Assert(!File.Exists(workerClip),
+            "The archived clip must leave the NVIDIA game folder.");
+        Assert(!Directory.Exists(Path.Combine(workerGame, "local-only")) &&
+               !Directory.Exists(Path.Combine(workerGame, "uploaded")),
+            "The archive must never be created inside the per-game capture folder.");
+        // The two consumers that previously found nothing.
+        var catalog = GalleryCatalog.Scan(workerRoot, CancellationToken.None);
+        Assert(catalog.Games.Any(game =>
+                   game.Name.Equals("Duskfade", StringComparison.OrdinalIgnoreCase) &&
+                   game.Clips.Any(clip => clip.Path == archived &&
+                                          clip.Route == GalleryClipRoute.LocalOnly)),
+            "Gallery must list an NVIDIA clip archived to Local only.");
+        Assert(ClipEditProcessor.ValidateLocalOnlySource(workerRoot, archived).FullName == archived,
+            "The editor must accept an NVIDIA clip archived to Local only.");
+    }
+
+    // A pending move recovered after the clips folder changed must archive beside the clip
+    // it actually points at, never be relocated into the newly configured folder — which
+    // could cross volumes and break the atomic rename.
+    var oldTree = Directory.CreateDirectory(Path.Combine(root, "old-tree", "Halo")).FullName;
+    var strandedClip = Path.Combine(oldTree, "Halo 2026.08.17 - 01.02.03.04.DVR.mp4");
+    await File.WriteAllBytesAsync(strandedClip, [240, 5, 5, 5]);
+    var newTree = Directory.CreateDirectory(Path.Combine(root, "new-tree")).FullName;
+    var relocateSettings = new AppSettings(
+        newTree, string.Empty, false, AppSettings.DefaultCompressionTargetMb,
+        "Tester", false, GlobalHotkeyBinding.DefaultDisplayText, ClipCaptureSource.Nvidia);
+    var moveMethod = typeof(UploaderWorker).GetMethod(
+        "MovePendingClipAsync",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var relocateWorker = new UploaderWorker(relocateSettings, _ => { });
+    // ArchiveDestination is private and nested; take its type from the method signature.
+    var archiveDestination = moveMethod.GetParameters()[1].ParameterType;
+    var movedPath = await (Task<string>)moveMethod.Invoke(
+        relocateWorker,
+        [strandedClip, Enum.Parse(archiveDestination, "LocalOnly"), CancellationToken.None])!;
+    Assert(WatchStateStore.EnumerateClips(newTree, ClipCaptureSource.Nvidia).All(
+               path => !path.Equals(movedPath, StringComparison.OrdinalIgnoreCase)) &&
+           movedPath.StartsWith(Path.Combine(root, "old-tree"), StringComparison.OrdinalIgnoreCase),
+        $"A stale pending move must archive inside its own tree, not the new clips folder; got '{movedPath}'.");
+
+    // An NVIDIA clip kept locally must land in the ordinary Local-only archive, so the
+    // editor finds it exactly where a SteelSeries clip would be — the NVIDIA nesting is
+    // discarded by the archive move and never leaks into later stages.
+    var keptClip = Path.Combine(nvidiaOtherGame, "Marvel Rivals 2026.08.17 - 09.10.11.02.DVR.mp4");
+    await File.WriteAllBytesAsync(keptClip, [210, 1, 2, 3]);
+    var localOnlyDestinationFolder = UploadedFolder.GetOrCreateLocalOnlyForClip(
+        clips,
+        Path.GetFileName(keptClip));
+    Assert(Path.GetFileName(localOnlyDestinationFolder) == "Marvel Rivals" &&
+           Path.GetFileName(Path.GetDirectoryName(localOnlyDestinationFolder)!) == "local-only",
+        $"A kept NVIDIA clip must be filed under local-only\\<game>; got '{localOnlyDestinationFolder}'.");
+    var archivedLocalPath = UploadedFolder.GetUniqueDestination(
+        localOnlyDestinationFolder,
+        Path.GetFileName(keptClip));
+    File.Move(keptClip, archivedLocalPath);
+    var editorSource = ClipEditProcessor.ValidateLocalOnlySource(clips, archivedLocalPath);
+    Assert(editorSource.FullName == archivedLocalPath,
+        "The clip editor must accept an NVIDIA clip once it has been archived to Local only.");
+    Assert(!WatchStateStore.EnumerateClips(clips, ClipCaptureSource.Nvidia).Contains(archivedLocalPath),
+        "An archived NVIDIA clip must not be rediscovered by the capture scan.");
+
+    // A junction at the NVIDIA capture folder would let a scan walk outside the watched folder.
+    var linkedRoot = Directory.CreateDirectory(Path.Combine(root, "linked-clips")).FullName;
+    var linkTarget = Directory.CreateDirectory(Path.Combine(root, "outside-target")).FullName;
+    // The clip must sit DIRECTLY in the junction target. One level deeper and a one-level
+    // scan misses it regardless of the guard, so the assertion would pass vacuously.
+    var outsideClip = Path.Combine(linkTarget, "private-outside-clip.mp4");
+    await File.WriteAllBytesAsync(outsideClip, [200, 1, 2, 3]);
+    CreateDirectoryJunction(Path.Combine(linkedRoot, "Battlefield 6"), linkTarget);
+    try
+    {
+        var linkedScan = WatchStateStore.EnumerateClips(linkedRoot, ClipCaptureSource.Nvidia).ToArray();
+        Assert(linkedScan.Length == 0,
+            $"A junctioned game folder must be refused instead of walked; found {linkedScan.Length}.");
+        Assert(File.Exists(outsideClip),
+            "Refusing a junctioned game folder must never modify its target.");
+    }
+    finally
+    {
+        try { Directory.Delete(Path.Combine(linkedRoot, "Battlefield 6")); } catch { }
+    }
 }
 
 static void AssertGalleryEditorPreviewPlayback(AppSettings settings)

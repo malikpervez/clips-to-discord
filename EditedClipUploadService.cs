@@ -352,7 +352,8 @@ internal sealed class EditedClipUploadService(
         var state = await _stateStore.LoadOrInitializeAsync(
             settings.ClipsFolder,
             _ => { },
-            cancellationToken);
+            cancellationToken,
+            settings.CaptureSource);
         if (state.UploadedContentHashes.Contains(prepared.EditedContentHash))
         {
             ClipEditProcessor.CleanupPreparedArtifact(prepared);

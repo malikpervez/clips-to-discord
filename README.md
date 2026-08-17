@@ -22,6 +22,7 @@ A Windows tray app that can upload new MP4 clips from any chosen folder to Disco
 - Keeps scanning with two upload workers, a short connection timeout, and a bounded per-upload deadline.
 - Moves successfully uploaded originals into case-insensitive `uploaded\<game name>` subfolders inferred from common recording timestamps; unrecognized names share `uploaded\Uncategorized`.
 - Preserves duplicate filenames by adding a unique suffix.
+- Matches how you record: choose **SteelSeries GG** for clips saved straight into the watched folder, or **NVIDIA** for clips filed into per-game subfolders — point ClipCord at the folder holding them, such as `Videos\NVIDIA`.
 - Uses a configurable compression target and retries smaller targets when Discord rejects a file for size.
 - Shows bounded recent discovery, upload, compression, retry, and archive history in the local Activity Center.
 - Browses uploaded and local-only archives together in a game-organized Gallery with deterministic gradient cards, route labels, playback, and file-location actions.

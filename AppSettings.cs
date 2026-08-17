@@ -5,6 +5,23 @@ using System.Text.RegularExpressions;
 
 namespace ClipsToDiscord;
 
+/// <summary>
+/// The tool a user records with. It only decides where ClipCord looks for new clips;
+/// every step after discovery is identical for all sources.
+/// </summary>
+internal enum ClipCaptureSource
+{
+    /// <summary>New clips land directly in the watched folder.</summary>
+    SteelSeriesGg = 0,
+
+    /// <summary>
+    /// New clips land one level inside the watched folder, in a per-game subfolder:
+    /// <c>&lt;watched folder&gt;\&lt;game&gt;\</c>. Point ClipCord at the folder holding those
+    /// game folders, which for a default NVIDIA install is <c>Videos\NVIDIA</c>.
+    /// </summary>
+    Nvidia = 1
+}
+
 internal sealed record AppSettings(
     string ClipsFolder,
     string WebhookUrl,
@@ -12,7 +29,8 @@ internal sealed record AppSettings(
     int CompressionTargetMb,
     string UploaderName,
     bool UploadToDiscord,
-    string ModeToggleHotkey = GlobalHotkeyBinding.DefaultDisplayText)
+    string ModeToggleHotkey = GlobalHotkeyBinding.DefaultDisplayText,
+    ClipCaptureSource CaptureSource = ClipCaptureSource.SteelSeriesGg)
 {
     public const int DefaultCompressionTargetMb = 95;
     public const int MaximumUploaderNameLength = 80;
@@ -24,7 +42,19 @@ internal sealed record AppSettings(
         DefaultCompressionTargetMb,
         DefaultUploaderName,
         true,
-        GlobalHotkeyBinding.DefaultDisplayText);
+        GlobalHotkeyBinding.DefaultDisplayText,
+        ClipCaptureSource.SteelSeriesGg);
+
+    /// <summary>An unknown or corrupt stored source falls back to the historical scan.</summary>
+    public static ClipCaptureSource NormalizeCaptureSource(ClipCaptureSource value) =>
+        Enum.IsDefined(value) ? value : ClipCaptureSource.SteelSeriesGg;
+
+    /// <summary>Folders ClipCord owns, which are never per-game capture folders.</summary>
+    internal static readonly string[] ManagedChildFolderNames =
+        ["uploaded", "local-only", ".clipcord-editing"];
+
+    public static string DescribeCaptureSource(ClipCaptureSource value) =>
+        NormalizeCaptureSource(value) == ClipCaptureSource.Nvidia ? "NVIDIA" : "SteelSeries GG";
 
     public bool IsValid =>
         Directory.Exists(ClipsFolder) &&
@@ -101,7 +131,8 @@ internal static class SettingsStore
                 NormalizeCompressionTarget(stored.CompressionTargetMb),
                 AppSettings.NormalizeUploaderName(stored.UploaderName),
                 stored.UploadToDiscord,
-                AppSettings.NormalizeModeToggleHotkey(stored.ModeToggleHotkey));
+                AppSettings.NormalizeModeToggleHotkey(stored.ModeToggleHotkey),
+                AppSettings.NormalizeCaptureSource(stored.CaptureSource));
         }
         catch (Exception exception)
         {
@@ -182,7 +213,8 @@ internal static class SettingsStore
             CompressionTargetMb = settings.CompressionTargetMb,
             UploaderName = AppSettings.NormalizeUploaderName(settings.UploaderName),
             UploadToDiscord = settings.UploadToDiscord,
-            ModeToggleHotkey = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey)
+            ModeToggleHotkey = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey),
+            CaptureSource = AppSettings.NormalizeCaptureSource(settings.CaptureSource)
         };
 
         var temporaryPath = SettingsPath + ".tmp";
@@ -199,6 +231,7 @@ internal static class SettingsStore
         public string? UploaderName { get; set; } = AppSettings.DefaultUploaderName;
         public bool UploadToDiscord { get; set; } = true;
         public string? ModeToggleHotkey { get; set; } = GlobalHotkeyBinding.DefaultDisplayText;
+        public ClipCaptureSource CaptureSource { get; set; } = ClipCaptureSource.SteelSeriesGg;
     }
 
     private static int NormalizeCompressionTarget(int value) =>

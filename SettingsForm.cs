@@ -127,6 +127,9 @@ internal sealed class SettingsForm : Form
         Font = ClipCordTheme.InterfaceFont(9f)
     };
     private readonly OutlineButton _browseButton = CreateSecondaryButton("Browse", 112);
+    private readonly OutlineButton _steelSeriesSourceButton = CreateSecondaryButton("SteelSeries GG", 148);
+    private readonly OutlineButton _nvidiaSourceButton = CreateSecondaryButton("NVIDIA", 108);
+    private readonly Label _captureSourceHelper = CreateHelper(string.Empty);
     private readonly OutlineButton _testButton = CreateSecondaryButton("Test webhook", 130);
     private readonly OutlineButton _checkUpdatesButton = CreateSecondaryButton("Check for updates", 166);
     private readonly GradientButton _saveButton = new()
@@ -174,6 +177,7 @@ internal sealed class SettingsForm : Form
     private AboutView? _aboutPage;
     private bool _busy;
     private bool _galleryBusy;
+    private ClipCaptureSource _captureSource = ClipCaptureSource.SteelSeriesGg;
     private string? _lastWatcherFullStatus;
     private Size _lastWindowRegionSize = Size.Empty;
 
@@ -227,6 +231,10 @@ internal sealed class SettingsForm : Form
         _modeToggleHotkeyText.Leave += (_, _) => UpdateModeToggleHotkeyEditor();
         _modeToggleHotkeyAction.Click += (_, _) => ToggleModeHotkeyEnabled();
         UpdateModeToggleHotkeyEditor();
+        _captureSource = AppSettings.NormalizeCaptureSource(settings.CaptureSource);
+        _steelSeriesSourceButton.Click += (_, _) => SetCaptureSource(ClipCaptureSource.SteelSeriesGg);
+        _nvidiaSourceButton.Click += (_, _) => SetCaptureSource(ClipCaptureSource.Nvidia);
+        UpdateCaptureSourceSelection();
         _startWithWindows.Checked = settings.StartWithWindows;
         _uploadToDiscord.Checked = settings.UploadToDiscord;
         _uploadModeHelper.Name = "UploadModeHelperLabel";
@@ -724,16 +732,40 @@ internal sealed class SettingsForm : Form
 
     private Control BuildClipSourceCard()
     {
-        var layout = CreateCardContent(2);
+        var layout = CreateCardContent(4);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.Controls.Add(CreateInlineFieldLabel("Clips folder"), 0, 0);
         layout.Controls.Add(CreateFieldRow(CreateFieldHost(_folderText), _browseButton), 1, 0);
-        layout.Controls.Add(CreateHelper("New MP4 clips in this folder are detected automatically."), 1, 1);
+        layout.Controls.Add(CreateInlineFieldLabel("Recorded with"), 0, 2);
+
+        var sourceChoices = new FlowLayoutPanel
+        {
+            Name = "CaptureSourceSelector",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            BackColor = ClipCordTheme.SettingsCard,
+            Margin = Padding.Empty
+        };
+        _steelSeriesSourceButton.Name = "SteelSeriesCaptureSourceButton";
+        _steelSeriesSourceButton.AccessibleName = "Record with SteelSeries GG";
+        _nvidiaSourceButton.Name = "NvidiaCaptureSourceButton";
+        _nvidiaSourceButton.AccessibleName = "Record with NVIDIA";
+        _nvidiaSourceButton.Margin = new Padding(8, 0, 0, 0);
+        sourceChoices.Controls.Add(_steelSeriesSourceButton);
+        sourceChoices.Controls.Add(_nvidiaSourceButton);
+        layout.Controls.Add(sourceChoices, 1, 2);
+
+        _captureSourceHelper.Name = "CaptureSourceHelperLabel";
+        layout.Controls.Add(_captureSourceHelper, 1, 3);
         return CreateCard(
             BrandGlyph.ClipSource,
             "ClipSourceCard",
@@ -742,7 +774,33 @@ internal sealed class SettingsForm : Form
             "Any folder that receives MP4 clips.",
             layout,
             new Padding(0, 0, 0, 10),
-            148);
+            212);
+    }
+
+    private void SetCaptureSource(ClipCaptureSource source)
+    {
+        var normalized = AppSettings.NormalizeCaptureSource(source);
+        if (_captureSource == normalized) return;
+        _captureSource = normalized;
+        UpdateCaptureSourceSelection();
+    }
+
+    private void UpdateCaptureSourceSelection()
+    {
+        SetCaptureSourceSelected(_steelSeriesSourceButton, _captureSource == ClipCaptureSource.SteelSeriesGg);
+        SetCaptureSourceSelected(_nvidiaSourceButton, _captureSource == ClipCaptureSource.Nvidia);
+        _captureSourceHelper.Text = _captureSource == ClipCaptureSource.Nvidia
+            ? @"New MP4 clips inside this folder's <game> subfolders are detected automatically."
+            : "New MP4 clips in this folder are detected automatically.";
+    }
+
+    private static void SetCaptureSourceSelected(OutlineButton button, bool selected)
+    {
+        button.SurfaceColor = selected ? Color.FromArgb(67, 50, 104) : ClipCordTheme.SettingsButton;
+        button.HoverColor = selected ? Color.FromArgb(78, 59, 121) : ClipCordTheme.SettingsButtonHover;
+        button.OutlineColor = selected ? ClipCordTheme.Violet : ClipCordTheme.SettingsFieldBorder;
+        button.AccessibleDescription = selected ? "Selected capture source" : string.Empty;
+        button.Invalidate();
     }
 
     private Control BuildDiscordCard()
@@ -1490,7 +1548,8 @@ internal sealed class SettingsForm : Form
             compressionTargetMb,
             AppSettings.NormalizeUploaderName(_uploaderNameText.Text),
             _uploadToDiscord.Checked,
-            modeToggleHotkey);
+            modeToggleHotkey,
+            _captureSource);
 
         if (_uploadToDiscord.Checked && string.IsNullOrWhiteSpace(_uploaderNameText.Text))
         {
