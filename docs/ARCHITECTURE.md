@@ -1,6 +1,6 @@
 # Architecture
 
-ClipCord is a self-contained .NET 8 Windows Forms tray application. It is independent of the software that creates the clip; the input contract is a completed top-level `.mp4` file in the configured folder.
+ClipCord is a self-contained .NET 8 Windows Forms tray application. It is independent of the software that creates the clip; the input contract is a completed `.mp4` file the configured capture source knows how to find — directly in the configured folder for SteelSeries GG, or one level inside it in a `<game>` subfolder for NVIDIA, where the configured folder is the one holding those game folders (`Videos\NVIDIA` by default). Discovery is the only stage that varies by source; every stage after it is identical.
 
 ```mermaid
 flowchart LR

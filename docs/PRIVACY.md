@@ -45,7 +45,7 @@ The About page computes its status locally. **Copy diagnostics** places a fixed,
 ## File handling
 
 - Existing clips are ignored during the initial baseline.
-- New top-level `.mp4` clips are read after the source application finishes writing them.
+- New top-level `.mp4` clips are read after the source application finishes writing them. When the capture source is set to NVIDIA, the configured folder is the one holding your per-game recording folders — for a default NVIDIA install that is `Videos\NVIDIA`. ClipCord then reads new `.mp4` clips exactly one level inside it, in each `<game>` subfolder. Nothing deeper is scanned, files sitting loose in the configured folder are ignored, and its own `uploaded`, `local-only`, and `.clipcord-editing` folders are never treated as capture folders.
 - Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
 - In local-only mode, newly detected originals move into local `local-only\<game name>` subfolders without being sent to Discord.
 - User-requested Gallery edits stage beneath `.clipcord-editing` in the configured clips folder so the watcher ignores them and the final archive move stays on the same volume. Failed or cancelled pre-upload edits clean their stage and leave the original unchanged; confirmed uploads persist a recovery record before archive or Recycle Bin work.

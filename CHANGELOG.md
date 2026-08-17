@@ -6,6 +6,15 @@ All notable user-facing changes are documented here.
 
 - No unreleased changes.
 
+## 1.13.0 — 2026-08-17
+
+- Choose how you record in **Clip source**: SteelSeries GG keeps watching the folder itself, while NVIDIA finds clips one level inside it, in the per-game folders NVIDIA organizes them into — point ClipCord at the folder holding those game folders, such as `Videos\NVIDIA`. Everything after discovery — auto-upload, Local only, Gallery, and Edit & upload — is identical for both.
+- Switching capture source rebuilds the safe baseline, so newly visible clips are never bulk-uploaded.
+- Compress 10-bit HDR recordings correctly. NVIDIA captures HEVC Main 10, which previously failed with *"FFmpeg exited with code -542398533"* because the two compression passes disagreed on pixel format; oversized HDR clips now compress and upload.
+- Label compressed clips as SDR instead of leaving a recording's HDR colour tags on converted footage, so players no longer tone-map a clip that was already converted.
+- Always archive into the watched folder. A per-game layout previously created `uploaded` and `local-only` inside each game folder, where neither the Gallery nor the editor could find the clip.
+- Keep a pending archive move in its own folder when the clips folder changes, instead of relocating the clip into the newly configured folder.
+
 ## 1.12.0 — 2026-08-16
 
 - Start **Edit & upload** straight from the Activity Center: a Local-only clip that still exists offers the action on its activity row and opens it in the Gallery editor. Uploaded, duplicate, and baseline rows never offer it.

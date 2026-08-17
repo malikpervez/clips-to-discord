@@ -28,8 +28,10 @@ internal sealed class WatchStateStore
     public async Task<WatchState> LoadOrInitializeAsync(
         string clipsFolder,
         Action<string> reportStatus,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ClipCaptureSource captureSource = ClipCaptureSource.SteelSeriesGg)
     {
+        captureSource = AppSettings.NormalizeCaptureSource(captureSource);
         var forceSafeBaseline = File.Exists(_safeBaselineMarkerPath);
         WatchState? saved = null;
         try
@@ -49,7 +51,9 @@ internal sealed class WatchStateStore
             var needsLocalOnlyBaseline = saved.Version < 3;
             var needsVersionUpgrade = saved.Version < CurrentVersion;
             Normalize(saved);
-            if (saved.ClipsFolder.Equals(clipsFolder, StringComparison.OrdinalIgnoreCase))
+            var sameFolder = saved.ClipsFolder.Equals(clipsFolder, StringComparison.OrdinalIgnoreCase);
+            var sameSource = saved.CaptureSource == captureSource;
+            if (sameFolder && sameSource)
             {
                 if (needsLocalOnlyBaseline)
                 {
@@ -59,9 +63,15 @@ internal sealed class WatchStateStore
                 return saved;
             }
 
-            reportStatus("Clips folder changed — building a safe baseline");
+            // A new capture source looks somewhere the previous one never did. Baseline what
+            // it finds exactly like a folder change, so switching can never bulk-upload an
+            // existing capture backlog.
+            reportStatus(sameFolder
+                ? "Capture source changed — building a safe baseline"
+                : "Clips folder changed — building a safe baseline");
             saved.ClipsFolder = clipsFolder;
-            await AddSafeBaselineAsync(saved, clipsFolder, cancellationToken);
+            saved.CaptureSource = captureSource;
+            await AddSafeBaselineAsync(saved, clipsFolder, cancellationToken, captureSource);
             Save(saved);
             return saved;
         }
@@ -74,12 +84,13 @@ internal sealed class WatchStateStore
         {
             Version = CurrentVersion,
             ClipsFolder = clipsFolder,
+            CaptureSource = captureSource,
             PendingMoves = saved?.PendingMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
             PendingLocalOnlyMoves = saved?.PendingLocalOnlyMoves ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
             PendingEditedUploads = saved?.PendingEditedUploads ?? []
         };
         Normalize(state);
-        await AddSafeBaselineAsync(state, clipsFolder, cancellationToken);
+        await AddSafeBaselineAsync(state, clipsFolder, cancellationToken, captureSource);
         Save(state);
         TryDeleteSafeBaselineMarker();
         Log.Info($"Initialized content-hash state with {state.KnownContentHashes.Count} existing clip(s); they will not be uploaded.");
@@ -110,16 +121,78 @@ internal sealed class WatchStateStore
     public static string FileKey(FileInfo file) =>
         $"{file.FullName.ToLowerInvariant()}|{file.Length}|{file.LastWriteTimeUtc.Ticks}";
 
-    public static IEnumerable<string> EnumerateClips(string clipsFolder) =>
-        Directory.EnumerateFiles(clipsFolder, "*.mp4", SearchOption.TopDirectoryOnly)
-            .OrderBy(File.GetLastWriteTimeUtc);
+    /// <summary>
+    /// Folders ClipCord owns. A per-game scan must never treat one as a game folder, or the
+    /// app would rediscover its own archive and upload it again.
+    /// </summary>
+    private static readonly string[] ManagedChildFolders = AppSettings.ManagedChildFolderNames;
+
+    public static IEnumerable<string> EnumerateClips(
+        string clipsFolder,
+        ClipCaptureSource captureSource = ClipCaptureSource.SteelSeriesGg) =>
+        EnumerateCandidateClips(clipsFolder, captureSource).OrderBy(File.GetLastWriteTimeUtc);
+
+    private static IEnumerable<string> EnumerateCandidateClips(
+        string clipsFolder,
+        ClipCaptureSource captureSource)
+    {
+        if (AppSettings.NormalizeCaptureSource(captureSource) != ClipCaptureSource.Nvidia)
+        {
+            return Directory.EnumerateFiles(clipsFolder, "*.mp4", SearchOption.TopDirectoryOnly);
+        }
+
+        // NVIDIA organizes clips into <watched folder>\<game>\clip.mp4, so the configured
+        // folder is the one holding those game folders. Scanning exactly one level keeps the
+        // blast radius to that folder's own children.
+        return EnumerateGameFolderClips(clipsFolder);
+    }
+
+    private static IEnumerable<string> EnumerateGameFolderClips(string captureRoot)
+    {
+        string[] gameFolders;
+        try
+        {
+            gameFolders = Directory.EnumerateDirectories(captureRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Log.Error("Could not list capture game folders.", exception);
+            yield break;
+        }
+
+        foreach (var gameFolder in gameFolders)
+        {
+            DirectoryInfo info;
+            try { info = new DirectoryInfo(gameFolder); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { continue; }
+            if (ManagedChildFolders.Contains(info.Name, StringComparer.OrdinalIgnoreCase)) continue;
+            if (info.LinkTarget is not null ||
+                (info.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                continue;
+            }
+
+            string[] clips;
+            try
+            {
+                clips = Directory.EnumerateFiles(gameFolder, "*.mp4", SearchOption.TopDirectoryOnly).ToArray();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Log.Error($"Could not read capture game folder {info.Name}.", exception);
+                continue;
+            }
+            foreach (var clip in clips) yield return clip;
+        }
+    }
 
     private async Task AddSafeBaselineAsync(
         WatchState state,
         string clipsFolder,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ClipCaptureSource captureSource = ClipCaptureSource.SteelSeriesGg)
     {
-        var topLevelPaths = EnumerateClips(clipsFolder).ToList();
+        var topLevelPaths = EnumerateClips(clipsFolder, captureSource).ToList();
         var uploadedFolder = UploadedFolder.GetOrCreate(clipsFolder);
         var uploadedPaths = UploadedFolder.EnumerateArchivedClips(uploadedFolder).ToList();
 
@@ -186,6 +259,7 @@ internal sealed class WatchStateStore
     {
         state.Version = CurrentVersion;
         state.ClipsFolder ??= string.Empty;
+        state.CaptureSource = AppSettings.NormalizeCaptureSource(state.CaptureSource);
         state.KnownContentHashes = new HashSet<string>(
             state.KnownContentHashes ?? [],
             StringComparer.OrdinalIgnoreCase);
@@ -222,6 +296,12 @@ internal sealed class WatchState
 {
     public int Version { get; set; }
     public string ClipsFolder { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The capture source this baseline was built for. Changing it re-baselines, because a
+    /// different source scans a different part of the watched folder.
+    /// </summary>
+    public ClipCaptureSource CaptureSource { get; set; } = ClipCaptureSource.SteelSeriesGg;
     public HashSet<string> KnownContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> UploadedContentHashes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     // This subset records why known content must remain local. KnownContentHashes is the
