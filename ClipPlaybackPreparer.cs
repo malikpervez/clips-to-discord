@@ -10,11 +10,24 @@ namespace ClipsToDiscord;
 /// true when the source carried more than one audio track and a mixed copy had to be
 /// produced first.
 /// </summary>
-internal sealed record ClipPlaybackSource(string Path, bool IsMixedRendition, int AudioTrackCount);
+internal sealed record ClipPlaybackSource(string Path, bool IsMixedRendition, int AudioTrackCount)
+{
+    /// <summary>
+    /// Reported when the track count could not be measured — FFmpeg was unavailable, so
+    /// the clip may well carry a separate microphone track that playback will not reach.
+    /// Callers must say so rather than treating it as a plain single-track clip.
+    /// </summary>
+    internal const int UnknownAudioTrackCount = 0;
+}
+
+internal sealed record ClipPlaybackPreparationProgress(string Message);
 
 internal interface IClipPlaybackPreparer
 {
-    Task<ClipPlaybackSource> PrepareAsync(string sourcePath, CancellationToken cancellationToken);
+    Task<ClipPlaybackSource> PrepareAsync(
+        string sourcePath,
+        CancellationToken cancellationToken,
+        IProgress<ClipPlaybackPreparationProgress>? progress = null);
 }
 
 /// <summary>
@@ -34,17 +47,21 @@ internal interface IClipPlaybackPreparer
 internal sealed class ClipPlaybackPreparer : IClipPlaybackPreparer
 {
     private const string CacheFolderName = "playback-mix";
+    private const long CacheByteBudget = 4L * 1024 * 1024 * 1024;
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromDays(7);
 
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _renderLocks = new(StringComparer.OrdinalIgnoreCase);
-    private int _pruned;
+    // Static: the Gallery player and the editor each construct a preparer, so a per-
+    // instance gate serialises nothing between them and both would render at once.
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> RenderLocks = new(StringComparer.OrdinalIgnoreCase);
+    private static int _pruned;
 
     internal static string CacheFolder =>
         Path.Combine(Path.GetTempPath(), "ClipsToDiscord", CacheFolderName);
 
     public async Task<ClipPlaybackSource> PrepareAsync(
         string sourcePath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<ClipPlaybackPreparationProgress>? progress = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         var source = new FileInfo(Path.GetFullPath(sourcePath));
@@ -53,37 +70,46 @@ internal sealed class ClipPlaybackPreparer : IClipPlaybackPreparer
             throw new FileNotFoundException("The clip is no longer on disk.", source.FullName);
         }
 
+        progress?.Report(new ClipPlaybackPreparationProgress("Inspecting audio tracks…"));
         var ffmpeg = FfmpegCompressor.FindExecutable();
         if (ffmpeg is null)
         {
-            // Without FFmpeg the only option is the source itself. A multi-track clip will
-            // preview with its first track only, so callers surface that as a warning
-            // rather than silently implying the mix was applied.
-            return new ClipPlaybackSource(source.FullName, IsMixedRendition: false, AudioTrackCount: 1);
+            // Without FFmpeg the only option is the source itself, and nothing has counted
+            // its tracks. Reporting one track here would let a clip with a separate
+            // microphone play silently truncated with no warning anywhere.
+            return new ClipPlaybackSource(
+                source.FullName,
+                IsMixedRendition: false,
+                ClipPlaybackSource.UnknownAudioTrackCount);
         }
 
         var probe = await FfmpegCompressor.ProbeMediaAsync(source.FullName, ffmpeg, cancellationToken);
         if (probe.AudioStreamCount <= 1)
         {
+            progress?.Report(new ClipPlaybackPreparationProgress("Opening clip…"));
             return new ClipPlaybackSource(source.FullName, IsMixedRendition: false, probe.AudioStreamCount);
         }
 
         var renditionPath = Path.Combine(CacheFolder, BuildCacheKey(source) + ".mp4");
         PruneCacheOnce();
 
-        var gate = _renderLocks.GetOrAdd(renditionPath, _ => new SemaphoreSlim(1, 1));
+        progress?.Report(new ClipPlaybackPreparationProgress(
+            $"Preparing all {probe.AudioStreamCount} audio tracks…"));
+        var gate = RenderLocks.GetOrAdd(renditionPath, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
         try
         {
             // Another caller may have produced it while this one waited.
             if (File.Exists(renditionPath) && new FileInfo(renditionPath).Length > 0)
             {
+                progress?.Report(new ClipPlaybackPreparationProgress("Opening prepared audio mix…"));
                 return new ClipPlaybackSource(renditionPath, IsMixedRendition: true, probe.AudioStreamCount);
             }
 
             Directory.CreateDirectory(CacheFolder);
-            var partialPath = renditionPath + ".partial";
-            TryDelete(partialPath);
+            var partialPath = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{renditionPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.partial");
             try
             {
                 await FfmpegCompressor.RunAsync(
@@ -108,6 +134,7 @@ internal sealed class ClipPlaybackPreparer : IClipPlaybackPreparer
                 }
 
                 File.Move(partialPath, renditionPath, overwrite: true);
+                progress?.Report(new ClipPlaybackPreparationProgress("Opening prepared audio mix…"));
                 return new ClipPlaybackSource(renditionPath, IsMixedRendition: true, probe.AudioStreamCount);
             }
             catch
@@ -148,7 +175,8 @@ internal sealed class ClipPlaybackPreparer : IClipPlaybackPreparer
             "-filter_complex", FfmpegCompressor.BuildAudioMixFilter(audioTrackCount),
             "-map", "0:v:0", "-map", FfmpegCompressor.MixedAudioLabel,
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
+            // No +faststart: it rewrites the whole file for a second time to move the moov
+            // atom forward, which only helps progressive download, never local playback.
             "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
             "-f", "mp4", renditionPath
         ];
@@ -179,15 +207,38 @@ internal sealed class ClipPlaybackPreparer : IClipPlaybackPreparer
         {
             if (!Directory.Exists(CacheFolder)) return;
             var cutoff = DateTime.UtcNow - CacheLifetime;
-            foreach (var file in Directory.EnumerateFiles(CacheFolder))
+            var surviving = new List<FileInfo>();
+            foreach (var path in Directory.EnumerateFiles(CacheFolder))
             {
                 try
                 {
-                    if (File.GetLastWriteTimeUtc(file) < cutoff) File.Delete(file);
+                    var file = new FileInfo(path);
+                    if (file.LastWriteTimeUtc < cutoff) file.Delete();
+                    else surviving.Add(file);
                 }
                 catch (Exception exception)
                 {
-                    Log.Error($"Could not prune the cached playback copy {file}.", exception);
+                    Log.Error($"Could not prune the cached playback copy {path}.", exception);
+                }
+            }
+
+            // A rendition is the size of the clip it came from, because the video is
+            // copied rather than re-encoded, so a week of reviewing can leave several
+            // gigabytes behind. Oldest go first once the budget is exceeded.
+            var total = surviving.Sum(file => file.Length);
+            if (total <= CacheByteBudget) return;
+            foreach (var file in surviving.OrderBy(file => file.LastWriteTimeUtc))
+            {
+                if (total <= CacheByteBudget) break;
+                try
+                {
+                    var length = file.Length;
+                    file.Delete();
+                    total -= length;
+                }
+                catch (Exception exception)
+                {
+                    Log.Error($"Could not trim the cached playback copy {file.FullName}.", exception);
                 }
             }
         }

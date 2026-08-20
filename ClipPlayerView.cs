@@ -33,6 +33,7 @@ internal sealed class ClipPlayerView : UserControl
     private bool _mediaReady;
     private bool _isPlaying;
     private bool _seeking;
+    private bool _playbackStarted;
     private bool _disposed;
 
     internal ClipPlayerView(GalleryClipEntry clip, IClipPlaybackPreparer? preparer = null)
@@ -213,6 +214,10 @@ internal sealed class ClipPlayerView : UserControl
     protected override void OnHandleCreated(EventArgs eventArgs)
     {
         base.OnHandleCreated(eventArgs);
+        // A handle is recreated whenever the view is reparented, which must not restart a
+        // clip the viewer is part-way through.
+        if (_playbackStarted) return;
+        _playbackStarted = true;
         _lifetimeCancellation ??= new CancellationTokenSource();
         _ = BeginPlaybackAsync(_lifetimeCancellation.Token);
     }
@@ -227,11 +232,12 @@ internal sealed class ClipPlayerView : UserControl
 
         try
         {
-            var prepared = await _preparer.PrepareAsync(_clip.Path, cancellationToken);
+            var progress = new ControlProgress<ClipPlaybackPreparationProgress>(
+                this,
+                update => SetStatus(update.Message));
+            var prepared = await _preparer.PrepareAsync(_clip.Path, cancellationToken, progress);
             if (cancellationToken.IsCancellationRequested || !CanUpdate()) return;
-            _audioLabel.Text = prepared.IsMixedRendition
-                ? $"{prepared.AudioTrackCount} audio tracks mixed for playback, matching what an upload would contain."
-                : string.Empty;
+            _audioLabel.Text = DescribeAudio(prepared);
             OpenMedia(prepared.Path);
         }
         catch (OperationCanceledException)
@@ -243,9 +249,28 @@ internal sealed class ClipPlayerView : UserControl
             if (!CanUpdate()) return;
             // Falling back to the source keeps the clip watchable, but a multi-track
             // recording would lose its microphone, so that is stated rather than hidden.
-            _audioLabel.Text = "Audio tracks could not be mixed — only the first track will be audible.";
+            // An unreadable file is a different problem and must not be described as one.
+            _audioLabel.Text = exception is InvalidOperationException
+                ? "This clip could not be inspected — it may be incomplete or damaged."
+                : "Audio tracks could not be mixed — only the first track will be audible.";
             OpenMedia(_clip.Path);
         }
+    }
+
+    /// <summary>
+    /// Describes what a viewer is about to hear. An unknown track count is reported as
+    /// unknown: claiming a single track when nothing measured it is how a missing
+    /// microphone would pass unnoticed.
+    /// </summary>
+    private static string DescribeAudio(ClipPlaybackSource prepared)
+    {
+        if (prepared.IsMixedRendition)
+        {
+            return $"{prepared.AudioTrackCount} audio tracks mixed for playback, matching what an upload would contain.";
+        }
+        return prepared.AudioTrackCount == ClipPlaybackSource.UnknownAudioTrackCount
+            ? "Audio tracks could not be inspected without FFmpeg — if this clip has a separate microphone track, only the first will be audible."
+            : string.Empty;
     }
 
     private void OpenMedia(string path)
@@ -305,7 +330,9 @@ internal sealed class ClipPlayerView : UserControl
         _playButton.Enabled = false;
         _muteButton.Enabled = false;
         _seekBar.Enabled = false;
-        SetStatus("Windows could not decode this clip. Media Feature Pack may be missing.");
+        SetStatus(File.Exists(_clip.Path)
+            ? "Windows could not decode this clip. Media Feature Pack may be missing."
+            : "This clip is no longer on disk.");
     }
 
     private void TogglePlayback()
@@ -385,6 +412,27 @@ internal sealed class ClipPlayerView : UserControl
 
     private bool CanUpdate() => !_disposed && !IsDisposed && !Disposing;
 
+    private void TryPostToUi(Action action)
+    {
+        if (!CanUpdate()) return;
+        if (!InvokeRequired)
+        {
+            action();
+            return;
+        }
+        if (!IsHandleCreated) return;
+        try
+        {
+            BeginInvoke((Action)(() =>
+            {
+                if (CanUpdate()) action();
+            }));
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+        {
+        }
+    }
+
     internal static string FormatTime(TimeSpan value) =>
         value < TimeSpan.Zero
             ? "0:00.0"
@@ -431,6 +479,11 @@ internal sealed class ClipPlayerView : UserControl
         }
         base.Dispose(disposing);
     }
+
+    private sealed class ControlProgress<T>(ClipPlayerView owner, Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => owner.TryPostToUi(() => handler(value));
+    }
 }
 
 /// <summary>
@@ -440,8 +493,9 @@ internal sealed class ClipPlayerView : UserControl
 /// </summary>
 internal sealed class PlaybackSeekBar : Control
 {
-    private const int TrackHeight = 6;
-    private const int ThumbDiameter = 14;
+    private const int LogicalHeight = 26;
+    private const int LogicalTrackHeight = 6;
+    private const int LogicalThumbDiameter = 14;
 
     private TimeSpan _duration;
     private TimeSpan _position;
@@ -452,12 +506,14 @@ internal sealed class PlaybackSeekBar : Control
 
     internal PlaybackSeekBar()
     {
+        // SetStyle must come first: Control rejects a transparent BackColor outright until
+        // SupportsTransparentBackColor is enabled, and the throw takes the whole player down.
+        SetStyle(ControlStyles.Selectable | ControlStyles.SupportsTransparentBackColor, true);
         DoubleBuffered = true;
         ResizeRedraw = true;
-        Height = 26;
+        Height = LogicalHeight;
         TabStop = true;
         BackColor = Color.Transparent;
-        SetStyle(ControlStyles.Selectable | ControlStyles.SupportsTransparentBackColor, true);
         AccessibleRole = AccessibleRole.Slider;
     }
 
@@ -479,8 +535,22 @@ internal sealed class PlaybackSeekBar : Control
 
     private double FractionAt(int x)
     {
-        var usable = Math.Max(1, Width - ThumbDiameter);
-        return Math.Clamp((x - (ThumbDiameter / 2.0)) / usable, 0, 1);
+        var metrics = GetPaintMetrics();
+        var usable = Math.Max(1, Width - metrics.ThumbDiameter);
+        return Math.Clamp((x - (metrics.ThumbDiameter / 2.0)) / usable, 0, 1);
+    }
+
+    /// <summary>
+    /// Derives paint geometry from the control height that WinForms has already scaled.
+    /// DeviceDpi is insufficient for the suite's synthetic startup-DPI passes, while raw
+    /// constants leave the thumb at 14 physical pixels on a real 200% display.
+    /// </summary>
+    internal (int TrackHeight, int ThumbDiameter) GetPaintMetrics()
+    {
+        var scale = Math.Max(1f / LogicalHeight, Height / (float)LogicalHeight);
+        return (
+            Math.Max(1, (int)Math.Round(LogicalTrackHeight * scale)),
+            Math.Max(1, (int)Math.Round(LogicalThumbDiameter * scale)));
     }
 
     protected override void OnMouseDown(MouseEventArgs eventArgs)
@@ -540,10 +610,15 @@ internal sealed class PlaybackSeekBar : Control
         if (Width <= 0 || Height <= 0) return;
         var graphics = eventArgs.Graphics;
         graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        var trackTop = (Height - TrackHeight) / 2;
-        var trackRect = new Rectangle(ThumbDiameter / 2, trackTop, Math.Max(1, Width - ThumbDiameter), TrackHeight);
+        var metrics = GetPaintMetrics();
+        var trackTop = (Height - metrics.TrackHeight) / 2;
+        var trackRect = new Rectangle(
+            metrics.ThumbDiameter / 2,
+            trackTop,
+            Math.Max(1, Width - metrics.ThumbDiameter),
+            metrics.TrackHeight);
         using (var background = new SolidBrush(Enabled ? Color.FromArgb(228, 219, 250) : Color.FromArgb(232, 233, 238)))
-        using (var path = RoundedPanel.CreateRoundedPath(trackRect, TrackHeight))
+        using (var path = RoundedPanel.CreateRoundedPath(trackRect, metrics.TrackHeight))
         {
             graphics.FillPath(background, path);
         }
@@ -553,19 +628,29 @@ internal sealed class PlaybackSeekBar : Control
         {
             var filled = new Rectangle(trackRect.X, trackRect.Y, filledWidth, trackRect.Height);
             using var brush = new SolidBrush(Enabled ? ClipCordTheme.Violet : Color.FromArgb(190, 192, 200));
-            using var path = RoundedPanel.CreateRoundedPath(filled, TrackHeight);
+            using var path = RoundedPanel.CreateRoundedPath(filled, metrics.TrackHeight);
             graphics.FillPath(brush, path);
         }
 
-        var thumbX = trackRect.X + filledWidth - (ThumbDiameter / 2);
-        var thumbRect = new Rectangle(thumbX, (Height - ThumbDiameter) / 2, ThumbDiameter, ThumbDiameter);
+        var thumbX = trackRect.X + filledWidth - (metrics.ThumbDiameter / 2);
+        var thumbRect = new Rectangle(
+            thumbX,
+            (Height - metrics.ThumbDiameter) / 2,
+            metrics.ThumbDiameter,
+            metrics.ThumbDiameter);
+        var paintScale = Height / (float)LogicalHeight;
         using var thumbBrush = new SolidBrush(Enabled ? Color.White : Color.FromArgb(240, 240, 244));
-        using var thumbPen = new Pen(Enabled ? ClipCordTheme.Violet : Color.FromArgb(190, 192, 200), 2f);
+        using var thumbPen = new Pen(
+            Enabled ? ClipCordTheme.Violet : Color.FromArgb(190, 192, 200),
+            Math.Max(1f, 2f * paintScale));
         graphics.FillEllipse(thumbBrush, thumbRect);
         graphics.DrawEllipse(thumbPen, thumbRect);
         if (Focused)
         {
-            using var focusPen = new Pen(ClipCordTheme.Violet, 1f) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dot };
+            using var focusPen = new Pen(ClipCordTheme.Violet, Math.Max(1f, paintScale))
+            {
+                DashStyle = System.Drawing.Drawing2D.DashStyle.Dot
+            };
             graphics.DrawRectangle(focusPen, 0, 0, Width - 1, Height - 1);
         }
     }

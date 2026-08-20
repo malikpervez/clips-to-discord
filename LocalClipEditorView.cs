@@ -1208,6 +1208,13 @@ internal sealed class LocalClipEditorView : UserControl
                     $"{GalleryView.FormatBytes(_media?.SourceBytes ?? 0)} · " +
                     $"{prepared.AudioTrackCount} audio tracks mixed";
             }
+            else if (CanUpdate() && prepared.AudioTrackCount == ClipPlaybackSource.UnknownAudioTrackCount)
+            {
+                // Nothing counted the tracks, so silence about it would be a claim this
+                // code cannot make: a separate microphone track would go unheard.
+                _progressLabel.Text =
+                    "Audio tracks could not be inspected without FFmpeg — if this clip has a separate microphone track, only the first will be audible.";
+            }
             return prepared.Path;
         }
         catch (OperationCanceledException)

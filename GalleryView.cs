@@ -29,6 +29,8 @@ internal sealed class GalleryView : UserControl
     private GalleryClipRoute? _routeFilter;
     private LocalClipEditorView? _editor;
     private ClipPlayerView? _player;
+    private CancellationTokenSource? _playbackPrewarmCancellation;
+    private string? _playbackPrewarmPath;
     private GalleryScreen _screen;
     private bool _active;
     private bool _disposed;
@@ -264,6 +266,7 @@ internal sealed class GalleryView : UserControl
     {
         _active = false;
         _scanCancellation?.Cancel();
+        CancelPlaybackPrewarm();
         DisposePlayer();
         if (_editor?.IsBusy == true)
         {
@@ -361,6 +364,7 @@ internal sealed class GalleryView : UserControl
 
     private void ShowLibrary()
     {
+        CancelPlaybackPrewarm();
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Library;
@@ -397,6 +401,7 @@ internal sealed class GalleryView : UserControl
 
     private void ShowGame(GalleryGameEntry game)
     {
+        CancelPlaybackPrewarm();
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Game;
@@ -488,6 +493,7 @@ internal sealed class GalleryView : UserControl
     {
         if (_manualClipEditService is null || clip.Route != GalleryClipRoute.LocalOnly || !File.Exists(clip.Path)) return;
         _scanCancellation?.Cancel();
+        CancelPlaybackPrewarm();
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Editor;
@@ -498,7 +504,7 @@ internal sealed class GalleryView : UserControl
         _filterBar.Visible = false;
         _refreshButton.Enabled = false;
         var canonicalClip = clip with { GameName = _selectedGame?.Name ?? clip.GameName };
-        _editor = new LocalClipEditorView(canonicalClip, _manualClipEditService, _launchMediaFile);
+        _editor = new LocalClipEditorView(canonicalClip, _manualClipEditService, _launchMediaFile, _playbackPreparer);
         _editor.BusyChanged += EditorBusyChanged;
         _editor.Cancelled += EditorCancelled;
         _editor.Completed += EditorCompleted;
@@ -564,6 +570,10 @@ internal sealed class GalleryView : UserControl
     {
         if (!File.Exists(clip.Path)) return;
         _scanCancellation?.Cancel();
+        if (!string.Equals(_playbackPrewarmPath, clip.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            CancelPlaybackPrewarm();
+        }
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Player;
@@ -711,6 +721,8 @@ internal sealed class GalleryView : UserControl
         play.AccessibleName = $"Play {clip.FileName}";
         play.Enabled = File.Exists(clip.Path);
         play.Click += (_, _) => PlayClip(clip);
+        play.MouseEnter += (_, _) => BeginPlaybackPrewarm(clip);
+        play.GotFocus += (_, _) => BeginPlaybackPrewarm(clip);
         var show = CreateCardButton("Show in folder", 105);
         show.Name = "ShowGalleryClipButton";
         show.AccessibleName = $"Show {clip.FileName} in its folder";
@@ -729,6 +741,60 @@ internal sealed class GalleryView : UserControl
     {
         if (!File.Exists(clip.Path)) return;
         ShowPlayer(clip);
+    }
+
+    private void BeginPlaybackPrewarm(GalleryClipEntry clip)
+    {
+        if (!_active || _disposed || IsDisposed || Disposing || !File.Exists(clip.Path)) return;
+        if (string.Equals(_playbackPrewarmPath, clip.Path, StringComparison.OrdinalIgnoreCase) &&
+            _playbackPrewarmCancellation is { IsCancellationRequested: false })
+        {
+            return;
+        }
+
+        CancelPlaybackPrewarm();
+        var cancellation = new CancellationTokenSource();
+        _playbackPrewarmCancellation = cancellation;
+        _playbackPrewarmPath = clip.Path;
+        _ = PrewarmPlaybackAsync(clip, cancellation);
+    }
+
+    private async Task PrewarmPlaybackAsync(
+        GalleryClipEntry clip,
+        CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await _playbackPreparer
+                .PrepareAsync(clip.Path, cancellation.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Could not prewarm Gallery playback for {clip.FileName}.", exception);
+        }
+        finally
+        {
+            cancellation.Dispose();
+            _uiContext.Post(_ =>
+            {
+                if (!ReferenceEquals(_playbackPrewarmCancellation, cancellation)) return;
+                _playbackPrewarmCancellation = null;
+                _playbackPrewarmPath = null;
+            }, null);
+        }
+    }
+
+    private void CancelPlaybackPrewarm()
+    {
+        var cancellation = _playbackPrewarmCancellation;
+        _playbackPrewarmCancellation = null;
+        _playbackPrewarmPath = null;
+        try { cancellation?.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     private void ShowClipInFolder(GalleryClipEntry clip)
@@ -867,8 +933,9 @@ internal sealed class GalleryView : UserControl
             _active = false;
             _scanCancellation?.Cancel();
             _scanCancellation?.Dispose();
+            CancelPlaybackPrewarm();
             DisposeEditor();
-        DisposePlayer();
+            DisposePlayer();
             _toolTip.Dispose();
             _gameGrid.Dispose();
             _clipList.Dispose();

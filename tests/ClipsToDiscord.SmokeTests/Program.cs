@@ -925,6 +925,7 @@ try
     TraceSmokeStep("Manual Local-only edit upload transaction");
     AssertClipEditProcessorContracts(temporaryRoot);
     AssertClipPlaybackPreparer(temporaryRoot);
+    AssertClipPlayerView(temporaryRoot);
     await AssertEditedClipUploadTransactionsAsync(temporaryRoot);
 
     TraceSmokeStep("Update checker");
@@ -1460,6 +1461,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
         {
             TraceSmokeStep("Settings layout: pre-handle Gallery lifecycle");
             AssertGalleryPreHandleLifecycle(settings);
+            TraceSmokeStep("Settings layout: Gallery playback prewarm");
+            AssertGalleryPlaybackPrewarm(settings);
             TraceSmokeStep("Settings layout: Gallery Local-only editor flow");
             AssertGalleryEditorFlow(settings);
             TraceSmokeStep("Settings layout: Gallery editor trim preview playback");
@@ -3439,6 +3442,53 @@ static void AssertGalleryPreHandleLifecycle(AppSettings settings)
         "RefreshCatalog must remain a no-op while Gallery is inactive.");
 }
 
+static void AssertGalleryPlaybackPrewarm(AppSettings settings)
+{
+    var preparer = new RecordingClipPlaybackPreparer(blockUntilReleased: true);
+    using var form = new Form
+    {
+        ClientSize = new Size(1000, 700),
+        ShowInTaskbar = false,
+        StartPosition = FormStartPosition.Manual,
+        Location = new Point(-20000, -20000)
+    };
+    using var gallery = new GalleryView(settings.ClipsFolder, playbackPreparer: preparer);
+    form.Controls.Add(gallery);
+    form.Show();
+    gallery.Activate(settings.ClipsFolder);
+    WaitForUiCondition(
+        () => EnumerateControls(gallery).OfType<GalleryGameCard>().Any(),
+        TimeSpan.FromSeconds(5),
+        "Gallery did not populate before its playback-prewarm check.");
+    var game = EnumerateControls(gallery).OfType<GalleryGameCard>().First();
+    typeof(Control).GetMethod(
+            "OnClick",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(game, [EventArgs.Empty]);
+    Application.DoEvents();
+
+    var play = EnumerateControls(gallery)
+        .OfType<Button>()
+        .First(button => button.Name == "PlayGalleryClipButton" && button.Enabled);
+    typeof(Control).GetMethod(
+            "OnMouseEnter",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(play, [EventArgs.Empty]);
+    WaitForUiCondition(
+        () => preparer.CallCount == 1,
+        TimeSpan.FromSeconds(5),
+        "Hovering a Gallery Play button did not begin preparing that clip.");
+    Assert(!EnumerateControls(gallery).OfType<ClipPlayerView>().Any(),
+        "Prewarming a clip must not navigate away from the game's clip list.");
+
+    gallery.Deactivate();
+    WaitForUiCondition(
+        () => preparer.CancellationCount == 1,
+        TimeSpan.FromSeconds(5),
+        "Leaving Gallery must cancel an in-flight playback prewarm.");
+    form.Close();
+}
+
 static void AssertControlsFit(Form form)
 {
     form.PerformLayout();
@@ -4816,12 +4866,18 @@ static void AssertGalleryEditorPreviewPlayback(AppSettings settings)
 {
     var service = new FakeManualClipEditService();
     var launchedPaths = new List<string>();
+    var preparedPlaybackPath = Path.Combine(Path.GetTempPath(), "ClipsToDiscord", "prepared-editor-test.mp4");
+    var playbackPreparer = new RecordingClipPlaybackPreparer(
+        blockUntilReleased: false,
+        preparedPath: preparedPlaybackPath,
+        audioTrackCount: 2);
     using var form = new SettingsForm(
         settings,
         checkForUpdatesAsync: _ => Task.CompletedTask,
         initialPage: SettingsPage.Gallery,
         manualClipEditService: service,
-        launchMediaFile: path => { launchedPaths.Add(path); return true; });
+        launchMediaFile: path => { launchedPaths.Add(path); return true; },
+        playbackPreparer: playbackPreparer);
     form.Show();
     var editor = OpenLocalOnlyEditor(form);
     var trim = EnumerateControls(editor).OfType<TrimRangeControl>().Single();
@@ -4830,6 +4886,31 @@ static void AssertGalleryEditorPreviewPlayback(AppSettings settings)
         "TryPlaySelectionInTempMediaAsync",
         System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
     Task<bool> PlaySelection() => (Task<bool>)playSelection.Invoke(editor, [])!;
+
+    // --- Embedded path: Play selection must open the preparer's mixed rendition. ---
+    WaitForUiCondition(
+        () => playbackPreparer.CallCount == 1,
+        TimeSpan.FromSeconds(5),
+        "The editor did not prewarm its in-app playback source.");
+    var embeddedStart = TimeSpan.FromSeconds(4);
+    var embeddedEnd = TimeSpan.FromSeconds(9);
+    trim.SetRange(embeddedStart, embeddedEnd, duration);
+    var playButton = EnumerateControls(editor)
+        .OfType<Button>()
+        .Single(button => button.Name == "PlayEditorSourceButton");
+    playButton.PerformClick();
+    var mediaElement = (System.Windows.Controls.MediaElement)typeof(LocalClipEditorView)
+        .GetField("_mediaElement", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .GetValue(editor)!;
+    Assert(mediaElement.Source is not null &&
+           string.Equals(mediaElement.Source.LocalPath, preparedPlaybackPath, StringComparison.OrdinalIgnoreCase),
+        "Play selection must hand MediaElement the preparer's all-audio rendition rather than the raw source clip.");
+    Assert(launchedPaths.Count == 0,
+        "Starting embedded playback must not hand the clip to an external media player.");
+    typeof(LocalClipEditorView).GetMethod(
+            "StopInEditorPlayback",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(editor, [false]);
 
     // --- Trim-range replay: the render must use the handles' current values. ---
     var replayStart = TimeSpan.FromSeconds(12.5);
@@ -5563,6 +5644,23 @@ static void AssertClipPlaybackPreparer(string temporaryRoot)
     Assert(renditionProbe.AudioStreamCount == 1,
         "MediaElement renders one stream, so the rendition must collapse every track into a single one.");
 
+    var sourceTrack0PcmPath = Path.Combine(root, "source-track-0.raw");
+    RunFfmpegFixture(ffmpeg,
+    [
+        "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", twoTrackPath,
+        "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "48000", "-f", "s16le", sourceTrack0PcmPath
+    ]);
+    var sourceTrack1PcmPath = Path.Combine(root, "source-track-1.raw");
+    RunFfmpegFixture(ffmpeg,
+    [
+        "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", twoTrackPath,
+        "-map", "0:a:1", "-vn", "-ac", "1", "-ar", "48000", "-f", "s16le", sourceTrack1PcmPath
+    ]);
+    var sourceTrack0Energy = GoertzelEnergy(ReadMonoSamples(sourceTrack0PcmPath), 48000, 440);
+    var sourceTrack1Energy = GoertzelEnergy(ReadMonoSamples(sourceTrack1PcmPath), 48000, 880);
+
     var pcmPath = Path.Combine(root, "rendition.raw");
     RunFfmpegFixture(ffmpeg,
     [
@@ -5583,16 +5681,25 @@ static void AssertClipPlaybackPreparer(string temporaryRoot)
         "The first audio track (440 Hz) is missing from the playback mix.");
     Assert(energy880 > noiseFloor,
         "The second audio track (880 Hz) is missing from the playback mix - this is the microphone being left behind.");
-    // Both tracks were recorded at the same level, so neither may come back materially
-    // quieter than the other: mixing that halves every input would be its own defect.
+    // Relative balance alone cannot catch uniform attenuation: amix normalize=1 halves
+    // both waveforms, leaving this ratio unchanged while reducing each tone to one quarter
+    // of its source energy. Compare each output against the track it came from as well.
     Assert(Math.Min(energy440, energy880) > Math.Max(energy440, energy880) * 0.1,
         "The playback mix is lopsided - one audio track came back far quieter than the other.");
+    Assert(energy440 > sourceTrack0Energy * 0.5,
+        "The playback mix must preserve the first track's recorded level instead of uniformly attenuating every input.");
+    Assert(energy880 > sourceTrack1Energy * 0.5,
+        "The playback mix must preserve the microphone track's recorded level instead of uniformly attenuating every input.");
 
+    var cacheSentinel = new DateTime(2025, 1, 2, 3, 4, 6, DateTimeKind.Utc);
+    File.SetLastWriteTimeUtc(prepared.Path, cacheSentinel);
     var reused = new ClipPlaybackPreparer()
         .PrepareAsync(twoTrackPath, CancellationToken.None)
         .GetAwaiter().GetResult();
     Assert(string.Equals(reused.Path, prepared.Path, StringComparison.OrdinalIgnoreCase),
-        "Preparing the same clip twice must reuse the cached rendition instead of rendering it again.");
+        "Preparing the same clip twice must resolve to the same cached rendition.");
+    Assert(File.GetLastWriteTimeUtc(reused.Path) == cacheSentinel,
+        "Preparing the same clip twice must reuse the cached bytes instead of rendering over the same path again.");
 
     var singleTrackPath = Path.Combine(root, "one-track.mp4");
     RunFfmpegFixture(ffmpeg,
@@ -5661,6 +5768,117 @@ static double GoertzelEnergy(double[] samples, int sampleRate, double frequency)
     return ((first * first) + (second * second) - (coefficient * first * second)) / samples.Length;
 }
 
+
+
+/// <summary>
+/// Constructs the Gallery player. Nothing else in the suite does, which is how a
+/// constructor that threw on every single call reached review: the preparer was covered
+/// in depth while the view that shows its output was never built once.
+/// </summary>
+static void AssertClipPlayerView(string temporaryRoot)
+{
+    // WPF refuses to construct a MediaElement outside an STA thread, and this harness runs
+    // its top-level statements on an MTA one. The app itself is STA (Program.cs), so the
+    // view is exercised on a matching thread rather than weakened to suit the runner.
+    Exception? failure = null;
+    var staThread = new Thread(() =>
+    {
+        try { AssertClipPlayerViewCore(temporaryRoot); }
+        catch (Exception exception) { failure = exception; }
+    });
+    staThread.SetApartmentState(ApartmentState.STA);
+    staThread.Start();
+    staThread.Join();
+    if (failure is not null) throw new InvalidOperationException(failure.Message, failure);
+}
+
+static void AssertClipPlayerViewCore(string temporaryRoot)
+{
+    // A bare Control rejects a transparent BackColor until SupportsTransparentBackColor is
+    // enabled, so the order of those two statements is load-bearing rather than cosmetic.
+    using (var seekBar = new PlaybackSeekBar())
+    {
+        Assert(seekBar.BackColor == Color.Transparent,
+            "The seek bar must accept a transparent background so it sits on the card behind it.");
+        seekBar.SetDuration(TimeSpan.FromSeconds(74.8));
+        seekBar.SetPosition(TimeSpan.FromSeconds(26.4));
+        foreach (var (height, expectedTrack, expectedThumb) in new[]
+                 {
+                     (26, 6, 14),
+                     (39, 9, 21),
+                     (52, 12, 28)
+                 })
+        {
+            seekBar.Height = height;
+            var metrics = seekBar.GetPaintMetrics();
+            Assert(metrics.TrackHeight == expectedTrack && metrics.ThumbDiameter == expectedThumb,
+                $"Playback seek geometry must scale at {height / 26f:F1}x: " +
+                $"track={metrics.TrackHeight}, thumb={metrics.ThumbDiameter}.");
+        }
+    }
+
+    var root = Directory.CreateDirectory(Path.Combine(temporaryRoot, "clip-player-view")).FullName;
+    var clipPath = Path.Combine(root, "Two track.mp4");
+    File.WriteAllBytes(clipPath, [0, 1, 2, 3]);
+    var entry = new GalleryClipEntry(
+        clipPath,
+        Path.GetFileName(clipPath),
+        "Battlefield™-6",
+        GalleryClipRoute.LocalOnly,
+        175_400_000,
+        DateTime.UtcNow);
+
+    using var player = new ClipPlayerView(entry, new StubClipPlaybackPreparer(clipPath, 2));
+    var named = player.Controls.Find("ClipPlayerCard", searchAllChildren: true);
+    Assert(named.Length == 1, "The player must build its card.");
+    foreach (var name in new[]
+             {
+                 "ClipPlayerPlayButton", "ClipPlayerMuteButton", "ClipPlayerSeekBar",
+                 "ClipPlayerStatus", "ClipPlayerAudioLabel", "ClipPlayerHost"
+             })
+    {
+        Assert(player.Controls.Find(name, searchAllChildren: true).Length == 1,
+            $"The player must build its {name}.");
+    }
+
+    var play = (Control)player.Controls.Find("ClipPlayerPlayButton", searchAllChildren: true)[0];
+    var seek = (Control)player.Controls.Find("ClipPlayerSeekBar", searchAllChildren: true)[0];
+    Assert(!play.Enabled && !seek.Enabled,
+        "The transport must stay disabled until media has opened, so a click cannot reach a player with no source.");
+
+    // The transport belongs below the video: ElementHost renders into its own window, so
+    // controls overlapping it would be painted behind the picture.
+    var host = (Control)player.Controls.Find("ClipPlayerHost", searchAllChildren: true)[0];
+    var transport = (Control)player.Controls.Find("ClipPlayerTransport", searchAllChildren: true)[0];
+    player.Size = new Size(900, 640);
+    player.PerformLayout();
+    var hostBounds = player.RectangleToClient(host.Parent!.RectangleToScreen(host.Bounds));
+    var transportBounds = player.RectangleToClient(transport.Parent!.RectangleToScreen(transport.Bounds));
+    Assert(!hostBounds.IntersectsWith(transportBounds),
+        "The transport must not overlap the video surface, which cannot be painted over.");
+
+    var progressPreparer = new RecordingClipPlaybackPreparer(blockUntilReleased: true);
+    using var progressForm = new Form
+    {
+        ClientSize = new Size(900, 640),
+        ShowInTaskbar = false,
+        StartPosition = FormStartPosition.Manual,
+        Location = new Point(-20000, -20000)
+    };
+    using var progressPlayer = new ClipPlayerView(entry, progressPreparer);
+    progressForm.Controls.Add(progressPlayer);
+    progressForm.Show();
+    var status = (Label)progressPlayer.Controls.Find("ClipPlayerStatus", searchAllChildren: true)[0];
+    WaitForUiCondition(
+        () => progressPreparer.CallCount == 1 && status.Text == RecordingClipPlaybackPreparer.ProgressMessage,
+        TimeSpan.FromSeconds(5),
+        "The player must surface the current preparation stage while a playback mix is still being built.");
+    progressForm.Close();
+    WaitForUiCondition(
+        () => progressPreparer.CancellationCount == 1,
+        TimeSpan.FromSeconds(5),
+        "Closing the player must cancel an in-flight playback preparation.");
+}
 
 internal static class ModeFeedbackNativeProbe
 {
@@ -6016,4 +6234,57 @@ internal sealed class FakeManualClipEditService : IManualClipEditService
             _activeProgress = null;
         }
     }
+}
+
+internal sealed class StubClipPlaybackPreparer(string path, int audioTrackCount) : IClipPlaybackPreparer
+{
+    public Task<ClipPlaybackSource> PrepareAsync(
+        string sourcePath,
+        CancellationToken cancellationToken,
+        IProgress<ClipPlaybackPreparationProgress>? progress = null)
+    {
+        progress?.Report(new ClipPlaybackPreparationProgress("Prepared for test"));
+        return Task.FromResult(new ClipPlaybackSource(path, audioTrackCount > 1, audioTrackCount));
+    }
+}
+
+internal sealed class RecordingClipPlaybackPreparer(
+    bool blockUntilReleased,
+    string? preparedPath = null,
+    int audioTrackCount = 1) : IClipPlaybackPreparer
+{
+    internal const string ProgressMessage = "Preparing test audio mix…";
+    private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _callCount;
+    private int _cancellationCount;
+
+    internal int CallCount => Volatile.Read(ref _callCount);
+    internal int CancellationCount => Volatile.Read(ref _cancellationCount);
+
+    public async Task<ClipPlaybackSource> PrepareAsync(
+        string sourcePath,
+        CancellationToken cancellationToken,
+        IProgress<ClipPlaybackPreparationProgress>? progress = null)
+    {
+        Interlocked.Increment(ref _callCount);
+        progress?.Report(new ClipPlaybackPreparationProgress(ProgressMessage));
+        try
+        {
+            if (blockUntilReleased)
+            {
+                await _release.Task.WaitAsync(cancellationToken);
+            }
+            return new ClipPlaybackSource(
+                preparedPath ?? sourcePath,
+                IsMixedRendition: audioTrackCount > 1,
+                AudioTrackCount: audioTrackCount);
+        }
+        catch (OperationCanceledException)
+        {
+            Interlocked.Increment(ref _cancellationCount);
+            throw;
+        }
+    }
+
+    internal void Release() => _release.TrySetResult();
 }
