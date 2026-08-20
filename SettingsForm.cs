@@ -785,6 +785,7 @@ internal sealed class SettingsForm : Form
         };
         watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(16)));
         watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        watcherHeadline.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         watcherHeadline.Controls.Add(new HomeRouteDot
         {
             Name = "RailWatcherStatusDot",
