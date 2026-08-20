@@ -983,6 +983,7 @@ internal sealed class AboutContentLayout : Panel
     private const int LogicalBottomPadding = 0;
     private const int LogicalGap = 14;
     private const int LogicalHeroHeight = 105;
+    private const int LogicalNarrowHeroHeight = 133;
     private const int LogicalStatusHeight = 215;
     private const int LogicalDiagnosticsHeight = 184;
     private const int LogicalPrivacyHeight = 281;
@@ -1040,7 +1041,8 @@ internal sealed class AboutContentLayout : Panel
         var gap = ScaleLogical(LogicalGap);
         var innerWidth = Math.Max(1, ClientSize.Width - horizontalPadding * 2);
         var top = topPadding;
-        _hero.Bounds = new Rectangle(horizontalPadding, top, innerWidth, ScaleLogical(LogicalHeroHeight));
+        var heroHeight = GetHeroHeight(innerWidth);
+        _hero.Bounds = new Rectangle(horizontalPadding, top, innerWidth, heroHeight);
         top = _hero.Bottom + gap;
 
         var twoColumns = innerWidth >= ScaleLogical(720);
@@ -1116,12 +1118,15 @@ internal sealed class AboutContentLayout : Panel
                 ScaleLogical(LogicalDiagnosticsHeight + LogicalCreditsHeight)) + gap
             : ScaleLogical(LogicalStatusHeight + LogicalDiagnosticsHeight + LogicalPrivacyHeight + LogicalCreditsHeight) + gap * 3;
         return topPadding + bottomPadding +
-               ScaleLogical(LogicalHeroHeight) +
+               GetHeroHeight(innerWidth) +
                gap +
                cardHeight +
                gap +
                ScaleLogical(LogicalDisclaimerHeight);
     }
+
+    private int GetHeroHeight(int innerWidth) =>
+        ScaleLogical(innerWidth >= ScaleLogical(720) ? LogicalHeroHeight : LogicalNarrowHeroHeight);
 
     private int ScaleLogical(int value)
     {
