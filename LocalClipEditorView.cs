@@ -45,6 +45,7 @@ internal sealed class LocalClipEditorView : UserControl
     private readonly RoundedPanel _trimCard;
     private readonly RoundedPanel _commitCard;
     private readonly Func<string, bool> _launchMediaFile;
+    private readonly IClipPlaybackPreparer _playbackPreparer;
     private readonly System.Windows.Forms.Timer _previewDebounce;
     private readonly System.Windows.Forms.Timer _playbackTimer;
     private CancellationTokenSource? _lifetimeCancellation;
@@ -54,6 +55,7 @@ internal sealed class LocalClipEditorView : UserControl
     private ClipMediaInfo? _media;
     private ElementHost? _mediaHost;
     private MediaElement? _mediaElement;
+    private Task<ClipPlaybackSource>? _playbackSourceTask;
     private string? _previewPath;
     private string? _trimPlaybackPath;
     private int _playbackGeneration;
@@ -79,7 +81,8 @@ internal sealed class LocalClipEditorView : UserControl
     internal LocalClipEditorView(
         GalleryClipEntry source,
         IManualClipEditService service,
-        Func<string, bool>? launchMediaFile = null)
+        Func<string, bool>? launchMediaFile = null,
+        IClipPlaybackPreparer? playbackPreparer = null)
     {
         if (source.Route != GalleryClipRoute.LocalOnly)
         {
@@ -87,6 +90,7 @@ internal sealed class LocalClipEditorView : UserControl
         }
         _source = source;
         _service = service;
+        _playbackPreparer = playbackPreparer ?? new ClipPlaybackPreparer();
         _launchMediaFile = launchMediaFile ?? DefaultLaunchMediaFile;
         Name = "LocalClipEditorView";
         AccessibleName = $"Edit and upload {source.FileName}";
@@ -457,6 +461,7 @@ internal sealed class LocalClipEditorView : UserControl
             _uploadButton.Enabled = true;
             _progressLabel.Text = "Ready to edit and upload.";
             UpdateEstimate();
+            BeginPlaybackSourcePreparation();
             try
             {
                 await RefreshPreviewRequestAsync(_trimRange.Start, cancellationToken);
@@ -838,7 +843,12 @@ internal sealed class LocalClipEditorView : UserControl
                     return;
                 }
 
-                StartInEditorPlayback();
+                _previewStatus.Text = "Preparing preview…";
+                _previewStatus.Visible = true;
+                _previewStatus.BringToFront();
+                var playbackPath = await ResolvePlaybackPathAsync();
+                if (!CanUpdate()) return;
+                StartInEditorPlayback(playbackPath);
                 if (!IsPlaybackRunning())
                 {
                     // If embedded playback failed to initialize, fall back to a generated clip preview.
@@ -1157,7 +1167,66 @@ internal sealed class LocalClipEditorView : UserControl
 
     private bool IsPlaybackRunning() => _isPlaybackRunning;
 
-    private void StartInEditorPlayback()
+    /// <summary>
+    /// Starts resolving the file in-app playback should open. A clip that keeps the
+    /// microphone on its own track has to be mixed down before MediaElement sees it, so
+    /// the render begins as soon as the track count is known rather than when Play is
+    /// pressed — by then it is usually already cached.
+    /// </summary>
+    private void BeginPlaybackSourcePreparation()
+    {
+        if (_playbackSourceTask is not null) return;
+        _playbackSourceTask = _playbackPreparer.PrepareAsync(
+            _source.Path,
+            _lifetimeCancellation?.Token ?? CancellationToken.None);
+        // The prewarm itself is not awaited; a failure resurfaces when Play resolves it.
+        _ = _playbackSourceTask.ContinueWith(
+            task => Log.Error(
+                $"Could not prepare playback audio for {_source.FileName}.",
+                task.Exception!),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Returns the path playback should open, mixing the clip's audio tracks together
+    /// first when it has more than one. If that render fails the source is still played so
+    /// the button keeps working, but the caller is told plainly that only one track will
+    /// be audible rather than being left to assume the mix applied.
+    /// </summary>
+    private async Task<string> ResolvePlaybackPathAsync()
+    {
+        BeginPlaybackSourcePreparation();
+        try
+        {
+            var prepared = await _playbackSourceTask!.ConfigureAwait(true);
+            if (CanUpdate() && prepared.AudioTrackCount > 1)
+            {
+                _durationLabel.Text =
+                    $"Duration: {FormatTime(_media?.Duration ?? TimeSpan.Zero)} · " +
+                    $"{GalleryView.FormatBytes(_media?.SourceBytes ?? 0)} · " +
+                    $"{prepared.AudioTrackCount} audio tracks mixed";
+            }
+            return prepared.Path;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Could not mix playback audio for {_source.FileName}.", exception);
+            if (CanUpdate())
+            {
+                _progressLabel.Text =
+                    "Preview is playing the first audio track only — the tracks could not be mixed.";
+            }
+            return _source.Path;
+        }
+    }
+
+    private void StartInEditorPlayback(string playbackPath)
     {
         if (_media is null || _mediaElement is null) return;
         if ((_trimRange.End - _trimRange.Start) < TimeSpan.FromSeconds(0.25))
@@ -1193,7 +1262,7 @@ internal sealed class LocalClipEditorView : UserControl
                 _mediaElement.Stop();
                 _mediaElement.Volume = 1.0;
                 _mediaElement.IsMuted = _muteAudio.Checked;
-                _mediaElement.Source = new Uri(_source.Path, UriKind.Absolute);
+                _mediaElement.Source = new Uri(playbackPath, UriKind.Absolute);
             }
             catch (Exception exception)
             {

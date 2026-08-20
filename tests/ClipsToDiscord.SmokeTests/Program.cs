@@ -924,6 +924,7 @@ try
 
     TraceSmokeStep("Manual Local-only edit upload transaction");
     AssertClipEditProcessorContracts(temporaryRoot);
+    AssertClipPlaybackPreparer(temporaryRoot);
     await AssertEditedClipUploadTransactionsAsync(temporaryRoot);
 
     TraceSmokeStep("Update checker");
@@ -5471,6 +5472,195 @@ static void PumpWindowsMessagesFor(TimeSpan duration)
     }
     Application.DoEvents();
 }
+
+/// <summary>
+/// In-app playback opens whatever <see cref="ClipPlaybackPreparer"/> hands back, so these
+/// checks cover the one property that matters: a clip recorded with the microphone on its
+/// own track must be heard complete. The argument and cache contracts always run; the
+/// end-to-end tone check only runs where FFmpeg is present, because it is the sole test
+/// that proves the mix rather than the plumbing around it.
+/// </summary>
+static void AssertClipPlaybackPreparer(string temporaryRoot)
+{
+    var root = Directory.CreateDirectory(Path.Combine(temporaryRoot, "clip-playback-preparer")).FullName;
+
+    static bool HasPair(IReadOnlyList<string> values, string option, string value)
+    {
+        for (var index = 0; index + 1 < values.Count; index++)
+        {
+            if (values[index] == option && values[index + 1] == value) return true;
+        }
+        return false;
+    }
+
+    var renditionPath = Path.Combine(root, "mixed.mp4");
+    var arguments = ClipPlaybackPreparer
+        .BuildMixedRenditionArguments(Path.Combine(root, "source.mp4"), renditionPath, 2)
+        .ToArray();
+    Assert(HasPair(arguments, "-c:v", "copy"),
+        "A playback mix must copy the video stream; re-encoding it would make preparing a preview far slower than it needs to be.");
+    Assert(HasPair(arguments, "-map", "0:v:0") && HasPair(arguments, "-map", FfmpegCompressor.MixedAudioLabel),
+        "A playback mix must map the source video alongside the mixed audio label.");
+    Assert(HasPair(arguments, "-filter_complex", FfmpegCompressor.BuildAudioMixFilter(2)),
+        "A playback mix must reuse the same audio mix filter as the edit path so preview and upload cannot drift apart.");
+    Assert(!arguments.Any(argument => argument.Contains("asetpts", StringComparison.Ordinal)),
+        "A playback mix copies video with its original timestamps, so resetting audio PTS alone would desynchronise the two.");
+    Assert(HasPair(arguments, "-c:a", "aac") && arguments[^3] == "-f" && arguments[^2] == "mp4" && arguments[^1] == renditionPath,
+        "A playback mix must produce an MP4 with AAC audio at the requested path.");
+
+    var singleTrackRejected = false;
+    try { ClipPlaybackPreparer.BuildMixedRenditionArguments("in.mp4", "out.mp4", 1); }
+    catch (ArgumentOutOfRangeException) { singleTrackRejected = true; }
+    Assert(singleTrackRejected,
+        "A single-track clip needs no rendition, so requesting one must fail rather than waste a render.");
+
+    var keySourcePath = Path.Combine(root, "key-source.mp4");
+    File.WriteAllBytes(keySourcePath, [1, 2, 3, 4]);
+    var firstKey = ClipPlaybackPreparer.BuildCacheKey(new FileInfo(keySourcePath));
+    Assert(firstKey == ClipPlaybackPreparer.BuildCacheKey(new FileInfo(keySourcePath)),
+        "The same clip must resolve to the same cached rendition.");
+    File.WriteAllBytes(keySourcePath, [1, 2, 3, 4, 5, 6, 7, 8]);
+    Assert(firstKey != ClipPlaybackPreparer.BuildCacheKey(new FileInfo(keySourcePath)),
+        "A re-recorded clip at the same path must not replay the previous cached mix.");
+
+    var ffmpeg = FfmpegCompressor.FindExecutable();
+    if (ffmpeg is null)
+    {
+        Console.WriteLine("  (skipped the two-tone playback mix check: ffmpeg.exe was not found)");
+        return;
+    }
+
+    // 440 Hz on the first track, 880 Hz on the second: if playback ever falls back to
+    // mapping only 0:a:0, the 880 Hz tone disappears and this check fails.
+    var twoTrackPath = Path.Combine(root, "two-track.mp4");
+    RunFfmpegFixture(ffmpeg,
+    [
+        "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=320x240:r=15:d=3",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+        "-f", "lavfi", "-i", "sine=frequency=880:duration=3",
+        "-map", "0:v", "-map", "1:a", "-map", "2:a",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest",
+        twoTrackPath
+    ]);
+
+    var sourceProbe = FfmpegCompressor.ProbeMediaAsync(twoTrackPath, ffmpeg, CancellationToken.None)
+        .GetAwaiter().GetResult();
+    Assert(sourceProbe.AudioStreamCount == 2,
+        "The two-track fixture must actually carry two audio streams for this check to mean anything.");
+
+    var prepared = new ClipPlaybackPreparer()
+        .PrepareAsync(twoTrackPath, CancellationToken.None)
+        .GetAwaiter().GetResult();
+    Assert(prepared.IsMixedRendition && prepared.AudioTrackCount == 2,
+        "A two-track clip must be prepared as a mixed rendition rather than played straight from disk.");
+    Assert(!string.Equals(prepared.Path, Path.GetFullPath(twoTrackPath), StringComparison.OrdinalIgnoreCase),
+        "A mixed rendition must be a separate file so the original recording is never rewritten.");
+
+    var renditionProbe = FfmpegCompressor.ProbeMediaAsync(prepared.Path, ffmpeg, CancellationToken.None)
+        .GetAwaiter().GetResult();
+    Assert(renditionProbe.AudioStreamCount == 1,
+        "MediaElement renders one stream, so the rendition must collapse every track into a single one.");
+
+    var pcmPath = Path.Combine(root, "rendition.raw");
+    RunFfmpegFixture(ffmpeg,
+    [
+        "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", prepared.Path,
+        "-vn", "-ac", "1", "-ar", "48000", "-f", "s16le", pcmPath
+    ]);
+    var samples = ReadMonoSamples(pcmPath);
+    Assert(samples.Length > 48000,
+        "The decoded rendition must contain enough audio to analyse.");
+    var energy440 = GoertzelEnergy(samples, 48000, 440);
+    var energy880 = GoertzelEnergy(samples, 48000, 880);
+    // 1500 Hz carries no tone, so it measures what "absent" looks like in this recording.
+    // A dropped track still reads a hair above zero, so the floor is scaled well clear of
+    // it rather than set to a small constant that a missing tone could drift past.
+    var noiseFloor = GoertzelEnergy(samples, 48000, 1500) * 1000;
+    Assert(energy440 > noiseFloor,
+        "The first audio track (440 Hz) is missing from the playback mix.");
+    Assert(energy880 > noiseFloor,
+        "The second audio track (880 Hz) is missing from the playback mix - this is the microphone being left behind.");
+    // Both tracks were recorded at the same level, so neither may come back materially
+    // quieter than the other: mixing that halves every input would be its own defect.
+    Assert(Math.Min(energy440, energy880) > Math.Max(energy440, energy880) * 0.1,
+        "The playback mix is lopsided - one audio track came back far quieter than the other.");
+
+    var reused = new ClipPlaybackPreparer()
+        .PrepareAsync(twoTrackPath, CancellationToken.None)
+        .GetAwaiter().GetResult();
+    Assert(string.Equals(reused.Path, prepared.Path, StringComparison.OrdinalIgnoreCase),
+        "Preparing the same clip twice must reuse the cached rendition instead of rendering it again.");
+
+    var singleTrackPath = Path.Combine(root, "one-track.mp4");
+    RunFfmpegFixture(ffmpeg,
+    [
+        "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=320x240:r=15:d=2",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+        "-map", "0:v", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest",
+        singleTrackPath
+    ]);
+    var singlePrepared = new ClipPlaybackPreparer()
+        .PrepareAsync(singleTrackPath, CancellationToken.None)
+        .GetAwaiter().GetResult();
+    Assert(!singlePrepared.IsMixedRendition &&
+           string.Equals(singlePrepared.Path, Path.GetFullPath(singleTrackPath), StringComparison.OrdinalIgnoreCase),
+        "A single-track clip must play straight from disk rather than paying for a render it does not need.");
+}
+
+static void RunFfmpegFixture(string ffmpegPath, string[] arguments)
+{
+    var startInfo = new ProcessStartInfo(ffmpegPath)
+    {
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardError = true,
+        RedirectStandardOutput = true
+    };
+    foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+    using var process = Process.Start(startInfo)
+        ?? throw new InvalidOperationException("FFmpeg could not be started for the playback fixture.");
+    var standardError = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+    if (process.ExitCode != 0)
+    {
+        throw new InvalidOperationException($"FFmpeg failed building a playback fixture: {standardError}");
+    }
+}
+
+static double[] ReadMonoSamples(string pcmPath)
+{
+    var bytes = File.ReadAllBytes(pcmPath);
+    var samples = new double[bytes.Length / 2];
+    for (var index = 0; index < samples.Length; index++)
+    {
+        samples[index] = BitConverter.ToInt16(bytes, index * 2) / 32768.0;
+    }
+    return samples;
+}
+
+/// <summary>
+/// Measures how much energy a signal carries at one frequency. A full FFT would answer the
+/// same question, but a Goertzel filter needs no dependency and only three tones matter.
+/// </summary>
+static double GoertzelEnergy(double[] samples, int sampleRate, double frequency)
+{
+    var coefficient = 2 * Math.Cos(2 * Math.PI * frequency / sampleRate);
+    double first = 0, second = 0;
+    foreach (var sample in samples)
+    {
+        var current = sample + (coefficient * first) - second;
+        second = first;
+        first = current;
+    }
+    return ((first * first) + (second * second) - (coefficient * first * second)) / samples.Length;
+}
+
 
 internal static class ModeFeedbackNativeProbe
 {

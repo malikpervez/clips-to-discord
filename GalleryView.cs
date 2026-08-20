@@ -21,12 +21,14 @@ internal sealed class GalleryView : UserControl
     private readonly BrandedScrollHost _scrollHost;
     private readonly IManualClipEditService? _manualClipEditService;
     private readonly Func<string, bool>? _launchMediaFile;
+    private readonly IClipPlaybackPreparer _playbackPreparer;
     private CancellationTokenSource? _scanCancellation;
     private string _clipsFolder;
     private GallerySnapshot _snapshot = new([], []);
     private GalleryGameEntry? _selectedGame;
     private GalleryClipRoute? _routeFilter;
     private LocalClipEditorView? _editor;
+    private ClipPlayerView? _player;
     private GalleryScreen _screen;
     private bool _active;
     private bool _disposed;
@@ -36,11 +38,13 @@ internal sealed class GalleryView : UserControl
     internal GalleryView(
         string clipsFolder,
         IManualClipEditService? manualClipEditService = null,
-        Func<string, bool>? launchMediaFile = null)
+        Func<string, bool>? launchMediaFile = null,
+        IClipPlaybackPreparer? playbackPreparer = null)
     {
         _clipsFolder = clipsFolder;
         _manualClipEditService = manualClipEditService;
         _launchMediaFile = launchMediaFile;
+        _playbackPreparer = playbackPreparer ?? new ClipPlaybackPreparer();
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         Name = "GalleryView";
         Dock = DockStyle.Fill;
@@ -260,12 +264,15 @@ internal sealed class GalleryView : UserControl
     {
         _active = false;
         _scanCancellation?.Cancel();
+        DisposePlayer();
         if (_editor?.IsBusy == true)
         {
             _editor.CancelActiveOperation();
         }
-        else if (_screen == GalleryScreen.Editor && _selectedGame is not null)
+        else if (_screen is GalleryScreen.Editor or GalleryScreen.Player && _selectedGame is not null)
         {
+            // Leaving the page released the player, so the screen must not stay on a view
+            // whose content has already been torn down.
             ShowGame(_selectedGame);
         }
         if (!_disposed && !IsDisposed && !Disposing) _refreshButton.Enabled = true;
@@ -355,6 +362,7 @@ internal sealed class GalleryView : UserControl
     private void ShowLibrary()
     {
         DisposeEditor();
+        DisposePlayer();
         _screen = GalleryScreen.Library;
         _selectedGame = null;
         _headingLabel.Text = "Gallery";
@@ -390,6 +398,7 @@ internal sealed class GalleryView : UserControl
     private void ShowGame(GalleryGameEntry game)
     {
         DisposeEditor();
+        DisposePlayer();
         _screen = GalleryScreen.Game;
         _selectedGame = game;
         _headingLabel.Text = game.Name;
@@ -454,6 +463,13 @@ internal sealed class GalleryView : UserControl
 
     private void NavigateBack()
     {
+        if (_screen == GalleryScreen.Player)
+        {
+            DisposePlayer();
+            if (_selectedGame is not null) ShowGame(_selectedGame);
+            else ShowLibrary();
+            return;
+        }
         if (_screen == GalleryScreen.Editor)
         {
             if (_editor?.IsBusy == true)
@@ -473,6 +489,7 @@ internal sealed class GalleryView : UserControl
         if (_manualClipEditService is null || clip.Route != GalleryClipRoute.LocalOnly || !File.Exists(clip.Path)) return;
         _scanCancellation?.Cancel();
         DisposeEditor();
+        DisposePlayer();
         _screen = GalleryScreen.Editor;
         _headingLabel.Text = "Edit & upload";
         _summaryLabel.Text = $"{clip.GameName} · Local only · {clip.FileName}";
@@ -521,6 +538,7 @@ internal sealed class GalleryView : UserControl
         if (_disposed || IsDisposed || Disposing) return;
         _routeFilter = resultRoute;
         DisposeEditor();
+        DisposePlayer();
         _screen = GalleryScreen.Game;
         _selectedGame = selectedName is null
             ? null
@@ -536,6 +554,43 @@ internal sealed class GalleryView : UserControl
         GalleryClipRoute.Uploaded => _uploadedFilterButton,
         _ => _allFilterButton
     };
+
+    /// <summary>
+    /// Shows a clip inside ClipCord rather than handing it to whichever application owns
+    /// .mp4 on this PC. Local-only clips are the reason this matters: passing one to an
+    /// unknown player can put it somewhere that syncs off the machine.
+    /// </summary>
+    private void ShowPlayer(GalleryClipEntry clip)
+    {
+        if (!File.Exists(clip.Path)) return;
+        _scanCancellation?.Cancel();
+        DisposeEditor();
+        DisposePlayer();
+        _screen = GalleryScreen.Player;
+        _headingLabel.Text = "Play clip";
+        var route = clip.Route == GalleryClipRoute.LocalOnly ? "Local only" : "Uploaded";
+        _summaryLabel.Text = $"{clip.GameName} · {route} · {clip.FileName}";
+        _backButton.Visible = true;
+        _backButton.Text = "Back to clips";
+        _filterBar.Visible = false;
+        _refreshButton.Enabled = false;
+        _player = new ClipPlayerView(clip, _playbackPreparer);
+        _scrollHost.Content = _player;
+        _scrollHost.RefreshContentLayout(preservePosition: false);
+        BeginInvoke((Action)(() =>
+        {
+            if (_player is not null && !_player.IsDisposed) _player.Focus();
+        }));
+    }
+
+    private void DisposePlayer()
+    {
+        if (_player is null) return;
+        _player.StopPlayback();
+        if (ReferenceEquals(_scrollHost.Content, _player)) _scrollHost.Content = null;
+        _player.Dispose();
+        _player = null;
+    }
 
     private void DisposeEditor()
     {
@@ -673,15 +728,7 @@ internal sealed class GalleryView : UserControl
     private void PlayClip(GalleryClipEntry clip)
     {
         if (!File.Exists(clip.Path)) return;
-        try
-        {
-            Process.Start(CreatePlayClipStartInfo(clip.Path));
-        }
-        catch (Exception exception)
-        {
-            Log.Error($"Could not play Gallery clip {clip.FileName}.", exception);
-            MessageBox.Show(this, "Windows could not open this clip.", "Could not play clip", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+        ShowPlayer(clip);
     }
 
     private void ShowClipInFolder(GalleryClipEntry clip)
@@ -821,6 +868,7 @@ internal sealed class GalleryView : UserControl
             _scanCancellation?.Cancel();
             _scanCancellation?.Dispose();
             DisposeEditor();
+        DisposePlayer();
             _toolTip.Dispose();
             _gameGrid.Dispose();
             _clipList.Dispose();
@@ -832,7 +880,8 @@ internal sealed class GalleryView : UserControl
     {
         Library,
         Game,
-        Editor
+        Editor,
+        Player
     }
 }
 
