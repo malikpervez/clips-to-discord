@@ -1380,7 +1380,7 @@ internal sealed class SettingsForm : Form
         _startWithWindows.AccessibleName = "Start with Windows";
         _startWithWindows.Anchor = AnchorStyles.Right;
         _startWithWindows.Margin = Padding.Empty;
-        startup.Margin = ScalePadding(new Padding(0, 8, 0, 0));
+        startup.Margin = ScalePadding(new Padding(0, 2, 0, 0));
         layout.Controls.Add(startup, 0, 1);
 
         var updates = CreatePreferenceRow(
@@ -1389,7 +1389,7 @@ internal sealed class SettingsForm : Form
             _checkUpdatesButton);
         _checkUpdatesButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
         _checkUpdatesButton.Margin = Padding.Empty;
-        updates.Margin = ScalePadding(new Padding(0, 8, 0, 0));
+        updates.Margin = ScalePadding(new Padding(0, 2, 0, 0));
         layout.Controls.Add(updates, 0, 2);
         return CreateCard(
             BrandGlyph.AppPreferences,
