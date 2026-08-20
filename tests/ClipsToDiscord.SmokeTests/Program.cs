@@ -4648,8 +4648,10 @@ static int GetMaximumCardTail(Control card)
 {
     // The new Application stack makes the equal-height Routing card intentionally airier.
     // This still catches the former 67%-empty stretch while allowing one compact control row
-    // of visual breathing room at each DPI.
-    return Math.Max(28, (int)Math.Ceiling(56 * card.DeviceDpi / 96d));
+    // of visual breathing room at each DPI. Synthetic Scale() probes do not change DeviceDpi,
+    // so derive their effective scale from the simultaneously measured 190px card baseline.
+    var effectiveScale = Math.Max(card.DeviceDpi / 96d, card.ClientSize.Height / 190d);
+    return Math.Max(28, (int)Math.Ceiling(56 * effectiveScale));
 }
 
 static void AssertCompressionTargetPickerInteraction(SettingsForm form)
