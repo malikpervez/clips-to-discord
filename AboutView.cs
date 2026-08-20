@@ -265,10 +265,11 @@ internal sealed class AboutView : UserControl
             Text = "Your clips. Your choice. Your Discord.",
             Dock = DockStyle.Top,
             AutoSize = true,
-            AutoEllipsis = true,
+            AutoEllipsis = false,
             ForeColor = ClipCordTheme.ShellText,
             Font = ClipCordTheme.DisplayFont(13.2f, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleLeft,
+            UseMnemonic = false,
             AccessibleRole = AccessibleRole.StaticText
         }, 0, 0);
         copy.Controls.Add(new Label

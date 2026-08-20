@@ -3836,7 +3836,14 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         "The live About page is missing approved mockup copy or actions.");
     foreach (var control in textControls)
     {
-        var measured = TextRenderer.MeasureText(control.Text, control.Font, Size.Empty, TextFormatFlags.SingleLine);
+        var allowResponsiveWrap = control.Name == "AboutTaglineLabel";
+        var measured = TextRenderer.MeasureText(
+            control.Text,
+            control.Font,
+            allowResponsiveWrap ? new Size(control.ClientSize.Width, int.MaxValue) : Size.Empty,
+            allowResponsiveWrap
+                ? TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix
+                : TextFormatFlags.SingleLine);
         Assert(measured.Width <= control.ClientSize.Width + 4 && measured.Height <= control.ClientSize.Height + 4,
             $"About text '{control.Text}' is ellipsized or clipped: measured={measured}, client={control.ClientSize}.");
     }
