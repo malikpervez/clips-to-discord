@@ -4,7 +4,14 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
-- No unreleased changes.
+## 1.14.0 — 2026-08-20
+
+- Redesign ClipCord around a persistent dark navigation rail and a shared page header, with a truthful live Home dashboard, searchable Activity timeline, responsive Gallery grid, grouped Settings, and a refreshed About page.
+- Play archived clips inside ClipCord and keep the player/editor transport outside the video surface so playback controls remain usable at every supported display scale.
+- Search Gallery clips by game or filename, switch between newest-first and oldest-first ordering, and preserve the selected game and route when returning from playback or editing.
+- Show a real near-start frame on each visible Gallery card, generated locally on demand with a bounded temporary cache while Always Watching remains idle.
+- Match the approved Figma icon set and page geometry across Home, Activity, Gallery, Settings, and About, including the complete three-person project credits.
+- Stage Settings changes behind an explicit Discard/Save bar while keeping the global route selector synchronized and accessible.
 
 ## 1.13.1 — 2026-08-17
 

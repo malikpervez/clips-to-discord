@@ -5,25 +5,44 @@ namespace ClipsToDiscord;
 
 internal static class ClipCordTheme
 {
-    public static readonly Color Shell = Color.FromArgb(15, 23, 38);
-    public static readonly Color Header = Color.FromArgb(10, 18, 32);
-    public static readonly Color Sidebar = Color.FromArgb(13, 22, 38);
-    public static readonly Color Card = Color.FromArgb(249, 249, 251);
-    public static readonly Color CardBorder = Color.FromArgb(218, 222, 231);
+    // The Figma redesign uses one dark surface family. Keep the familiar aliases
+    // below so existing controls migrate together instead of carrying a second,
+    // page-specific theme indefinitely.
+    public static readonly Color SurfaceChrome = Color.FromArgb(10, 18, 32);
+    public static readonly Color SurfaceRail = Color.FromArgb(13, 22, 38);
+    public static readonly Color SurfaceBase = Color.FromArgb(15, 23, 38);
+    public static readonly Color SurfaceSunken = Color.FromArgb(16, 27, 45);
+    public static readonly Color SurfaceRaised = Color.FromArgb(21, 31, 49);
+    public static readonly Color SurfaceControl = Color.FromArgb(24, 35, 55);
+    public static readonly Color SurfaceControlHover = Color.FromArgb(34, 47, 71);
+    public static readonly Color BorderDefault = Color.FromArgb(45, 58, 80);
+    public static readonly Color BorderStrong = Color.FromArgb(53, 66, 88);
+    public static readonly Color TextPrimary = Color.FromArgb(245, 247, 252);
+    public static readonly Color TextSecondary = Color.FromArgb(166, 175, 194);
+    public static readonly Color TextTertiary = Color.FromArgb(112, 123, 142);
+
+    public static readonly Color Shell = SurfaceBase;
+    public static readonly Color Header = SurfaceChrome;
+    public static readonly Color Sidebar = SurfaceRail;
+    public static readonly Color Card = SurfaceRaised;
+    public static readonly Color CardBorder = BorderDefault;
     public static readonly Color Coral = Color.FromArgb(224, 67, 70);
     public static readonly Color Violet = Color.FromArgb(139, 61, 255);
     public static readonly Color VioletMuted = Color.FromArgb(48, 42, 74);
-    public static readonly Color Text = Color.FromArgb(25, 30, 40);
-    public static readonly Color MutedText = Color.FromArgb(101, 108, 122);
-    public static readonly Color ShellText = Color.FromArgb(245, 247, 252);
-    public static readonly Color ShellMutedText = Color.FromArgb(166, 175, 194);
-    public static readonly Color SettingsCard = Color.FromArgb(21, 31, 49);
-    public static readonly Color SettingsCardBorder = Color.FromArgb(45, 58, 80);
-    public static readonly Color SettingsField = Color.FromArgb(16, 27, 45);
-    public static readonly Color SettingsFieldBorder = Color.FromArgb(53, 66, 88);
-    public static readonly Color SettingsButton = Color.FromArgb(24, 35, 55);
-    public static readonly Color SettingsButtonHover = Color.FromArgb(34, 47, 71);
-    public static readonly Color SettingsMutedText = Color.FromArgb(159, 170, 189);
+    public static readonly Color Text = TextPrimary;
+    // Existing helper copy is frequently 8.5-9.5pt. Keep that legacy alias on
+    // the higher-contrast secondary token; use TextTertiary only for deliberate
+    // metadata and micro-label roles.
+    public static readonly Color MutedText = TextSecondary;
+    public static readonly Color ShellText = TextPrimary;
+    public static readonly Color ShellMutedText = TextSecondary;
+    public static readonly Color SettingsCard = SurfaceRaised;
+    public static readonly Color SettingsCardBorder = BorderDefault;
+    public static readonly Color SettingsField = SurfaceSunken;
+    public static readonly Color SettingsFieldBorder = BorderStrong;
+    public static readonly Color SettingsButton = SurfaceControl;
+    public static readonly Color SettingsButtonHover = SurfaceControlHover;
+    public static readonly Color SettingsMutedText = TextSecondary;
 
     private static readonly Lazy<string> InterfaceFontName = new(() =>
     {
@@ -510,7 +529,20 @@ internal enum BrandGlyph
     FileText,
     Copy,
     FolderOpen,
-    ReportProblem
+    ReportProblem,
+    Home,
+    Upload,
+    Clock,
+    Film,
+    ArrowRight,
+    ChevronRight,
+    External,
+    Refresh,
+    Play,
+    Trim,
+    Search,
+    More,
+    Check
 }
 
 internal sealed class RoundedPanel : Panel
@@ -696,12 +728,25 @@ internal sealed class GradientButton : Button
 
 internal sealed class OutlineButton : Button
 {
+    private bool _accessibilitySelected;
     public BrandGlyph? LeadingGlyph { get; set; }
-    public Color SurfaceColor { get; set; } = Color.White;
-    public Color OutlineColor { get; set; } = ClipCordTheme.CardBorder;
-    public Color HoverColor { get; set; } = Color.FromArgb(244, 241, 252);
-    public Color DisabledSurfaceColor { get; set; } = Color.FromArgb(230, 231, 235);
-    public Color DisabledTextColor { get; set; } = Color.FromArgb(140, 144, 153);
+    public FigmaIconAsset? TrailingIcon { get; set; }
+    public bool AlignContentLeft { get; set; }
+    public Color SurfaceColor { get; set; } = ClipCordTheme.SurfaceControl;
+    public Color OutlineColor { get; set; } = ClipCordTheme.BorderDefault;
+    public Color HoverColor { get; set; } = ClipCordTheme.SurfaceControlHover;
+    public Color DisabledSurfaceColor { get; set; } = ClipCordTheme.SurfaceSunken;
+    public Color DisabledTextColor { get; set; } = ClipCordTheme.TextTertiary;
+    public bool AccessibilitySelected
+    {
+        get => _accessibilitySelected;
+        set
+        {
+            if (_accessibilitySelected == value) return;
+            _accessibilitySelected = value;
+            AccessibilityNotifyClients(AccessibleEvents.StateChange, -1);
+        }
+    }
     private bool _hovered;
     private Size _lastRegionSize = Size.Empty;
 
@@ -711,7 +756,7 @@ internal sealed class OutlineButton : Button
         AutoSizeMode = AutoSizeMode.GrowOnly;
         FlatStyle = FlatStyle.Flat;
         FlatAppearance.BorderSize = 0;
-        ForeColor = ClipCordTheme.Text;
+        ForeColor = ClipCordTheme.TextPrimary;
         Font = ClipCordTheme.InterfaceFont(9.5f);
         Cursor = Cursors.Hand;
         UseVisualStyleBackColor = false;
@@ -741,19 +786,29 @@ internal sealed class OutlineButton : Button
         eventArgs.Graphics.FillPath(fill, path);
         eventArgs.Graphics.DrawPath(outline, path);
         var textColor = Enabled ? ForeColor : DisabledTextColor;
+        var trailingBounds = GetTrailingIconBounds();
+        if (TrailingIcon is { } trailingIcon && !trailingBounds.IsEmpty)
+        {
+            FigmaIconRenderer.Draw(eventArgs.Graphics, trailingBounds, trailingIcon, textColor);
+        }
         if (LeadingGlyph is { } glyph)
         {
             var glyphSize = Math.Max(16, Font.Height - 2);
             var gap = Math.Max(5, (int)Math.Round(6 * DeviceDpi / 96d));
             var measured = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
             var combinedWidth = glyphSize + gap + measured.Width;
-            var left = Math.Max(6, (Width - combinedWidth) / 2);
+            var availableRight = trailingBounds.IsEmpty
+                ? Width
+                : trailingBounds.Left - Math.Max(4, (int)Math.Round(6 * DeviceDpi / 96d));
+            var left = AlignContentLeft
+                ? Math.Max(6, (int)Math.Round(12 * DeviceDpi / 96d))
+                : Math.Max(6, (availableRight - combinedWidth) / 2);
             var glyphBounds = new Rectangle(left, (Height - glyphSize) / 2, glyphSize, glyphSize);
             BrandGlyphControl.DrawGlyph(eventArgs.Graphics, glyphBounds, glyph, textColor, Math.Max(1.3f, glyphSize / 12f));
             var textBounds = new Rectangle(
                 glyphBounds.Right + gap,
                 0,
-                Math.Max(0, Width - glyphBounds.Right - gap - 4),
+                Math.Max(0, availableRight - glyphBounds.Right - gap),
                 Height);
             TextRenderer.DrawText(
                 eventArgs.Graphics,
@@ -766,19 +821,45 @@ internal sealed class OutlineButton : Button
         }
         else
         {
+            var textBounds = trailingBounds.IsEmpty
+                ? ClientRectangle
+                : new Rectangle(
+                    Math.Max(6, (int)Math.Round(12 * DeviceDpi / 96d)),
+                    0,
+                    Math.Max(0, trailingBounds.Left - Math.Max(10, (int)Math.Round(18 * DeviceDpi / 96d))),
+                    Height);
             TextRenderer.DrawText(
                 eventArgs.Graphics,
                 Text,
                 Font,
-                ClientRectangle,
+                textBounds,
                 textColor,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                (AlignContentLeft ? TextFormatFlags.Left : TextFormatFlags.HorizontalCenter) |
+                TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
                 TextFormatFlags.NoPrefix);
         }
         if (Focused && ShowFocusCues)
         {
             ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
         }
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() =>
+        new OutlineButtonAccessibleObject(this);
+
+    private Rectangle GetTrailingIconBounds()
+    {
+        if (TrailingIcon is null) return Rectangle.Empty;
+        var side = Math.Max(10, Font.Height - 5);
+        var right = Math.Max(7, (int)Math.Round(11 * DeviceDpi / 96d));
+        return new Rectangle(Math.Max(0, Width - right - side), (Height - side) / 2, side, side);
+    }
+
+    private sealed class OutlineButtonAccessibleObject(OutlineButton owner)
+        : Control.ControlAccessibleObject(owner)
+    {
+        public override AccessibleStates State => base.State |
+            (owner.AccessibilitySelected ? AccessibleStates.Checked : AccessibleStates.None);
     }
 
     private void UpdateRegion()
@@ -891,6 +972,12 @@ internal class BrandGlyphControl : Control
     {
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        if (FigmaIconRenderer.TryGetBrandAsset(glyph, out var asset))
+        {
+            var assetInset = Math.Max(1, Math.Min(bounds.Width, bounds.Height) / 16);
+            FigmaIconRenderer.Draw(graphics, Rectangle.Inflate(bounds, -assetInset, -assetInset), asset, color);
+            return;
+        }
         var inset = Math.Max(3, Math.Min(bounds.Width, bounds.Height) / 5);
         var box = Rectangle.Inflate(bounds, -inset, -inset);
         using var pen = new Pen(color, width)
@@ -902,6 +989,31 @@ internal class BrandGlyphControl : Control
 
         switch (glyph)
         {
+            case BrandGlyph.Home:
+                using (var home = new GraphicsPath())
+                {
+                    home.AddLines(
+                    [
+                        new PointF(box.Left, box.Top + box.Height * .46f),
+                        new PointF(box.Left + box.Width * .5f, box.Top),
+                        new PointF(box.Right, box.Top + box.Height * .46f)
+                    ]);
+                    graphics.DrawPath(pen, home);
+                }
+                graphics.DrawLines(pen,
+                [
+                    new PointF(box.Left + box.Width * .14f, box.Top + box.Height * .38f),
+                    new PointF(box.Left + box.Width * .14f, box.Bottom),
+                    new PointF(box.Right - box.Width * .14f, box.Bottom),
+                    new PointF(box.Right - box.Width * .14f, box.Top + box.Height * .38f)
+                ]);
+                graphics.DrawRectangle(
+                    pen,
+                    box.Left + box.Width * .42f,
+                    box.Top + box.Height * .64f,
+                    box.Width * .16f,
+                    box.Height * .36f);
+                break;
             case BrandGlyph.Settings:
                 DrawGear(graphics, box, pen);
                 break;
@@ -1440,7 +1552,7 @@ internal sealed class TitleBarButton : Control
 
     public TitleBarButton()
     {
-        Size = new Size(48, 46);
+        Size = new Size(46, 34);
         Margin = Padding.Empty;
         TabStop = true;
         Cursor = Cursors.Hand;
@@ -1470,10 +1582,10 @@ internal sealed class TitleBarButton : Control
         }
         BrandGlyphControl.DrawGlyph(
             eventArgs.Graphics,
-            new Rectangle((Width - 22) / 2, (Height - 22) / 2, 22, 22),
+            new Rectangle((Width - 14) / 2, (Height - 14) / 2, 14, 14),
             Glyph,
             Enabled ? ClipCordTheme.ShellText : Color.FromArgb(91, 101, 119),
-            1.5f);
+            1.35f);
         if (Focused && ShowFocusCues)
         {
             ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
@@ -1485,8 +1597,19 @@ internal sealed class ClipCordLogoControl : Control
 {
     private const string LogoResourceName = "ClipsToDiscord.Assets.AppIcon.png";
     private static readonly Lazy<Bitmap> LogoImage = new(LoadLogoImage);
+    private float _syntheticScale = 1f;
+    private int _logicalSide;
 
     internal static Size EmbeddedAssetSize => LogoImage.Value.Size;
+    internal int LogicalSide
+    {
+        get => _logicalSide;
+        set
+        {
+            _logicalSide = Math.Max(0, value);
+            if (_logicalSide > 0) Size = GetPreferredSize(Size.Empty);
+        }
+    }
 
     public ClipCordLogoControl()
     {
@@ -1497,6 +1620,39 @@ internal sealed class ClipCordLogoControl : Control
         BackColor = Color.Transparent;
         AccessibleName = "ClipCord logo";
         AccessibleRole = AccessibleRole.Graphic;
+    }
+
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        if (_logicalSide <= 0) return base.GetPreferredSize(proposedSize);
+        var dpiScale = Math.Max(1f, DeviceDpi / 96f);
+        var side = Math.Max(1, (int)Math.Round(_logicalSide * Math.Max(dpiScale, _syntheticScale)));
+        return new Size(side, side);
+    }
+
+    protected override void OnHandleCreated(EventArgs eventArgs)
+    {
+        base.OnHandleCreated(eventArgs);
+        if (_logicalSide > 0) Size = GetPreferredSize(Size.Empty);
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs eventArgs)
+    {
+        base.OnDpiChangedAfterParent(eventArgs);
+        _syntheticScale = 1f;
+        if (_logicalSide > 0) Size = GetPreferredSize(Size.Empty);
+    }
+
+    protected override void ScaleControl(SizeF factor, BoundsSpecified specified)
+    {
+        if (_logicalSide > 0 && factor.Height > 0f && float.IsFinite(factor.Height))
+        {
+            _syntheticScale = Math.Max(
+                _syntheticScale,
+                Math.Max(1f, DeviceDpi / 96f) * factor.Height);
+        }
+        base.ScaleControl(factor, specified);
+        if (_logicalSide > 0) Size = GetPreferredSize(Size.Empty);
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)

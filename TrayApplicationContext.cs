@@ -59,6 +59,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _updateTimer.Tick += UpdateTimerTick;
 
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
+        var homeItem = new ToolStripMenuItem("Open ClipCord…", null, (_, _) => ShowSettings(initialPage: SettingsPage.Home));
         var configureItem = new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings());
         var activityItem = new ToolStripMenuItem("Activity…", null, (_, _) => ShowSettings(initialPage: SettingsPage.Activity));
         var openFolderItem = new ToolStripMenuItem("Open clips folder", null, (_, _) => OpenClipsFolder());
@@ -73,6 +74,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(homeItem);
         menu.Items.Add(configureItem);
         menu.Items.Add(activityItem);
         menu.Items.Add(openFolderItem);
@@ -87,7 +89,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = menu,
             Visible = true
         };
-        _trayIcon.DoubleClick += (_, _) => ShowSettings();
+        _trayIcon.DoubleClick += (_, _) => ShowSettings(initialPage: SettingsPage.Home);
 
         if (_settings.IsValid)
         {
