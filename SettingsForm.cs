@@ -1155,7 +1155,7 @@ internal sealed class SettingsForm : Form
         var layout = CreateCardContent(4);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(232)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(208)));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(10)));
@@ -1234,7 +1234,7 @@ internal sealed class SettingsForm : Form
         var layout = CreateCardContent(4);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(232)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(208)));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(8)));
