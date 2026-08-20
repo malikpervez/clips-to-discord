@@ -13,9 +13,9 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 
 ## Current priority
 
-1. Finish and review the focused Local-only **Edit & upload** Gallery workflow without expanding ClipCord into a general-purpose editor.
-2. [#17 Opt-in beta channel](https://github.com/malikpervez/clips-to-discord/issues/17) — expose public prereleases only to users who explicitly choose them while stable remains the default.
-3. Build on the shipped Activity foundation with [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20) as separate changes.
+1. [#17 Opt-in beta channel](https://github.com/malikpervez/clips-to-discord/issues/17) — expose public prereleases only to users who explicitly choose them while stable remains the default.
+2. Build on the shipped Activity foundation with [#19 Windows notifications](https://github.com/malikpervez/clips-to-discord/issues/19) and [#20 retry/re-upload controls](https://github.com/malikpervez/clips-to-discord/issues/20) as separate changes.
+3. Begin the routing milestone with [#21 Multiple watched folders](https://github.com/malikpervez/clips-to-discord/issues/21) and [#22 encrypted webhook profiles](https://github.com/malikpervez/clips-to-discord/issues/22) as independent foundations.
 
 ## Recently shipped
 
@@ -30,6 +30,7 @@ This roadmap turns larger product ideas into independently assignable GitHub iss
 - ClipCord v1.10.0 refines Settings with a compact four-card dark layout, detailed branded section artwork, and a fully themed editable compression picker.
 - ClipCord v1.11.0 replaces the About pop-up with a branded status, privacy, safe-diagnostics, project, and credits page.
 - ClipCord v1.11.2 ships a focused Local-only **Edit & upload** Gallery workflow with trim/mute/relabel controls, safe post-confirm recovery, and a default move-to-recycle original cleanup.
+- ClipCord v1.14.0 adds in-app playback, a persistent dark application shell, truthful Home and Activity views, a searchable responsive Gallery with locally generated thumbnails, explicit Settings drafts, and the Figma-aligned About page.
 
 ## Planned milestones
 

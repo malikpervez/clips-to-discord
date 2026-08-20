@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -6,6 +7,7 @@ namespace ClipsToDiscord;
 
 internal enum SettingsPage
 {
+    Home,
     Settings,
     Activity,
     Gallery,
@@ -14,12 +16,20 @@ internal enum SettingsPage
 
 internal sealed class SettingsForm : Form
 {
-    internal static readonly Size SettingsDesignedClientSize = new(1080, 886);
-    internal static readonly Size ActivityDesignedClientSize = new(1043, 837);
-    internal static readonly Size GalleryDesignedClientSize = new(1100, 890);
-    internal static readonly Size AboutDesignedClientSize = new(1100, 890);
-    internal static readonly Size MinimumDesignedClientSize = new(900, 650);
-    internal const int FooterLogicalHeight = 90;
+    internal static readonly Size DesignedClientSize = new(1200, 760);
+    internal static readonly Size SettingsDesignedClientSize = DesignedClientSize;
+    internal static readonly Size ActivityDesignedClientSize = DesignedClientSize;
+    internal static readonly Size GalleryDesignedClientSize = DesignedClientSize;
+    internal static readonly Size AboutDesignedClientSize = DesignedClientSize;
+    internal static readonly Size HomeDesignedClientSize = DesignedClientSize;
+    internal static readonly Size MinimumDesignedClientSize = new(960, 620);
+    internal const int NavigationRailLogicalWidth = 216;
+    internal const int PageHeaderLogicalHeight = 64;
+    internal const int TitleBarButtonLogicalWidth = 46;
+    internal const int SaveBarLogicalHeight = 66;
+    // Kept as a compatibility name for older layout probes; the redesigned shell
+    // uses this height only for the conditional Settings save bar.
+    internal const int FooterLogicalHeight = SaveBarLogicalHeight;
     private static readonly Regex CompressionTargetPattern = new(
         @"^\s*(?<value>\d{1,3})\s*(?:MB)?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -72,6 +82,37 @@ internal sealed class SettingsForm : Form
         TextAlign = ContentAlignment.MiddleLeft,
         Font = ClipCordTheme.InterfaceFont(10.5f, FontStyle.Bold)
     };
+    private readonly Label _watcherStatusDetailLabel = new()
+    {
+        Dock = DockStyle.Fill,
+        AutoEllipsis = true,
+        ForeColor = ClipCordTheme.TextTertiary,
+        TextAlign = ContentAlignment.TopLeft,
+        Font = ClipCordTheme.InterfaceFont(8.25f)
+    };
+    private readonly Label _pageTitleLabel = new()
+    {
+        Name = "PageTitleLabel",
+        Dock = DockStyle.Fill,
+        AutoSize = false,
+        ForeColor = ClipCordTheme.TextPrimary,
+        Font = ClipCordTheme.DisplayFont(18f, FontStyle.Bold),
+        TextAlign = ContentAlignment.BottomLeft,
+        UseMnemonic = false,
+        Margin = Padding.Empty
+    };
+    private readonly Label _pageSubtitleLabel = new()
+    {
+        Name = "PageSubtitleLabel",
+        Dock = DockStyle.Fill,
+        AutoSize = false,
+        ForeColor = ClipCordTheme.TextTertiary,
+        Font = ClipCordTheme.InterfaceFont(9f),
+        TextAlign = ContentAlignment.TopLeft,
+        UseMnemonic = false,
+        Margin = Padding.Empty
+    };
+    private FlowLayoutPanel? _pageActionHost;
     private readonly TextBox _folderText = CreateTextBox("Clips folder");
     private readonly TextBox _webhookText = CreateTextBox("Discord webhook URL", usePasswordCharacter: true);
     private readonly TextBox _uploaderNameText = CreateTextBox("Uploader name");
@@ -104,6 +145,7 @@ internal sealed class SettingsForm : Form
     private readonly OutlineButton _modeToggleHotkeyAction = CreateSecondaryButton("Disable", 92);
     private readonly ToggleSwitch _startWithWindows = new()
     {
+        Name = "StartWithWindowsToggle",
         Text = "Start with Windows",
         BackColor = ClipCordTheme.SettingsCard,
         ForeColor = ClipCordTheme.ShellText
@@ -126,6 +168,16 @@ internal sealed class SettingsForm : Form
         TextAlign = ContentAlignment.MiddleLeft,
         Font = ClipCordTheme.InterfaceFont(9f)
     };
+    private readonly Label _dirtySummaryLabel = new()
+    {
+        Name = "DirtySettingsSummaryLabel",
+        Dock = DockStyle.Fill,
+        AutoEllipsis = true,
+        ForeColor = ClipCordTheme.TextSecondary,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Font = ClipCordTheme.InterfaceFont(9f),
+        UseMnemonic = false
+    };
     private readonly OutlineButton _browseButton = CreateSecondaryButton("Browse", 112);
     private readonly OutlineButton _steelSeriesSourceButton = CreateSecondaryButton("SteelSeries GG", 148);
     private readonly OutlineButton _nvidiaSourceButton = CreateSecondaryButton("NVIDIA", 108);
@@ -140,9 +192,9 @@ internal sealed class SettingsForm : Form
     };
     private readonly OutlineButton _cancelButton = new()
     {
-        Text = "Cancel",
+        Name = "DiscardSettingsButton",
+        Text = "Discard",
         Size = new Size(118, 46),
-        DialogResult = DialogResult.Cancel,
         SurfaceColor = Color.FromArgb(25, 35, 52),
         HoverColor = Color.FromArgb(35, 46, 65),
         OutlineColor = Color.FromArgb(65, 76, 96),
@@ -163,20 +215,31 @@ internal sealed class SettingsForm : Form
     private readonly ActivityHistoryStore _activityHistory;
     private readonly IManualClipEditService? _manualClipEditService;
     private readonly Func<string, bool>? _launchMediaFile;
+    private readonly IClipPlaybackPreparer? _playbackPreparer;
+    private readonly IGalleryThumbnailProvider? _thumbnailProvider;
     private readonly SettingsPage _openingPage;
     private readonly bool _ownsActivityHistory;
     private RoundedPanel? _settingsNavigationItem;
+    private RoundedPanel? _homeNavigationItem;
     private RoundedPanel? _activityNavigationItem;
     private RoundedPanel? _galleryNavigationItem;
     private RoundedPanel? _aboutNavigationItem;
     private BufferedTableLayoutPanel? _rootLayout;
-    private Control? _footer;
+    private Control? _saveBar;
+    private Control? _navigationRail;
+    private OutlineButton? _railDiscordRouteButton;
+    private OutlineButton? _railLocalRouteButton;
+    private HomeView? _homePage;
     private Control? _settingsPage;
+    private BrandedScrollHost? _settingsScrollHost;
     private ActivityView? _activityPage;
     private GalleryView? _galleryPage;
     private AboutView? _aboutPage;
     private bool _busy;
     private bool _galleryBusy;
+    private bool _dirtyTrackingReady;
+    private bool _settingsDirty;
+    private SettingsPage _currentPage;
     private ClipCaptureSource _captureSource = ClipCaptureSource.SteelSeriesGg;
     private string? _lastWatcherFullStatus;
     private Size _lastWindowRegionSize = Size.Empty;
@@ -192,7 +255,9 @@ internal sealed class SettingsForm : Form
         ActivityHistoryStore? activityHistory = null,
         SettingsPage initialPage = SettingsPage.Settings,
         IManualClipEditService? manualClipEditService = null,
-        Func<string, bool>? launchMediaFile = null)
+        Func<string, bool>? launchMediaFile = null,
+        IClipPlaybackPreparer? playbackPreparer = null,
+        IGalleryThumbnailProvider? thumbnailProvider = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -202,6 +267,8 @@ internal sealed class SettingsForm : Form
         _activityHistory = activityHistory ?? new ActivityHistoryStore(string.Empty);
         _manualClipEditService = manualClipEditService;
         _launchMediaFile = launchMediaFile;
+        _playbackPreparer = playbackPreparer;
+        _thumbnailProvider = thumbnailProvider;
         _ownsActivityHistory = activityHistory is null;
         _openingPage = initialPage;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
@@ -247,9 +314,16 @@ internal sealed class SettingsForm : Form
         _checkUpdatesButton.Name = "SettingsCheckUpdatesButton";
         _checkUpdatesButton.Enabled = _checkForUpdatesAsync is not null;
         _saveButton.Click += SaveClicked;
+        _cancelButton.Click += (_, _) => ResetSettingsDraft();
         _statusLabel.Visible = false;
         _statusLabel.TextChanged += (_, _) =>
+        {
             _statusLabel.Visible = !string.IsNullOrWhiteSpace(_statusLabel.Text);
+            if (_statusLabel.Visible && !IsDisposed && !Disposing)
+            {
+                _pageSubtitleLabel.Text = _statusLabel.Text;
+            }
+        };
         _minimizeButton.Click += (_, _) => WindowState = FormWindowState.Minimized;
         _maximizeButton.Click += (_, _) => ToggleMaximize();
         _closeButton.Click += (_, _) => Close();
@@ -262,12 +336,16 @@ internal sealed class SettingsForm : Form
             _maximizeButton.AccessibleName = WindowState == FormWindowState.Maximized ? "Restore" : "Maximize";
             _maximizeButton.Invalidate();
             UpdateWindowRegion();
+            if (_currentPage == SettingsPage.Gallery) UpdatePageHeaderAction(_currentPage);
         };
 
         Controls.Add(BuildRootLayout());
-        AcceptButton = _saveButton;
-        CancelButton = _cancelButton;
+        AcceptButton = null;
+        CancelButton = null;
         ShowPage(initialPage);
+        WireDirtyTracking();
+        _dirtyTrackingReady = true;
+        RecomputeSettingsDirty();
 
         _watcherStatusTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _watcherStatusTimer.Tick += (_, _) => UpdateWatcherStatus();
@@ -281,22 +359,25 @@ internal sealed class SettingsForm : Form
         {
             Name = "RootLayout",
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 4,
+            ColumnCount = 2,
+            RowCount = 3,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = ClipCordTheme.Shell
         };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(NavigationRailLogicalWidth)));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(PageHeaderLogicalHeight)));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, FooterLogicalHeight));
-        root.Controls.Add(BuildHeader(), 0, 0);
-        root.Controls.Add(BuildNavigation(), 0, 1);
-        root.Controls.Add(BuildBody(), 0, 2);
-        _footer = BuildFooter();
-        root.Controls.Add(_footer, 0, 3);
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+
+        _navigationRail = BuildNavigationRail();
+        root.Controls.Add(_navigationRail, 0, 0);
+        root.SetRowSpan(_navigationRail, 3);
+        root.Controls.Add(BuildHeader(), 1, 0);
+        root.Controls.Add(BuildBody(), 1, 1);
+        _saveBar = BuildSaveBar();
+        root.Controls.Add(_saveBar, 1, 2);
         _rootLayout = root;
         return root;
     }
@@ -307,100 +388,36 @@ internal sealed class SettingsForm : Form
         {
             Name = "CustomTitleBar",
             Dock = DockStyle.Fill,
-            ColumnCount = 5,
-            RowCount = 1,
-            Margin = Padding.Empty,
-            Padding = new Padding(24, 0, 0, 0),
-            BackColor = ClipCordTheme.Header
-        };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
-        header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var logo = new ClipCordLogoControl
-        {
-            Name = "HeaderLogo",
-            Size = new Size(84, 84),
-            Anchor = AnchorStyles.None,
-            Margin = new Padding(0, 12, 8, 12)
-        };
-        var version = typeof(SettingsForm).Assembly.GetName().Version ?? new Version(0, 0, 0);
-        var identity = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Anchor = AnchorStyles.Left,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = Padding.Empty,
-            Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Header
-        };
-        var productName = new Label
-        {
-            Name = "ProductNameLabel",
-            Text = "ClipCord",
-            AutoSize = true,
-            ForeColor = ClipCordTheme.ShellText,
-            Font = ClipCordTheme.DisplayFont(25f, FontStyle.Bold),
-            Margin = Padding.Empty
-        };
-        var versionLabel = new Label
-        {
-            Text = $"{version.Major}.{version.Minor}.{version.Build}",
-            AutoSize = true,
-            ForeColor = ClipCordTheme.ShellMutedText,
-            Font = ClipCordTheme.InterfaceFont(9.5f),
-            Margin = new Padding(14, 14, 0, 0)
-        };
-        identity.Controls.Add(productName);
-        identity.Controls.Add(versionLabel);
-
-        var statusPill = new RoundedPanel
-        {
-            Name = "WatcherStatusPill",
-            Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(29, 38, 58),
-            BorderColor = Color.FromArgb(61, 72, 96),
-            CornerRadius = 20,
-            Margin = new Padding(0, 27, 10, 33),
-            Padding = new Padding(16, 0, 12, 0)
-        };
-        var statusLayout = new BufferedTableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
             ColumnCount = 3,
             RowCount = 1,
-            BackColor = Color.Transparent,
             Margin = Padding.Empty,
-            Padding = Padding.Empty
+            Padding = new Padding(ScaleLogical(28), 0, 0, 0),
+            BackColor = ClipCordTheme.Header
         };
-        statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
-        statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
-        statusLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        statusLayout.Controls.Add(new Label
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // Sum the independently rounded button widths. At fractional DPI scales,
+        // scaling their 138px aggregate can be a few pixels narrower than scaling
+        // each 46px button, which clips the Close action at the right edge.
+        header.ColumnStyles.Add(new ColumnStyle(
+            SizeType.Absolute,
+            3 * ScaleLogical(TitleBarButtonLogicalWidth)));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var pageIdentity = new BufferedTableLayoutPanel
         {
-            Text = "●",
             Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.MiddleLeft,
-            ForeColor = ClipCordTheme.Violet,
-            Font = ClipCordTheme.InterfaceFont(12f, FontStyle.Bold)
-        }, 0, 0);
-        statusLayout.Controls.Add(_watcherStatusLabel, 1, 0);
-        statusLayout.Controls.Add(new BrandGlyphControl
-        {
-            Glyph = BrandGlyph.Activity,
-            GlyphColor = ClipCordTheme.Violet,
-            StrokeWidth = 1.7f,
-            Dock = DockStyle.Fill,
-            Margin = new Padding(2, 12, 2, 12),
-            AccessibleName = "Watcher activity"
-        }, 2, 0);
-        statusPill.Controls.Add(statusLayout);
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = new Padding(0, ScaleLogical(7), 0, ScaleLogical(5)),
+            BackColor = ClipCordTheme.Header
+        };
+        pageIdentity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        pageIdentity.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+        pageIdentity.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+        pageIdentity.Controls.Add(_pageTitleLabel, 0, 0);
+        pageIdentity.Controls.Add(_pageSubtitleLabel, 0, 1);
 
         var windowActions = new FlowLayoutPanel
         {
@@ -414,19 +431,31 @@ internal sealed class SettingsForm : Form
         windowActions.Controls.Add(_minimizeButton);
         windowActions.Controls.Add(_maximizeButton);
         windowActions.Controls.Add(_closeButton);
+        foreach (var action in new[] { _minimizeButton, _maximizeButton, _closeButton })
+        {
+            action.Size = new Size(ScaleLogical(TitleBarButtonLogicalWidth), ScaleLogical(34));
+        }
+
+        _pageActionHost = new FlowLayoutPanel
+        {
+            Name = "PageActionHost",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Anchor = AnchorStyles.Right,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Margin = new Padding(ScaleLogical(10), 0, ScaleLogical(10), 0),
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.Header
+        };
 
         EnableWindowDrag(header);
-        EnableWindowDrag(logo);
-        EnableWindowDrag(identity);
-        EnableWindowDrag(productName);
-        EnableWindowDrag(versionLabel);
-        EnableWindowDrag(statusPill);
-        EnableWindowDrag(statusLayout);
-        foreach (Control statusChild in statusLayout.Controls) EnableWindowDrag(statusChild);
-        header.Controls.Add(logo, 0, 0);
-        header.Controls.Add(identity, 1, 0);
-        header.Controls.Add(statusPill, 3, 0);
-        header.Controls.Add(windowActions, 4, 0);
+        EnableWindowDrag(pageIdentity);
+        EnableWindowDrag(_pageTitleLabel);
+        EnableWindowDrag(_pageSubtitleLabel);
+        header.Controls.Add(pageIdentity, 0, 0);
+        header.Controls.Add(_pageActionHost, 1, 0);
+        header.Controls.Add(windowActions, 2, 0);
         return header;
     }
 
@@ -439,17 +468,55 @@ internal sealed class SettingsForm : Form
             Margin = Padding.Empty,
             BackColor = ClipCordTheme.Shell
         };
-        _settingsPage = BuildCards();
+        _homePage = new HomeView(
+            _appliedSettings,
+            _activityHistory,
+            _watcherStatusProvider,
+            showPageHeader: false);
+        _homePage.NavigateToActivityRequested += (_, _) => ShowPage(SettingsPage.Activity);
+        _homePage.OpenClipsFolderRequested += (_, _) => OpenHomeFolder(_folderText.Text);
+        _homePage.OpenUploadedFolderRequested += (_, _) =>
+            OpenHomeFolder(UploadedFolder.FindExistingUploaded(_folderText.Text));
+        _homePage.OpenLocalOnlyFolderRequested += (_, _) =>
+            OpenHomeFolder(UploadedFolder.FindExistingLocalOnly(_folderText.Text));
+        _homePage.OpenLogsRequested += (_, _) => OpenHomeLogs();
+        _homePage.CheckUpdatesRequested += CheckUpdatesClicked;
+        _settingsScrollHost = new BrandedScrollHost
+        {
+            Name = "SettingsScrollHost",
+            AccessibleName = "ClipCord settings",
+            AccessibleRole = AccessibleRole.Pane,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            BackColor = ClipCordTheme.Shell,
+            Content = BuildCards()
+        };
+        _settingsPage = _settingsScrollHost;
         _activityPage = new ActivityView(
             _activityHistory,
             _folderText.Text,
             allowLocalOnlyEditing: _manualClipEditService is not null);
+        _activityPage.SetEmbeddedHeaderVisible(false);
         _activityPage.EditClipRequested += ActivityEditClipRequested;
-        _galleryPage = new GalleryView(_folderText.Text, _manualClipEditService, _launchMediaFile);
+        _galleryPage = new GalleryView(
+            _folderText.Text,
+            _manualClipEditService,
+            _launchMediaFile,
+            _playbackPreparer,
+            _thumbnailProvider);
+        _galleryPage.SetEmbeddedHeaderVisible(false);
+        _galleryPage.HeaderChanged += (title, subtitle) =>
+        {
+            if (_currentPage != SettingsPage.Gallery || IsDisposed || Disposing) return;
+            _pageTitleLabel.Text = title;
+            _pageSubtitleLabel.Text = subtitle;
+        };
         _galleryPage.OperationBusyChanged += GalleryOperationBusyChanged;
         _aboutPage = new AboutView(_appliedSettings, _watcherStatusProvider);
         _aboutPage.CheckUpdatesRequested += CheckUpdatesClicked;
         _aboutPage.SetBusy(false, _checkForUpdatesAsync is not null);
+        _homePage.SetUpdateBusy(false, _checkForUpdatesAsync is not null);
+        pageHost.Controls.Add(_homePage);
         pageHost.Controls.Add(_settingsPage);
         pageHost.Controls.Add(_activityPage);
         pageHost.Controls.Add(_galleryPage);
@@ -457,68 +524,308 @@ internal sealed class SettingsForm : Form
         return pageHost;
     }
 
-    private Control BuildNavigation()
+    private void OpenHomeFolder(string? path)
     {
-        var navigation = new BufferedTableLayoutPanel
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) return;
+        try
         {
-            Name = "TopNavigation",
+            Process.Start(ActivityView.CreateOpenFolderStartInfo(path));
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not open a Home shortcut folder.", exception);
+            MessageBox.Show(
+                this,
+                "Windows could not open that folder.",
+                "Could not open folder",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    private void OpenHomeLogs()
+    {
+        try
+        {
+            Directory.CreateDirectory(SettingsStore.DataDirectory);
+            var logPath = Path.Combine(SettingsStore.DataDirectory, "app.log");
+            Process.Start(File.Exists(logPath)
+                ? ActivityView.CreateSelectFileStartInfo(logPath)
+                : ActivityView.CreateOpenFolderStartInfo(SettingsStore.DataDirectory));
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not open logs from Home.", exception);
+            MessageBox.Show(
+                this,
+                "Windows could not open ClipCord's logs.",
+                "Could not open logs",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    private Control BuildNavigationRail()
+    {
+        var rail = new BufferedTableLayoutPanel
+        {
+            Name = "NavigationRail",
             Dock = DockStyle.Fill,
-            ColumnCount = 4,
+            ColumnCount = 1,
+            RowCount = 3,
+            Margin = Padding.Empty,
+            Padding = new Padding(ScaleLogical(14), 0, ScaleLogical(14), ScaleLogical(14)),
+            BackColor = ClipCordTheme.Sidebar,
+            AccessibleName = "ClipCord navigation",
+            AccessibleRole = AccessibleRole.MenuBar
+        };
+        rail.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(68)));
+        rail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        rail.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(164)));
+
+        var brand = new BufferedTableLayoutPanel
+        {
+            Name = "RailBrand",
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
             RowCount = 1,
             Margin = Padding.Empty,
-            Padding = new Padding(20, 7, 20, 7),
+            Padding = Padding.Empty,
             BackColor = ClipCordTheme.Sidebar
         };
-        navigation.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        for (var index = 0; index < navigation.ColumnCount; index++)
+        brand.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(38)));
+        brand.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        brand.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var logo = new ClipCordLogoControl
         {
-            navigation.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            Name = "HeaderLogo",
+            Size = new Size(ScaleLogical(28), ScaleLogical(28)),
+            Anchor = AnchorStyles.Left,
+            Margin = Padding.Empty
+        };
+        var version = typeof(SettingsForm).Assembly.GetName().Version ?? new Version(0, 0, 0);
+        var brandCopy = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = new Padding(0, ScaleLogical(17), 0, ScaleLogical(10)),
+            BackColor = ClipCordTheme.Sidebar
+        };
+        brandCopy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        brandCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        brandCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        brandCopy.Controls.Add(new Label
+        {
+            Name = "ProductNameLabel",
+            Text = "ClipCord",
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Font = ClipCordTheme.DisplayFont(12f, FontStyle.Bold),
+            Margin = Padding.Empty
+        }, 0, 0);
+        brandCopy.Controls.Add(new Label
+        {
+            Name = "ProductVersionLabel",
+            Text = $"{version.Major}.{version.Minor}.{version.Build}",
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(7.75f),
+            Margin = Padding.Empty
+        }, 0, 1);
+        brand.Controls.Add(logo, 0, 0);
+        brand.Controls.Add(brandCopy, 1, 0);
+        EnableWindowDrag(brand);
+        EnableWindowDrag(logo);
+        EnableWindowDrag(brandCopy);
+        foreach (Control child in brandCopy.Controls) EnableWindowDrag(child);
+
+        var navigation = new BufferedTableLayoutPanel
+        {
+            Name = "SideNavigation",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 5,
+            Margin = Padding.Empty,
+            Padding = new Padding(0, 0, 0, 0),
+            BackColor = ClipCordTheme.Sidebar
+        };
+        navigation.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var index = 0; index < navigation.RowCount; index++)
+        {
+            navigation.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(39)));
         }
 
-        var settingsItem = CreateNavigationItem("Settings", BrandGlyph.Settings, selected: true);
-        settingsItem.Name = "SettingsNavItem";
-        settingsItem.AccessibleName = "Settings";
-        settingsItem.AccessibleDescription = "Current page";
-        settingsItem.AccessibleRole = AccessibleRole.MenuItem;
-        settingsItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.Settings));
-        WireClick(settingsItem, () => ShowPage(SettingsPage.Settings));
-        _settingsNavigationItem = settingsItem;
+        _homeNavigationItem = CreateNavigationItem("Home", BrandGlyph.Home, selected: false);
+        ConfigureNavigationItem(_homeNavigationItem, "HomeNavItem", "Home", "Current ClipCord status", SettingsPage.Home);
+        _settingsNavigationItem = CreateNavigationItem("Settings", BrandGlyph.Settings, selected: true);
+        ConfigureNavigationItem(_settingsNavigationItem, "SettingsNavItem", "Settings", "ClipCord settings", SettingsPage.Settings);
+        _activityNavigationItem = CreateNavigationItem("Activity", BrandGlyph.Activity, selected: false);
+        ConfigureNavigationItem(_activityNavigationItem, "ActivityNavItem", "Activity", "Recent clip activity", SettingsPage.Activity);
+        _galleryNavigationItem = CreateNavigationItem("Gallery", BrandGlyph.Gallery, selected: false);
+        ConfigureNavigationItem(_galleryNavigationItem, "GalleryNavItem", "Gallery", "Browse uploaded and local-only clips", SettingsPage.Gallery);
+        _aboutNavigationItem = CreateNavigationItem("About", BrandGlyph.About, selected: false);
+        ConfigureNavigationItem(_aboutNavigationItem, "AboutNavItem", "About ClipCord", "Privacy, diagnostics, and project credits", SettingsPage.About);
+        navigation.Controls.Add(_homeNavigationItem, 0, 0);
+        navigation.Controls.Add(_settingsNavigationItem, 0, 1);
+        navigation.Controls.Add(_activityNavigationItem, 0, 2);
+        navigation.Controls.Add(_galleryNavigationItem, 0, 3);
+        navigation.Controls.Add(_aboutNavigationItem, 0, 4);
 
-        var activityItem = CreateNavigationItem(
-            "Activity",
-            BrandGlyph.Activity,
-            selected: false);
-        activityItem.Name = "ActivityNavItem";
-        activityItem.AccessibleName = "Activity";
-        activityItem.AccessibleDescription = "Recent clip activity";
-        activityItem.AccessibleRole = AccessibleRole.MenuItem;
-        activityItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.Activity));
-        WireClick(activityItem, () => ShowPage(SettingsPage.Activity));
-        _activityNavigationItem = activityItem;
+        var modeCard = BuildRailStatusCard();
+        rail.Controls.Add(brand, 0, 0);
+        rail.Controls.Add(navigation, 0, 1);
+        rail.Controls.Add(modeCard, 0, 2);
+        return rail;
+    }
 
-        var galleryItem = CreateNavigationItem("Gallery", BrandGlyph.Gallery, selected: false);
-        galleryItem.Name = "GalleryNavItem";
-        galleryItem.AccessibleName = "Gallery";
-        galleryItem.AccessibleDescription = "Browse uploaded and local-only clips";
-        galleryItem.AccessibleRole = AccessibleRole.MenuItem;
-        galleryItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.Gallery));
-        WireClick(galleryItem, () => ShowPage(SettingsPage.Gallery));
-        _galleryNavigationItem = galleryItem;
+    private void ConfigureNavigationItem(
+        RoundedPanel item,
+        string name,
+        string accessibleName,
+        string accessibleDescription,
+        SettingsPage page)
+    {
+        item.Name = name;
+        item.AccessibleName = accessibleName;
+        item.AccessibleDescription = accessibleDescription;
+        item.AccessibleRole = AccessibleRole.MenuItem;
+        item.EnableKeyboardAccess(() => ShowPage(page));
+        WireClick(item, () => ShowPage(page));
+    }
 
-        var aboutItem = CreateNavigationItem("About", BrandGlyph.About, selected: false);
-        aboutItem.Name = "AboutNavItem";
-        aboutItem.AccessibleName = "About ClipCord";
-        aboutItem.AccessibleDescription = "About ClipCord, privacy, diagnostics, and project credits";
-        aboutItem.AccessibleRole = AccessibleRole.MenuItem;
-        aboutItem.EnableKeyboardAccess(() => ShowPage(SettingsPage.About));
-        WireClick(aboutItem, () => ShowPage(SettingsPage.About));
-        _aboutNavigationItem = aboutItem;
+    private Control BuildRailStatusCard()
+    {
+        var card = new RoundedPanel
+        {
+            Name = "RailStatusCard",
+            Dock = DockStyle.Fill,
+            BackColor = ClipCordTheme.SurfaceSunken,
+            BorderColor = ClipCordTheme.BorderDefault,
+            CornerRadius = 12,
+            Padding = new Padding(ScaleLogical(10), ScaleLogical(9), ScaleLogical(10), ScaleLogical(8)),
+            Margin = Padding.Empty,
+            AccessibleName = "Routing and watcher status"
+        };
+        var layout = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 6,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceSunken
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(34)));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(1)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(24)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.Controls.Add(new Label
+        {
+            Text = "NEW CLIPS GO TO",
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(7.25f, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 5)
+        }, 0, 0);
 
-        navigation.Controls.Add(settingsItem, 0, 0);
-        navigation.Controls.Add(activityItem, 1, 0);
-        navigation.Controls.Add(galleryItem, 2, 0);
-        navigation.Controls.Add(aboutItem, 3, 0);
-        return navigation;
+        var routes = new BufferedTableLayoutPanel
+        {
+            Name = "RailRouteSelector",
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = new Padding(2),
+            BackColor = ClipCordTheme.SurfaceBase
+        };
+        routes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        routes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        routes.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _railDiscordRouteButton = CreateRailRouteButton("● Discord", "Route new clips to Discord");
+        _railLocalRouteButton = CreateRailRouteButton("● Local", "Keep new clips local only");
+        _railDiscordRouteButton.Click += (_, _) => StageRailRoute(uploadToDiscord: true);
+        _railLocalRouteButton.Click += (_, _) => StageRailRoute(uploadToDiscord: false);
+        routes.Controls.Add(_railDiscordRouteButton, 0, 0);
+        routes.Controls.Add(_railLocalRouteButton, 1, 0);
+        layout.Controls.Add(routes, 0, 1);
+
+        var hotkey = new Label
+        {
+            Name = "RailHotkeyHint",
+            Text = $"{AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text)}  to swap",
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8f),
+            Margin = new Padding(0, 6, 0, 5)
+        };
+        layout.Controls.Add(hotkey, 0, 2);
+        layout.Controls.Add(new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = ClipCordTheme.BorderDefault,
+            Margin = Padding.Empty
+        }, 0, 3);
+
+        var watcherHeadline = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0, 6, 0, 0),
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceSunken
+        };
+        watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(16)));
+        watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        watcherHeadline.Controls.Add(new Label
+        {
+            Text = "●",
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(49, 196, 130),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = ClipCordTheme.InterfaceFont(9f),
+            Margin = Padding.Empty
+        }, 0, 0);
+        _watcherStatusLabel.Font = ClipCordTheme.InterfaceFont(9f, FontStyle.Bold);
+        _watcherStatusLabel.ForeColor = ClipCordTheme.TextPrimary;
+        watcherHeadline.Controls.Add(_watcherStatusLabel, 1, 0);
+        layout.Controls.Add(watcherHeadline, 0, 4);
+        layout.Controls.Add(_watcherStatusDetailLabel, 0, 5);
+        card.Controls.Add(layout);
+        UpdateRailRouteSelection();
+        return card;
+    }
+
+    private static OutlineButton CreateRailRouteButton(string text, string accessibleName) => new()
+    {
+        Text = text,
+        Dock = DockStyle.Fill,
+        Margin = Padding.Empty,
+        AccessibleName = accessibleName,
+        AccessibleRole = AccessibleRole.RadioButton,
+        SurfaceColor = ClipCordTheme.SurfaceBase,
+        HoverColor = ClipCordTheme.SurfaceControl,
+        OutlineColor = Color.Transparent,
+        ForeColor = ClipCordTheme.TextSecondary,
+        Font = ClipCordTheme.InterfaceFont(8.25f)
+    };
+
+    private void StageRailRoute(bool uploadToDiscord)
+    {
+        if (_busy || _galleryBusy || _uploadToDiscord.Checked == uploadToDiscord) return;
+        _uploadToDiscord.Checked = uploadToDiscord;
+        // Routing a watcher is a durable lifecycle change. Bring the user to the
+        // staged Settings draft rather than silently restarting the controller from
+        // a decorative shell control.
+        ShowPage(SettingsPage.Settings);
     }
 
     internal void ShowPage(SettingsPage page)
@@ -526,85 +833,132 @@ internal sealed class SettingsForm : Form
         if (_settingsPage is null || _activityPage is null || _galleryPage is null || _aboutPage is null) return;
         if (_galleryBusy && page != SettingsPage.Gallery) return;
 
+        _currentPage = page;
+        var showHome = page == SettingsPage.Home;
         var showSettings = page == SettingsPage.Settings;
         var showActivity = page == SettingsPage.Activity;
         var showGallery = page == SettingsPage.Gallery;
         var showAbout = page == SettingsPage.About;
+        if (_homePage is not null) _homePage.Visible = showHome;
         _settingsPage.Visible = showSettings;
         _activityPage.Visible = showActivity;
         _galleryPage.Visible = showGallery;
         _aboutPage.Visible = showAbout;
-        if (showSettings)
+        if (showHome)
         {
+            _galleryPage.Deactivate();
+            _homePage?.BringToFront();
+            _homePage?.ActivateView();
+            _homePage?.RefreshViewport();
+        }
+        else if (showSettings)
+        {
+            _homePage?.DeactivateView();
             _galleryPage.Deactivate();
             _settingsPage.BringToFront();
             _settingsPage.PerformLayout();
+            _settingsScrollHost?.RefreshContentLayout();
         }
         else if (showActivity)
         {
+            _homePage?.DeactivateView();
             _galleryPage.Deactivate();
             _activityPage.BringToFront();
             _activityPage.RefreshViewport();
         }
         else if (showGallery)
         {
+            _homePage?.DeactivateView();
             _galleryPage.BringToFront();
             _galleryPage.Activate(_folderText.Text);
         }
         else
         {
+            _homePage?.DeactivateView();
             _galleryPage.Deactivate();
             _aboutPage.BringToFront();
             _aboutPage.RefreshStatus();
             _aboutPage.RefreshViewport();
         }
 
+        UpdateNavigationSelection(_homeNavigationItem, showHome);
         UpdateNavigationSelection(_settingsNavigationItem, showSettings);
         UpdateNavigationSelection(_activityNavigationItem, showActivity);
         UpdateNavigationSelection(_galleryNavigationItem, showGallery);
         UpdateNavigationSelection(_aboutNavigationItem, showAbout);
-        _saveButton.Visible = showSettings;
-        _cancelButton.Text = showSettings ? "Cancel" : "Close";
-        AcceptButton = showSettings ? _saveButton : null;
-        if (_rootLayout is not null && _rootLayout.RowStyles.Count > 3)
-        {
-            _rootLayout.RowStyles[3].SizeType = SizeType.Absolute;
-            _rootLayout.RowStyles[3].Height = showAbout
-                ? 0
-                : FooterLogicalHeight;
-        }
-        if (_footer is not null) _footer.Visible = !showAbout;
+        UpdatePageHeaderAction(page);
+        UpdateSaveBarVisibility();
         Text = page switch
         {
+            SettingsPage.Home => "ClipCord — Home",
             SettingsPage.Activity => "ClipCord — Activity",
             SettingsPage.Gallery => "ClipCord — Gallery",
             SettingsPage.About => "ClipCord — About",
             _ => "ClipCord — Settings"
         };
-        if (showActivity)
+        (_pageTitleLabel.Text, _pageSubtitleLabel.Text) = page switch
         {
-            _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
-            _statusLabel.Text = "Recent activity is stored locally and never includes your webhook.";
-            _privacySummaryLabel.Text = "Closing this window does not stop clip processing.";
-        }
-        else if (showGallery)
+            SettingsPage.Home => ("Home", "Everything ClipCord is doing right now"),
+            SettingsPage.Settings => ("Settings", "Where clips come from, and where they go"),
+            SettingsPage.Activity => ("Activity", "Recent clip activity stored on this PC"),
+            SettingsPage.Gallery => ("Gallery", "Uploaded and local-only archives, organised by game"),
+            SettingsPage.About => ("About", "What ClipCord is, what it keeps, and who made it"),
+            _ => ("ClipCord", string.Empty)
+        };
+    }
+
+    private void UpdatePageHeaderAction(SettingsPage page)
+    {
+        if (_pageActionHost is null || _aboutPage is null) return;
+        var homeAction = _homePage?.HeaderActionButton;
+        var aboutAction = _aboutPage.UpdateActionButton;
+        var galleryAction = _galleryPage?.HeaderActions;
+        var useSharedGalleryHeader = page == SettingsPage.Gallery &&
+                                     ClientSize.Width >= ScaleLogical(1050);
+        var action = page switch
         {
-            _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
-            _statusLabel.Text = "Gallery reads uploaded and local-only archives only while this page is open.";
-            _privacySummaryLabel.Text = "Playing or browsing a local-only clip never uploads it.";
-        }
-        else if (!showAbout)
+            SettingsPage.Home => homeAction,
+            SettingsPage.About => aboutAction,
+            SettingsPage.Gallery when useSharedGalleryHeader => galleryAction,
+            _ => null
+        };
+        foreach (var candidate in new[] { homeAction, aboutAction, galleryAction })
         {
-            _statusLabel.Text = string.Empty;
-            UpdateUploadModeText();
+            if (candidate is not null && ReferenceEquals(candidate.Parent, _pageActionHost) &&
+                !ReferenceEquals(candidate, action))
+            {
+                _pageActionHost.Controls.Remove(candidate);
+            }
         }
+        if (!ReferenceEquals(action, galleryAction)) _galleryPage?.RestoreEmbeddedHeaderActions();
+        if (action is null)
+        {
+            _pageActionHost.Visible = false;
+            return;
+        }
+
+        action.Dock = DockStyle.None;
+        if (ReferenceEquals(action, galleryAction))
+        {
+            action.AutoSize = true;
+        }
+        else
+        {
+            action.AutoSize = false;
+            var logicalWidth = page == SettingsPage.Home ? 158 : 164;
+            action.Size = new Size(ScaleLogical(logicalWidth), ScaleLogical(34));
+        }
+        action.Margin = Padding.Empty;
+        if (!ReferenceEquals(action.Parent, _pageActionHost)) _pageActionHost.Controls.Add(action);
+        _pageActionHost.Visible = true;
+        action.BringToFront();
     }
 
     private static void UpdateNavigationSelection(RoundedPanel? item, bool selected)
     {
         if (item is null) return;
         item.BackColor = selected ? ClipCordTheme.VioletMuted : ClipCordTheme.Sidebar;
-        item.BorderColor = selected ? Color.FromArgb(73, 62, 107) : Color.Transparent;
+        item.BorderColor = Color.Transparent;
         item.AccessibleDescription = selected ? "Current page" : string.Empty;
         foreach (var control in EnumerateControls(item))
         {
@@ -620,7 +974,7 @@ internal sealed class SettingsForm : Form
                 case Label label when label.Name == "NavigationLabel":
                     label.ForeColor = ClipCordTheme.ShellText;
                     label.Font = ClipCordTheme.InterfaceFont(
-                        11f,
+                        10f,
                         selected ? FontStyle.Bold : FontStyle.Regular);
                     break;
             }
@@ -628,7 +982,7 @@ internal sealed class SettingsForm : Form
         item.Invalidate(true);
     }
 
-    private static RoundedPanel CreateNavigationItem(
+    private RoundedPanel CreateNavigationItem(
         string text,
         BrandGlyph glyph,
         bool selected,
@@ -639,34 +993,33 @@ internal sealed class SettingsForm : Form
         {
             Dock = DockStyle.Fill,
             BackColor = selected ? ClipCordTheme.VioletMuted : ClipCordTheme.Sidebar,
-            BorderColor = selected ? Color.FromArgb(73, 62, 107) : Color.Transparent,
-            CornerRadius = 10,
-            Margin = new Padding(4, 0, 4, 0),
+            BorderColor = Color.Transparent,
+            CornerRadius = ScaleLogical(8),
+            Margin = new Padding(0, 0, 0, ScaleLogical(3)),
             Padding = Padding.Empty
         };
         var layout = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 2,
+            ColumnCount = 3,
+            RowCount = 1,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = Color.Transparent
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(3)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(38)));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 4));
         var selectionStrip = new GradientStrip
         {
             Name = "NavigationSelectionStrip",
             Dock = DockStyle.Fill,
-            Margin = Padding.Empty,
+            Margin = new Padding(0, 8, 0, 8),
             Visible = selected,
-            Horizontal = true
+            Horizontal = false
         };
-        layout.Controls.Add(selectionStrip, 0, 1);
-        layout.SetColumnSpan(selectionStrip, 2);
+        layout.Controls.Add(selectionStrip, 0, 0);
 
         var icon = new BrandGlyphControl
         {
@@ -677,7 +1030,14 @@ internal sealed class SettingsForm : Form
                 : selected ? ClipCordTheme.Violet : ClipCordTheme.ShellMutedText,
             StrokeWidth = 1.9f,
             Dock = DockStyle.Fill,
-            Margin = new Padding(12, 8, 5, 8),
+            // The Figma rail uses a compact 16px glyph inside the existing 38px
+            // identity column. Keep the column stable so every label remains
+            // aligned, and inset the exact asset symmetrically at every DPI.
+            Margin = new Padding(
+                ScaleLogical(11),
+                ScaleLogical(10),
+                ScaleLogical(11),
+                ScaleLogical(10)),
             Enabled = !unavailable
         };
         var label = new Label
@@ -687,13 +1047,13 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             ForeColor = unavailable ? Color.FromArgb(111, 121, 141) : ClipCordTheme.ShellText,
             TextAlign = ContentAlignment.MiddleLeft,
-            Font = ClipCordTheme.InterfaceFont(11f, selected ? FontStyle.Bold : FontStyle.Regular),
+            Font = ClipCordTheme.InterfaceFont(10f, selected ? FontStyle.Bold : FontStyle.Regular),
             Enabled = !unavailable,
-            Margin = new Padding(0, 0, 10, 0),
+            Margin = new Padding(0, 0, 8, 0),
             BackColor = Color.Transparent
         };
-        layout.Controls.Add(icon, 0, 0);
-        layout.Controls.Add(label, 1, 0);
+        layout.Controls.Add(icon, 1, 0);
+        layout.Controls.Add(label, 2, 0);
         if (!string.IsNullOrWhiteSpace(badgeText))
         {
             surface.AccessibleDescription = badgeText;
@@ -708,11 +1068,11 @@ internal sealed class SettingsForm : Form
         {
             Name = "SettingsCards",
             Dock = DockStyle.Fill,
-            AutoScroll = true,
+            AutoScroll = false,
             ColumnCount = 2,
             RowCount = 4,
             Margin = Padding.Empty,
-            Padding = new Padding(26, 5, 26, 5),
+            Padding = ScalePadding(new Padding(28, 4, 28, 10)),
             BackColor = ClipCordTheme.Shell
         };
         cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -721,13 +1081,73 @@ internal sealed class SettingsForm : Form
         cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         cards.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        cards.Controls.Add(BuildClipSourceCard(), 0, 0);
+        cards.Controls.Add(CreateSettingsSection(
+            "CLIP SOURCE", BrandGlyph.Folder, BuildClipSourceCard(), new Padding(0, 0, 0, 10)), 0, 0);
         cards.SetColumnSpan(cards.GetControlFromPosition(0, 0)!, 2);
-        cards.Controls.Add(BuildDiscordCard(), 0, 1);
+        cards.Controls.Add(CreateSettingsSection(
+            "DISCORD DESTINATION", BrandGlyph.Upload, BuildDiscordCard(), new Padding(0, 0, 0, 10)), 0, 1);
         cards.SetColumnSpan(cards.GetControlFromPosition(0, 1)!, 2);
-        cards.Controls.Add(BuildUploadBehaviorCard(), 0, 2);
-        cards.Controls.Add(BuildAppPreferencesCard(), 1, 2);
+        cards.Controls.Add(CreateSettingsSection(
+            "ROUTING & QUALITY", BrandGlyph.Film, BuildUploadBehaviorCard(), new Padding(0, 0, 7, 0)), 0, 2);
+        cards.Controls.Add(CreateSettingsSection(
+            "APPLICATION", BrandGlyph.Settings, BuildAppPreferencesCard(), new Padding(7, 0, 0, 0)), 1, 2);
         return cards;
+    }
+
+    private Control CreateSettingsSection(
+        string title,
+        BrandGlyph glyph,
+        Control card,
+        Padding margin)
+    {
+        var section = new BufferedTableLayoutPanel
+        {
+            Name = title.Replace(" ", string.Empty, StringComparison.Ordinal) + "Section",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = ScalePadding(margin),
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceBase
+        };
+        section.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        section.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(24)));
+        section.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var heading = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceBase
+        };
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(22)));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        heading.Controls.Add(new BrandGlyphControl
+        {
+            Glyph = glyph,
+            GlyphColor = ClipCordTheme.TextTertiary,
+            StrokeWidth = 1.4f,
+            Dock = DockStyle.Fill,
+            Margin = ScalePadding(new Padding(0, 3, 4, 3))
+        }, 0, 0);
+        heading.Controls.Add(new Label
+        {
+            Text = title,
+            Dock = DockStyle.Fill,
+            ForeColor = ClipCordTheme.TextTertiary,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = ClipCordTheme.InterfaceFont(7.75f, FontStyle.Bold),
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 1, 0);
+        card.Margin = Padding.Empty;
+        section.Controls.Add(heading, 0, 0);
+        section.Controls.Add(card, 0, 1);
+        return section;
     }
 
     private Control BuildClipSourceCard()
@@ -735,15 +1155,19 @@ internal sealed class SettingsForm : Form
         var layout = CreateCardContent(4);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(232)));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(10)));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(CreateInlineFieldLabel("Clips folder"), 0, 0);
+        layout.Controls.Add(CreateFieldLabelBlock(
+            "Clips folder",
+            "Any folder that receives finished MP4 clips."), 0, 0);
         layout.Controls.Add(CreateFieldRow(CreateFieldHost(_folderText), _browseButton), 1, 0);
-        layout.Controls.Add(CreateInlineFieldLabel("Recorded with"), 0, 2);
+        layout.Controls.Add(CreateFieldLabelBlock(
+            "Recorded with",
+            "Tells ClipCord how your recorder files clips."), 0, 2);
 
         var sourceChoices = new FlowLayoutPanel
         {
@@ -759,7 +1183,7 @@ internal sealed class SettingsForm : Form
         _steelSeriesSourceButton.AccessibleName = "Record with SteelSeries GG";
         _nvidiaSourceButton.Name = "NvidiaCaptureSourceButton";
         _nvidiaSourceButton.AccessibleName = "Record with NVIDIA";
-        _nvidiaSourceButton.Margin = new Padding(8, 0, 0, 0);
+        _nvidiaSourceButton.Margin = ScalePadding(new Padding(8, 0, 0, 0));
         sourceChoices.Controls.Add(_steelSeriesSourceButton);
         sourceChoices.Controls.Add(_nvidiaSourceButton);
         layout.Controls.Add(sourceChoices, 1, 2);
@@ -774,7 +1198,7 @@ internal sealed class SettingsForm : Form
             "Any folder that receives MP4 clips.",
             layout,
             new Padding(0, 0, 0, 10),
-            212);
+            150);
     }
 
     private void SetCaptureSource(ClipCaptureSource source)
@@ -783,6 +1207,7 @@ internal sealed class SettingsForm : Form
         if (_captureSource == normalized) return;
         _captureSource = normalized;
         UpdateCaptureSourceSelection();
+        RecomputeSettingsDirty();
     }
 
     private void UpdateCaptureSourceSelection()
@@ -799,6 +1224,7 @@ internal sealed class SettingsForm : Form
         button.SurfaceColor = selected ? Color.FromArgb(67, 50, 104) : ClipCordTheme.SettingsButton;
         button.HoverColor = selected ? Color.FromArgb(78, 59, 121) : ClipCordTheme.SettingsButtonHover;
         button.OutlineColor = selected ? ClipCordTheme.Violet : ClipCordTheme.SettingsFieldBorder;
+        button.AccessibilitySelected = selected;
         button.AccessibleDescription = selected ? "Selected capture source" : string.Empty;
         button.Invalidate();
     }
@@ -808,17 +1234,20 @@ internal sealed class SettingsForm : Form
         var layout = CreateCardContent(4);
         layout.ColumnCount = 2;
         layout.ColumnStyles.Clear();
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(232)));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 8));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(8)));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(CreateInlineFieldLabel("Uploader name"), 0, 0);
+        layout.Controls.Add(CreateFieldLabelBlock(
+            "Uploader name",
+            "Shown beside every clip you send."), 0, 0);
         layout.Controls.Add(CreateFieldHost(_uploaderNameText), 1, 0);
-        layout.Controls.Add(CreateInlineFieldLabel("Webhook URL"), 0, 2);
+        layout.Controls.Add(CreateFieldLabelBlock(
+            "Webhook URL",
+            "Encrypted with Windows DPAPI for this account only."), 0, 2);
         layout.Controls.Add(CreateFieldRow(CreateFieldHost(_webhookText), _testButton), 1, 2);
-        layout.Controls.Add(CreateHelper("Encrypted for this Windows user."), 1, 3);
         return CreateCard(
             BrandGlyph.DiscordDestination,
             "DiscordDestinationCard",
@@ -827,41 +1256,80 @@ internal sealed class SettingsForm : Form
             "Identify who sent the clip and where it goes.",
             layout,
             new Padding(0, 0, 0, 10),
-            208);
+            134);
     }
 
     private Control BuildUploadBehaviorCard()
     {
-        var layout = CreateCardContent(3);
+        var layout = CreateCardContent(4);
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _uploadToDiscord.Margin = Padding.Empty;
         layout.Controls.Add(_uploadToDiscord, 0, 0);
-        _uploadModeHelper.Margin = new Padding(0, 0, 0, 6);
+        _uploadModeHelper.Margin = ScalePadding(new Padding(0, 0, 0, 6));
         layout.Controls.Add(_uploadModeHelper, 0, 1);
-        var compression = new FlowLayoutPanel
+        layout.Controls.Add(new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = ScaleLogical(1),
+            BackColor = ClipCordTheme.BorderDefault,
+            Margin = ScalePadding(new Padding(0, 8, 0, 8))
+        }, 0, 2);
+        var compression = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(0, ScaleLogical(52)),
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SettingsCard
+        };
+        compression.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        compression.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(132)));
+        compression.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var compressionCopy = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = new Padding(0, 4, 0, 0),
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
             BackColor = ClipCordTheme.SettingsCard
         };
-        var compressionLabel = new Label
+        compressionCopy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        compressionCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        compressionCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        compressionCopy.Controls.Add(new Label
         {
             Text = "Compression target",
             AutoSize = true,
             ForeColor = ClipCordTheme.ShellText,
             Font = ClipCordTheme.InterfaceFont(10f),
-            Margin = new Padding(0, 11, 14, 0)
+            Margin = Padding.Empty
+        }, 0, 0);
+        var compressionHelper = new Label
+        {
+            Text = "Smaller targets are retried if Discord refuses a clip.",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            MaximumSize = new Size(ScaleLogical(125), 0),
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8f),
+            Margin = new Padding(0, ScaleLogical(2), ScaleLogical(12), 0)
         };
+        compressionCopy.Controls.Add(compressionHelper, 0, 1);
         var compressionHost = CreateCompressionHost();
-        compression.Controls.Add(compressionLabel);
-        compression.Controls.Add(compressionHost);
-        layout.Controls.Add(compression, 0, 2);
+        compressionHost.Dock = DockStyle.Bottom;
+        compression.Controls.Add(compressionCopy, 0, 0);
+        compression.Controls.Add(compressionHost, 1, 0);
+        layout.Controls.Add(compression, 0, 3);
         return CreateCard(
             BrandGlyph.UploadBehavior,
             "UploadBehaviorCard",
@@ -879,33 +1347,50 @@ internal sealed class SettingsForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var shortcutLabel = CreateInlineFieldLabel("Mode shortcut");
-        shortcutLabel.Margin = new Padding(0, 0, 0, 4);
-        layout.Controls.Add(shortcutLabel, 0, 0);
-        var shortcutRow = CreateFieldRow(CreateFieldHost(_modeToggleHotkeyText), _modeToggleHotkeyAction);
-        layout.Controls.Add(shortcutRow, 0, 1);
-
-        var actions = new BufferedTableLayoutPanel
+        var shortcut = new BufferedTableLayoutPanel
         {
             Name = "ModeHotkeyEditor",
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2,
-            RowCount = 1,
-            Margin = new Padding(0, 8, 0, 0),
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
             BackColor = ClipCordTheme.SettingsCard
         };
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
-        actions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        _startWithWindows.Anchor = AnchorStyles.Left | AnchorStyles.Top;
-        _startWithWindows.Margin = new Padding(0, 2, 0, 0);
+        shortcut.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 37));
+        shortcut.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 63));
+        shortcut.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        shortcut.Controls.Add(CreateFieldLabelBlock(
+            "Mode shortcut",
+            "Swaps the route for future clips."), 0, 0);
+        shortcut.Controls.Add(
+            CreateFieldRow(CreateFieldHost(_modeToggleHotkeyText), _modeToggleHotkeyAction),
+            1,
+            0);
+        layout.Controls.Add(shortcut, 0, 0);
+
+        var startup = CreatePreferenceRow(
+            "Start with Windows",
+            "ClipCord opens minimised to the tray.",
+            _startWithWindows);
+        _startWithWindows.Text = string.Empty;
+        _startWithWindows.Name = "StartWithWindowsToggle";
+        _startWithWindows.AccessibleName = "Start with Windows";
+        _startWithWindows.Anchor = AnchorStyles.Right;
+        _startWithWindows.Margin = Padding.Empty;
+        startup.Margin = ScalePadding(new Padding(0, 8, 0, 0));
+        layout.Controls.Add(startup, 0, 1);
+
+        var updates = CreatePreferenceRow(
+            "Updates",
+            "Stable release channel.",
+            _checkUpdatesButton);
         _checkUpdatesButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
         _checkUpdatesButton.Margin = Padding.Empty;
-        actions.Controls.Add(_startWithWindows, 0, 0);
-        actions.Controls.Add(_checkUpdatesButton, 1, 0);
-        layout.Controls.Add(actions, 0, 2);
+        updates.Margin = ScalePadding(new Padding(0, 8, 0, 0));
+        layout.Controls.Add(updates, 0, 2);
         return CreateCard(
             BrandGlyph.AppPreferences,
             "AppPreferencesCard",
@@ -917,7 +1402,31 @@ internal sealed class SettingsForm : Form
             190);
     }
 
-    private static RoundedPanel CreateCard(
+    private BufferedTableLayoutPanel CreatePreferenceRow(
+        string title,
+        string subtitle,
+        Control action)
+    {
+        var row = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SettingsCard
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        row.Controls.Add(CreateFieldLabelBlock(title, subtitle), 0, 0);
+        action.Anchor = AnchorStyles.Right;
+        row.Controls.Add(action, 1, 0);
+        return row;
+    }
+
+    private RoundedPanel CreateCard(
         BrandGlyph glyph,
         string name,
         string accessibleName,
@@ -933,149 +1442,79 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(0, minimumHeight),
+            MinimumSize = new Size(0, ScaleLogical(minimumHeight)),
             BackColor = ClipCordTheme.SettingsCard,
             BorderColor = ClipCordTheme.SettingsCardBorder,
-            CornerRadius = 16,
-            Padding = new Padding(18, 10, 18, 10),
-            Margin = margin,
-            AccessibleName = accessibleName
+            CornerRadius = ScaleLogical(14),
+            Padding = ScalePadding(new Padding(18, 12, 18, 12)),
+            Margin = ScalePadding(margin),
+            AccessibleName = accessibleName,
+            AccessibleDescription = $"{title}. {subtitle}"
         };
-        var shell = new BufferedTableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = ClipCordTheme.SettingsCard,
-            Margin = Padding.Empty,
-            Padding = Padding.Empty
-        };
-        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var heading = new BufferedTableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2,
-            RowCount = 1,
-            BackColor = ClipCordTheme.SettingsCard,
-            Margin = new Padding(0, 0, 0, 6),
-            Padding = Padding.Empty
-        };
-        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
-        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        heading.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        heading.Controls.Add(new BrandIconTile
-        {
-            Name = name + "Icon",
-            Glyph = glyph,
-            Anchor = AnchorStyles.Top | AnchorStyles.Left,
-            Margin = new Padding(0, 0, 14, 0),
-            AccessibleName = accessibleName + " icon"
-        }, 0, 0);
-        var headingCopy = new BufferedTableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = ClipCordTheme.SettingsCard,
-            Margin = Padding.Empty,
-            Padding = new Padding(0, 7, 0, 0)
-        };
-        headingCopy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        headingCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        headingCopy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        headingCopy.Controls.Add(CreateCardHeading(title), 0, 0);
-        headingCopy.Controls.Add(CreateCardSubtitle(subtitle), 0, 1);
-        heading.Controls.Add(headingCopy, 1, 0);
-        shell.Controls.Add(heading, 0, 0);
-        shell.Controls.Add(content, 0, 1);
-        card.Controls.Add(shell);
+        content.Margin = Padding.Empty;
+        card.Controls.Add(content);
         return card;
     }
 
-    private Control BuildFooter()
+    private Control BuildSaveBar()
     {
-        var footer = new BufferedTableLayoutPanel
+        var outer = new Panel
         {
-            Name = "FooterLayout",
+            Name = "SettingsSaveBarHost",
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
             Margin = Padding.Empty,
-            Padding = new Padding(26, 18, 26, 18),
-            BackColor = ClipCordTheme.Header
+            Padding = ScalePadding(new Padding(28, 6, 28, 6)),
+            BackColor = ClipCordTheme.SurfaceBase,
+            Visible = false
         };
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var messages = new BufferedTableLayoutPanel
+        var bar = new RoundedPanel
         {
-            Name = "FooterMessages",
+            Name = "SettingsSaveBar",
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
+            BackColor = ClipCordTheme.SurfaceRaised,
+            BorderColor = Color.FromArgb(245, 166, 35),
+            CornerRadius = ScaleLogical(12),
+            Padding = ScalePadding(new Padding(12, 5, 12, 5)),
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Header
+            AccessibleName = "Unsaved settings"
         };
-        messages.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
-        messages.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        messages.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var shield = new BrandGlyphControl
+        var layout = new BufferedTableLayoutPanel
         {
-            Name = "FooterPrivacyGlyph",
-            Glyph = BrandGlyph.Shield,
-            GlyphColor = ClipCordTheme.ShellMutedText,
-            Size = new Size(26, 26),
-            Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 0, 8, 0),
-            AccessibleName = "Privacy"
-        };
-        messages.Controls.Add(shield, 0, 0);
-
-        var messageStack = new BufferedTableLayoutPanel
-        {
-            Name = "FooterMessageStack",
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Anchor = AnchorStyles.Left,
-            ColumnCount = 1,
-            RowCount = 2,
+            Dock = DockStyle.Fill,
+            ColumnCount = 4,
+            RowCount = 1,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Header
+            BackColor = ClipCordTheme.SurfaceRaised
         };
-        messageStack.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        messageStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        messageStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        messageStack.Controls.Add(_statusLabel, 0, 0);
-        messageStack.Controls.Add(_privacySummaryLabel, 0, 1);
-        messages.Controls.Add(messageStack, 1, 0);
-
-        var actions = new FlowLayoutPanel
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(26)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(92)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(126)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.Controls.Add(new Label
         {
-            Name = "FooterActions",
-            Anchor = AnchorStyles.Right,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
+            Text = "⚠",
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(245, 166, 35),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = ClipCordTheme.InterfaceFont(10f),
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Header
-        };
-        actions.Controls.Add(_saveButton);
-        _cancelButton.Margin = new Padding(12, 0, 0, 0);
-        actions.Controls.Add(_cancelButton);
-        footer.Controls.Add(messages, 0, 0);
-        footer.Controls.Add(actions, 1, 0);
-        return footer;
+            AccessibleName = "Warning"
+        }, 0, 0);
+        layout.Controls.Add(_dirtySummaryLabel, 1, 0);
+
+        _cancelButton.Dock = DockStyle.Fill;
+        _cancelButton.Size = new Size(ScaleLogical(82), ScaleLogical(36));
+        _cancelButton.Margin = ScalePadding(new Padding(4, 2, 4, 2));
+        _saveButton.Dock = DockStyle.Fill;
+        _saveButton.Size = new Size(ScaleLogical(116), ScaleLogical(36));
+        _saveButton.Margin = ScalePadding(new Padding(4, 2, 0, 2));
+        layout.Controls.Add(_cancelButton, 2, 0);
+        layout.Controls.Add(_saveButton, 3, 0);
+        bar.Controls.Add(layout);
+        outer.Controls.Add(bar);
+        return outer;
     }
 
     private static TableLayoutPanel CreateCardContent(int rows)
@@ -1119,6 +1558,36 @@ internal sealed class SettingsForm : Form
         Margin = Padding.Empty
     };
 
+    private Control CreateFieldLabelBlock(string title, string subtitle)
+    {
+        var block = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = new Padding(0, 0, ScaleLogical(16), 0),
+            BackColor = ClipCordTheme.SettingsCard
+        };
+        block.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        block.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        block.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        block.Controls.Add(CreateInlineFieldLabel(title), 0, 0);
+        block.Controls.Add(new Label
+        {
+            Text = subtitle,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            MaximumSize = new Size(ScaleLogical(205), 0),
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8f),
+            Margin = new Padding(0, ScaleLogical(2), 0, 0),
+            UseMnemonic = false
+        }, 0, 1);
+        return block;
+    }
+
     private static Label CreateInlineFieldLabel(string text) => new()
     {
         Text = text,
@@ -1144,15 +1613,15 @@ internal sealed class SettingsForm : Form
         Margin = Padding.Empty
     };
 
-    private static RoundedPanel CreateFieldHost(Control field)
+    private RoundedPanel CreateFieldHost(Control field)
     {
         var host = new RoundedPanel
         {
             Dock = DockStyle.Fill,
             BackColor = ClipCordTheme.SettingsField,
             BorderColor = ClipCordTheme.SettingsFieldBorder,
-            CornerRadius = 7,
-            Padding = new Padding(11, 7, 11, 5),
+            CornerRadius = ScaleLogical(7),
+            Padding = ScalePadding(new Padding(11, 7, 11, 5)),
             Margin = Padding.Empty
         };
         host.Tag = field;
@@ -1167,12 +1636,12 @@ internal sealed class SettingsForm : Form
     {
         var host = new RoundedPanel
         {
-            Width = 170,
+            Width = ScaleLogical(132),
             BackColor = ClipCordTheme.SettingsField,
             BorderColor = ClipCordTheme.SettingsFieldBorder,
-            CornerRadius = 7,
-            Padding = new Padding(10, 5, 6, 4),
-            Margin = new Padding(0, 2, 0, 0)
+            CornerRadius = ScaleLogical(7),
+            Padding = ScalePadding(new Padding(10, 5, 6, 4)),
+            Margin = ScalePadding(new Padding(0, 2, 0, 0))
         };
         host.Tag = _compressionTarget;
         FitFieldHost(host, _compressionTarget);
@@ -1187,7 +1656,7 @@ internal sealed class SettingsForm : Form
             BackColor = ClipCordTheme.SettingsField
         };
         picker.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        picker.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 32));
+        picker.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(32)));
         picker.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         _compressionTarget.Dock = DockStyle.Fill;
         _compressionTarget.Margin = Padding.Empty;
@@ -1261,7 +1730,7 @@ internal sealed class SettingsForm : Form
             new Point(_compressionTargetPresetButton.Width - preferredWidth, _compressionTargetPresetButton.Height));
     }
 
-    private static Control CreateFieldRow(Control field, Button action)
+    private Control CreateFieldRow(Control field, Button action)
     {
         var row = new BufferedTableLayoutPanel
         {
@@ -1279,27 +1748,30 @@ internal sealed class SettingsForm : Form
         row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         row.Tag = (field, action);
         FitFieldActionRow(row, field, action);
-        field.Margin = new Padding(0, 0, 12, 0);
+        field.Margin = ScalePadding(new Padding(0, 0, 12, 0));
         action.Margin = Padding.Empty;
         row.Controls.Add(field, 0, 0);
         row.Controls.Add(action, 1, 0);
         return row;
     }
 
-    private static void FitFieldHost(RoundedPanel host, Control field)
+    private void FitFieldHost(RoundedPanel host, Control field)
     {
         host.MaximumSize = Size.Empty;
-        var hostHeight = Math.Max(38, field.PreferredSize.Height + host.Padding.Vertical + 2);
+        var hostHeight = Math.Max(
+            ScaleLogical(38),
+            field.PreferredSize.Height + host.Padding.Vertical + ScaleLogical(2));
         var minimumWidth = host.Dock == DockStyle.Fill ? 0 : Math.Max(1, host.Width);
         host.Height = hostHeight;
         host.MinimumSize = new Size(minimumWidth, hostHeight);
         host.MaximumSize = new Size(0, hostHeight);
     }
 
-    private static void FitFieldActionRow(BufferedTableLayoutPanel row, Control field, Button action)
+    private void FitFieldActionRow(BufferedTableLayoutPanel row, Control field, Button action)
     {
         row.MaximumSize = Size.Empty;
-        var rowHeight = Math.Max(field.MinimumSize.Height, action.PreferredSize.Height);
+        action.Height = Math.Max(ScaleLogical(38), action.PreferredSize.Height);
+        var rowHeight = Math.Max(field.MinimumSize.Height, action.Height);
         row.Height = rowHeight;
         row.MinimumSize = new Size(0, rowHeight);
         row.MaximumSize = new Size(0, rowHeight);
@@ -1357,28 +1829,20 @@ internal sealed class SettingsForm : Form
         if (IsDisposed || Disposing) return;
         var fullStatus = _watcherStatusProvider?.Invoke() ?? "Settings";
         if (_aboutPage is { Visible: true }) _aboutPage.UpdateWatcherStatus(fullStatus);
-        var conciseStatus = fullStatus switch
-        {
-            var value when value.Contains("closed", StringComparison.OrdinalIgnoreCase) ||
-                           value.Contains("paused", StringComparison.OrdinalIgnoreCase) => "Paused",
-            var value when value.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-                           value.Contains("failed", StringComparison.OrdinalIgnoreCase) => "Needs attention",
-            var value when value.Contains("local-only", StringComparison.OrdinalIgnoreCase) ||
-                           value.Contains("saved locally", StringComparison.OrdinalIgnoreCase) => "Local only",
-            var value when value.Contains("archive", StringComparison.OrdinalIgnoreCase) ||
-                           value.Contains("move", StringComparison.OrdinalIgnoreCase) => "Archiving",
-            var value when value.Contains("upload", StringComparison.OrdinalIgnoreCase) => "Uploading",
-            var value when value.Contains("hash", StringComparison.OrdinalIgnoreCase) => "Preparing clip",
-            var value when value.Contains("watch", StringComparison.OrdinalIgnoreCase) => "Watching",
-            var value when value.Contains("setup", StringComparison.OrdinalIgnoreCase) => "Setup required",
-            _ => fullStatus
-        };
+        var presentation = AboutPageSupport.NormalizeWatcherStatus(
+            fullStatus,
+            !fullStatus.StartsWith("Discord closed", StringComparison.OrdinalIgnoreCase));
+        var conciseStatus = presentation.Label;
         if (conciseStatus.Length > 28)
         {
             var safeLength = char.IsHighSurrogate(conciseStatus[27]) ? 27 : 28;
             conciseStatus = conciseStatus[..safeLength];
         }
         if (_watcherStatusLabel.Text != conciseStatus) _watcherStatusLabel.Text = conciseStatus;
+        if (_watcherStatusDetailLabel.Text != presentation.Detail)
+        {
+            _watcherStatusDetailLabel.Text = presentation.Detail;
+        }
         if (_lastWatcherFullStatus == fullStatus) return;
         _lastWatcherFullStatus = fullStatus;
         _watcherStatusLabel.AccessibleDescription = fullStatus;
@@ -1509,6 +1973,18 @@ internal sealed class SettingsForm : Form
         _toolTip.SetToolTip(_modeToggleHotkeyAction, disabled
             ? $"Restore {GlobalHotkeyBinding.DefaultDisplayText}."
             : "Disable the global mode shortcut.");
+        if (_navigationRail is not null)
+        {
+            var hint = EnumerateControls(_navigationRail)
+                .OfType<Label>()
+                .FirstOrDefault(label => label.Name == "RailHotkeyHint");
+            if (hint is not null)
+            {
+                var shortcut = disabled ? "Shortcut off" : AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text);
+                hint.Text = $"{shortcut}  to swap";
+            }
+        }
+        RecomputeSettingsDirty();
     }
 
     private bool TryValidate([NotNullWhen(true)] out AppSettings? settings)
@@ -1577,18 +2053,114 @@ internal sealed class SettingsForm : Form
         if (_uploadToDiscord.Checked)
         {
             _uploadModeHelper.Text = "New clips upload to Discord and move to uploaded.";
-            _privacySummaryLabel.Text = "Your clips go directly to Discord.";
             _toolTip.SetToolTip(
                 _uploadToDiscord,
                 "New clips are sent to Discord and then organized under uploaded by game.");
-            return;
         }
+        else
+        {
+            _uploadModeHelper.Text = "No Discord request; new clips move to local-only.";
+            _toolTip.SetToolTip(
+                _uploadToDiscord,
+                "New clips are not sent to Discord and are organized under local-only by game.");
+        }
+        UpdateRailRouteSelection();
+        RecomputeSettingsDirty();
+    }
 
-        _uploadModeHelper.Text = "No Discord request; new clips move to local-only.";
-        _privacySummaryLabel.Text = "Local-only mode keeps new clips on this PC.";
-        _toolTip.SetToolTip(
-            _uploadToDiscord,
-            "New clips are not sent to Discord and are organized under local-only by game.");
+    private void WireDirtyTracking()
+    {
+        _folderText.TextChanged += (_, _) => RecomputeSettingsDirty();
+        _webhookText.TextChanged += (_, _) => RecomputeSettingsDirty();
+        _uploaderNameText.TextChanged += (_, _) => RecomputeSettingsDirty();
+        _compressionTarget.TextChanged += (_, _) => RecomputeSettingsDirty();
+        _modeToggleHotkeyText.TextChanged += (_, _) => RecomputeSettingsDirty();
+        _startWithWindows.CheckedChanged += (_, _) => RecomputeSettingsDirty();
+    }
+
+    private void RecomputeSettingsDirty()
+    {
+        if (!_dirtyTrackingReady || IsDisposed || Disposing) return;
+        var changedCount = GetChangedSettingsFieldCount();
+        _settingsDirty = changedCount > 0;
+        _dirtySummaryLabel.Text = _settingsDirty
+            ? $"{changedCount} unsaved change{(changedCount == 1 ? string.Empty : "s")}  ·  clips keep routing with the saved settings until you apply them"
+            : string.Empty;
+        UpdateSaveBarVisibility();
+    }
+
+    private int GetChangedSettingsFieldCount()
+    {
+        var changed = 0;
+        if (!string.Equals(_folderText.Text.Trim(), _appliedSettings.ClipsFolder, StringComparison.Ordinal)) changed++;
+        if (!string.Equals(_webhookText.Text.Trim(), _appliedSettings.WebhookUrl, StringComparison.Ordinal)) changed++;
+        if (!string.Equals(
+                AppSettings.NormalizeUploaderName(_uploaderNameText.Text),
+                AppSettings.NormalizeUploaderName(_appliedSettings.UploaderName),
+                StringComparison.Ordinal)) changed++;
+        if (!TryParseCompressionTarget(_compressionTarget.Text, out var target) ||
+            target != Math.Clamp(_appliedSettings.CompressionTargetMb, 1, 100)) changed++;
+        if (!string.Equals(
+                AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text),
+                AppSettings.NormalizeModeToggleHotkey(_appliedSettings.ModeToggleHotkey),
+                StringComparison.Ordinal)) changed++;
+        if (_startWithWindows.Checked != _appliedSettings.StartWithWindows) changed++;
+        if (_uploadToDiscord.Checked != _appliedSettings.UploadToDiscord) changed++;
+        if (_captureSource != AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource)) changed++;
+        return changed;
+    }
+
+    private void ResetSettingsDraft()
+    {
+        if (_busy || _galleryBusy) return;
+        _dirtyTrackingReady = false;
+        try
+        {
+            _folderText.Text = _appliedSettings.ClipsFolder;
+            _webhookText.Text = _appliedSettings.WebhookUrl;
+            _uploaderNameText.Text = AppSettings.NormalizeUploaderName(_appliedSettings.UploaderName);
+            _compressionTarget.Text = $"{Math.Clamp(_appliedSettings.CompressionTargetMb, 1, 100)} MB";
+            _modeToggleHotkeyText.Text = AppSettings.NormalizeModeToggleHotkey(_appliedSettings.ModeToggleHotkey);
+            _startWithWindows.Checked = _appliedSettings.StartWithWindows;
+            _uploadToDiscord.Checked = _appliedSettings.UploadToDiscord;
+            _captureSource = AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource);
+            UpdateModeToggleHotkeyEditor();
+            UpdateCaptureSourceSelection();
+            UpdateUploadModeText();
+        }
+        finally
+        {
+            _dirtyTrackingReady = true;
+        }
+        RecomputeSettingsDirty();
+    }
+
+    private void UpdateRailRouteSelection()
+    {
+        if (_railDiscordRouteButton is null || _railLocalRouteButton is null) return;
+        ApplyRailRouteButtonState(_railDiscordRouteButton, _uploadToDiscord.Checked);
+        ApplyRailRouteButtonState(_railLocalRouteButton, !_uploadToDiscord.Checked);
+    }
+
+    private static void ApplyRailRouteButtonState(OutlineButton button, bool selected)
+    {
+        button.SurfaceColor = selected ? ClipCordTheme.VioletMuted : ClipCordTheme.SurfaceBase;
+        button.HoverColor = selected ? Color.FromArgb(61, 48, 91) : ClipCordTheme.SurfaceControl;
+        button.OutlineColor = selected ? ClipCordTheme.Violet : Color.Transparent;
+        button.ForeColor = selected ? ClipCordTheme.TextPrimary : ClipCordTheme.TextTertiary;
+        button.AccessibilitySelected = selected;
+        button.AccessibleDescription = selected ? "Selected route" : string.Empty;
+        button.Invalidate();
+    }
+
+    private void UpdateSaveBarVisibility()
+    {
+        if (_rootLayout is null || _saveBar is null || _rootLayout.RowStyles.Count < 3) return;
+        var visible = _currentPage == SettingsPage.Settings && _settingsDirty;
+        _rootLayout.RowStyles[2].SizeType = SizeType.Absolute;
+        _rootLayout.RowStyles[2].Height = visible ? ScaleLogical(SaveBarLogicalHeight) : 0;
+        _saveBar.Visible = visible;
+        AcceptButton = visible && !_busy && !_galleryBusy ? _saveButton : null;
     }
 
     internal static bool TryParseCompressionTarget(string? text, out int value)
@@ -1615,9 +2187,12 @@ internal sealed class SettingsForm : Form
         _testButton.Enabled = !busy;
         _checkUpdatesButton.Enabled = !busy && _checkForUpdatesAsync is not null;
         _aboutPage?.SetBusy(busy, _checkForUpdatesAsync is not null);
+        _homePage?.SetUpdateBusy(busy, _checkForUpdatesAsync is not null);
         _modeToggleHotkeyText.Enabled = !busy;
         _modeToggleHotkeyAction.Enabled = !busy;
         _uploadToDiscord.Enabled = !busy;
+        if (_railDiscordRouteButton is not null) _railDiscordRouteButton.Enabled = !busy;
+        if (_railLocalRouteButton is not null) _railLocalRouteButton.Enabled = !busy;
         _saveButton.Enabled = !busy;
         _cancelButton.Enabled = !busy;
         _minimizeButton.Enabled = !busy;
@@ -1628,6 +2203,7 @@ internal sealed class SettingsForm : Form
             _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
             _statusLabel.Text = status;
         }
+        UpdateSaveBarVisibility();
     }
 
     private void ActivityEditClipRequested(ClipActivityEntry entry)
@@ -1649,10 +2225,13 @@ internal sealed class SettingsForm : Form
     {
         _galleryBusy = busy;
         if (IsDisposed || Disposing) return;
+        if (_homeNavigationItem is not null) _homeNavigationItem.Enabled = !busy;
         if (_settingsNavigationItem is not null) _settingsNavigationItem.Enabled = !busy;
         if (_activityNavigationItem is not null) _activityNavigationItem.Enabled = !busy;
         if (_galleryNavigationItem is not null) _galleryNavigationItem.Enabled = true;
         if (_aboutNavigationItem is not null) _aboutNavigationItem.Enabled = !busy;
+        if (_railDiscordRouteButton is not null) _railDiscordRouteButton.Enabled = !busy && !_busy;
+        if (_railLocalRouteButton is not null) _railLocalRouteButton.Enabled = !busy && !_busy;
         _saveButton.Enabled = !busy && !_busy;
         _cancelButton.Enabled = !busy && !_busy;
         _closeButton.Enabled = !busy && !_busy;
@@ -1668,6 +2247,7 @@ internal sealed class SettingsForm : Form
             _statusLabel.Text = "Gallery reads uploaded and local-only archives only while this page is open.";
             _privacySummaryLabel.Text = "Playing or browsing a local-only clip never uploads it.";
         }
+        UpdateSaveBarVisibility();
     }
 
     private void FormClosingWhileBusy(object? sender, FormClosingEventArgs eventArgs)
@@ -1747,7 +2327,7 @@ internal sealed class SettingsForm : Form
         {
             return true;
         }
-        if (keyData == Keys.Escape && _aboutPage is { Visible: true } && !_busy)
+        if (keyData == Keys.Escape && !_busy && !_galleryBusy)
         {
             Close();
             return true;
@@ -1759,24 +2339,23 @@ internal sealed class SettingsForm : Form
     {
         var clientSize = GetDesignedClientSize(page);
         var scale = Math.Max(96, dpi) / 96d;
-        if (page == SettingsPage.About)
-        {
-            // The shared title/navigation chrome uses fixed physical rows. Scale only the
-            // About content portion so high-DPI openings stay compact like the approved
-            // mockup instead of growing a large empty tail below the legal notice.
-            const int fixedChromeHeight = 198;
-            var scalableContentHeight = clientSize.Height - fixedChromeHeight;
-            return new Size(
-                (int)Math.Round(clientSize.Width * scale),
-                fixedChromeHeight + (int)Math.Round(scalableContentHeight * scale));
-        }
         return new Size(
             (int)Math.Round(clientSize.Width * scale),
             (int)Math.Round(clientSize.Height * scale));
     }
 
+    private int ScaleLogical(int value) =>
+        Math.Max(1, (int)Math.Round(value * Math.Max(96, DeviceDpi) / 96d));
+
+    private Padding ScalePadding(Padding value) => new(
+        value.Left == 0 ? 0 : ScaleLogical(value.Left),
+        value.Top == 0 ? 0 : ScaleLogical(value.Top),
+        value.Right == 0 ? 0 : ScaleLogical(value.Right),
+        value.Bottom == 0 ? 0 : ScaleLogical(value.Bottom));
+
     private static Size GetDesignedClientSize(SettingsPage page) => page switch
     {
+        SettingsPage.Home => HomeDesignedClientSize,
         SettingsPage.Activity => ActivityDesignedClientSize,
         SettingsPage.Gallery => GalleryDesignedClientSize,
         SettingsPage.About => AboutDesignedClientSize,

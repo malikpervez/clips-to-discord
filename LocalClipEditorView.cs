@@ -27,6 +27,8 @@ internal sealed class LocalClipEditorView : UserControl
     private readonly ClipPreviewControl _preview;
     private readonly Label _previewStatus;
     private readonly Label _durationLabel;
+    private readonly Label _playbackPositionLabel;
+    private readonly Label _playbackAudioLabel;
     private readonly Label _estimateLabel;
     private readonly Label _progressLabel;
     private readonly TrimRangeControl _trimRange;
@@ -40,10 +42,14 @@ internal sealed class LocalClipEditorView : UserControl
     private readonly GradientButton _uploadButton;
     private readonly OutlineButton _cancelButton;
     private readonly OutlineButton _playButton;
+    private readonly OutlineButton _previewMuteButton;
+    private readonly PlaybackSeekBar _playbackSeekBar;
     private readonly RoundedPanel _previewCard;
     private readonly RoundedPanel _optionsCard;
     private readonly RoundedPanel _trimCard;
     private readonly RoundedPanel _commitCard;
+    private readonly Control _privacyNote;
+    private readonly Control _commitActions;
     private readonly Func<string, bool> _launchMediaFile;
     private readonly IClipPlaybackPreparer _playbackPreparer;
     private readonly System.Windows.Forms.Timer _previewDebounce;
@@ -68,6 +74,8 @@ internal sealed class LocalClipEditorView : UserControl
     private bool _startupDpiScaleApplied;
     private bool _updatingTrimText;
     private bool _trimPlaybackInFlight;
+    private bool _seekingPlayback;
+    private bool _previewMuted;
     private bool _operationCanCancel = true;
     private bool _busy;
     private bool _disposed;
@@ -105,7 +113,7 @@ internal sealed class LocalClipEditorView : UserControl
             AutoSize = false,
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 3,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = ClipCordTheme.Shell
@@ -114,30 +122,32 @@ internal sealed class LocalClipEditorView : UserControl
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        _previewCard = CreateCard("EditorPreviewCard", new Padding(18));
-        _previewCard.Height = 470;
-        _previewCard.Margin = new Padding(0, 0, 7, 12);
+        _previewCard = CreateCard("EditorPreviewCard", new Padding(16));
+        _previewCard.Height = 355;
+        _previewCard.Margin = new Padding(0, 0, 7, 8);
         var previewLayout = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         previewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         previewLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         previewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         previewLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        previewLayout.Controls.Add(CreateSectionHeading("Preview", "A still frame from the selected trim point."), 0, 0);
+        previewLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        previewLayout.Controls.Add(CreatePreviewHeading(), 0, 0);
         var previewSurface = new RoundedPanel
         {
             Name = "EditorPreviewSurface",
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(8, 15, 26),
-            BorderColor = Color.FromArgb(55, 68, 90),
+            BackColor = ClipCordTheme.SurfaceChrome,
+            BorderColor = ClipCordTheme.BorderStrong,
             CornerRadius = 12,
             Margin = new Padding(0, 12, 0, 10),
             Padding = new Padding(2)
@@ -146,7 +156,7 @@ internal sealed class LocalClipEditorView : UserControl
         {
             Name = "EditorPreviewImage",
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(8, 15, 26),
+            BackColor = ClipCordTheme.SurfaceChrome,
             TabStop = false,
             AccessibleRole = AccessibleRole.Graphic,
             AccessibleName = "Selected clip preview frame"
@@ -177,27 +187,70 @@ internal sealed class LocalClipEditorView : UserControl
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            ColumnCount = 2,
-            RowCount = 1,
+            ColumnCount = 4,
+            RowCount = 2,
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
-        previewFooter.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         previewFooter.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        previewFooter.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        previewFooter.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        previewFooter.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        previewFooter.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        previewFooter.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _durationLabel = CreateMutedLabel("Duration: —");
-        _durationLabel.Anchor = AnchorStyles.Left;
-        _playButton = CreateOutlineButton("Play selection", 126);
+        _durationLabel.Anchor = AnchorStyles.Right;
+        _durationLabel.TextAlign = ContentAlignment.MiddleRight;
+        _durationLabel.Margin = new Padding(0, 2, 0, 0);
+        _playButton = CreateOutlineButton("Play selection", 104, primary: true);
         _playButton.Name = "PlayEditorSourceButton";
         _playButton.Click += PlaySource;
-        previewFooter.Controls.Add(_durationLabel, 0, 0);
-        previewFooter.Controls.Add(_playButton, 1, 0);
+        _playbackSeekBar = new PlaybackSeekBar
+        {
+            Name = "EditorPlaybackSeekBar",
+            Dock = DockStyle.Fill,
+            Enabled = false,
+            MinimumSize = new Size(60, 26),
+            Margin = new Padding(10, 6, 0, 6),
+            AccessibleName = "Selection playback position",
+            AccessibleDescription = "Seek within the selected trim range."
+        };
+        _playbackSeekBar.SeekStarted += () => _seekingPlayback = true;
+        _playbackSeekBar.SeekCommitted += PlaybackSeekCommitted;
+        _playbackPositionLabel = CreateMutedLabel("0:00.0 / —");
+        _playbackPositionLabel.Name = "EditorPlaybackPositionLabel";
+        _playbackPositionLabel.AutoSize = false;
+        _playbackPositionLabel.Dock = DockStyle.Fill;
+        _playbackPositionLabel.AutoEllipsis = true;
+        _playbackPositionLabel.TextAlign = ContentAlignment.MiddleRight;
+        _playbackPositionLabel.Margin = new Padding(8, 0, 0, 0);
+        _previewMuteButton = CreateOutlineButton("Mute", 66);
+        _previewMuteButton.Name = "MuteEditorPreviewButton";
+        _previewMuteButton.AccessibleName = "Mute preview playback";
+        _previewMuteButton.Enabled = false;
+        _previewMuteButton.Margin = new Padding(8, 0, 0, 0);
+        _previewMuteButton.Click += (_, _) => TogglePreviewMute();
+        previewFooter.Controls.Add(_playButton, 0, 0);
+        previewFooter.Controls.Add(_playbackSeekBar, 1, 0);
+        previewFooter.Controls.Add(_playbackPositionLabel, 2, 0);
+        previewFooter.Controls.Add(_previewMuteButton, 3, 0);
+        previewFooter.Controls.Add(_durationLabel, 0, 1);
+        previewFooter.SetColumnSpan(_durationLabel, 4);
         previewLayout.Controls.Add(previewFooter, 0, 2);
+        _playbackAudioLabel = CreateMutedLabel(
+            "All detected audio tracks will match the edited upload.");
+        _playbackAudioLabel.Name = "EditorPlaybackAudioLabel";
+        previewLayout.Controls.Add(CreateInformationNote(
+            "EditorPlaybackAudioNote",
+            BrandGlyph.Activity,
+            _playbackAudioLabel,
+            "Preview audio information"), 0, 3);
         _previewCard.Controls.Add(previewLayout);
         root.Controls.Add(_previewCard, 0, 0);
 
-        _optionsCard = CreateCard("EditorOptionsCard", new Padding(18));
-        _optionsCard.Height = 470;
-        _optionsCard.Margin = new Padding(7, 0, 0, 12);
+        _optionsCard = CreateCard("EditorOptionsCard", new Padding(16));
+        _optionsCard.Height = 355;
+        _optionsCard.Margin = new Padding(7, 0, 0, 8);
         var options = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -205,14 +258,14 @@ internal sealed class LocalClipEditorView : UserControl
             RowCount = 9,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         options.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         for (var index = 0; index < 9; index++) options.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         // ToggleSwitch includes a logical 30px track plus the 12px top gap. Giving
         // that row an explicit logical height keeps late-created high-DPI editors
         // from letting the following helper label overlap the scaled switch.
-        options.RowStyles[7] = new RowStyle(SizeType.Absolute, 42);
+        options.RowStyles[7] = new RowStyle(SizeType.Absolute, 36);
         options.Controls.Add(CreateSectionHeading("Clip details", "Choose how the edited copy appears in Discord."), 0, 0);
         options.Controls.Add(CreateFieldLabel("Game"), 0, 1);
         _gameText = CreateEditorTextBox("Edited clip game", source.GameName);
@@ -226,7 +279,10 @@ internal sealed class LocalClipEditorView : UserControl
         _noteText.MaxLength = DiscordClipMessage.MaximumNoteLength;
         _noteText.ScrollBars = ScrollBars.None;
         var noteHost = CreateFieldHost(_noteText);
-        noteHost.Height = 72;
+        // The fixed-height companion cards must remain balanced at startup DPI. A 44px
+        // logical note still gives the multiline editor two comfortable text lines while
+        // leaving the compression helper inside the card at 150% scaling.
+        noteHost.Height = 44;
         options.Controls.Add(noteHost, 0, 6);
         _muteAudio = new ToggleSwitch
         {
@@ -234,9 +290,9 @@ internal sealed class LocalClipEditorView : UserControl
             Text = "Mute audio in edited clip",
             AccessibleName = "Mute audio in edited clip",
             AutoSize = true,
-            BackColor = ClipCordTheme.Card,
-            ForeColor = ClipCordTheme.Text,
-            Margin = new Padding(0, 12, 0, 0)
+            BackColor = ClipCordTheme.SurfaceRaised,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Margin = new Padding(0, 6, 0, 0)
         };
         _muteAudio.CheckedChanged += MuteAudioChanged;
         options.Controls.Add(_muteAudio, 0, 7);
@@ -245,24 +301,23 @@ internal sealed class LocalClipEditorView : UserControl
         _optionsCard.Controls.Add(options);
         root.Controls.Add(_optionsCard, 1, 0);
 
-        _trimCard = CreateCard("EditorTrimCard", new Padding(18));
-        _trimCard.Height = 300;
+        _trimCard = CreateCard("EditorTrimCard", new Padding(16));
+        _trimCard.Height = 235;
         _trimCard.Margin = Padding.Empty;
         var trimLayout = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 4,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         trimLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         trimLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         trimLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         trimLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         trimLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        trimLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
         trimLayout.Controls.Add(CreateSectionHeading("Trim", "Drag either handle, or enter exact times."), 0, 0);
         _trimRange = new TrimRangeControl
         {
@@ -270,6 +325,7 @@ internal sealed class LocalClipEditorView : UserControl
             Dock = DockStyle.Top,
             Height = 46,
             Margin = new Padding(0, 10, 0, 4),
+            BackColor = ClipCordTheme.SurfaceRaised,
             Enabled = false
         };
         _trimRange.RangeChanged += TrimRangeChanged;
@@ -281,7 +337,7 @@ internal sealed class LocalClipEditorView : UserControl
             ColumnCount = 4,
             RowCount = 1,
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         timeFields.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         timeFields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -303,47 +359,53 @@ internal sealed class LocalClipEditorView : UserControl
         timeFields.Controls.Add(CreateFieldHost(_endText), 3, 0);
         trimLayout.Controls.Add(timeFields, 0, 2);
         _estimateLabel = CreateMutedLabel("Approximate edited size: —");
-        _estimateLabel.Margin = new Padding(0, 10, 0, 0);
-        trimLayout.Controls.Add(_estimateLabel, 0, 3);
-        _keepOriginal = new ToggleSwitch
-        {
-            Name = "KeepLocalOriginalToggle",
-            Text = "Keep original in Local only",
-            AccessibleName = "Keep original in Local only",
-            AutoSize = true,
-            BackColor = ClipCordTheme.Card,
-            ForeColor = ClipCordTheme.Text,
-            Margin = new Padding(0, 9, 0, 0)
-        };
-        trimLayout.Controls.Add(_keepOriginal, 0, 4);
+        _estimateLabel.Name = "EditorEstimateLabel";
+        trimLayout.Controls.Add(CreateInformationNote(
+            "EditorEstimateNote",
+            BrandGlyph.Sliders,
+            _estimateLabel,
+            "Edited clip size estimate"), 0, 3);
         _trimCard.Controls.Add(trimLayout);
         root.Controls.Add(_trimCard, 0, 1);
 
-        _commitCard = CreateCard("EditorCommitCard", new Padding(18));
-        _commitCard.Height = 300;
+        _commitCard = CreateCard("EditorCommitCard", new Padding(16));
+        _commitCard.Height = 235;
         _commitCard.Margin = new Padding(14, 0, 0, 0);
         var commitLayout = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 4,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         commitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         commitLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         commitLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        commitLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        commitLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        commitLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        commitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
+        // Progress is operational feedback, not flexible filler. Reserve a full readable
+        // line even when the surrounding explanatory copy wraps at high DPI.
+        commitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         commitLayout.Controls.Add(CreateSectionHeading("Upload safely", "The Local-only original stays untouched until Discord confirms success."), 0, 0);
         var cleanup = CreateMutedLabel(
-            "Default: archive the edited copy under uploaded, then send the original to the Windows Recycle Bin. Enable Keep original if you want both files.");
+            "After Discord confirms, ClipCord archives the edit and recycles the original. Keep original preserves both files.");
         cleanup.AutoSize = true;
         cleanup.MaximumSize = new Size(460, 0);
-        cleanup.Margin = new Padding(0, 12, 0, 0);
+        cleanup.Margin = new Padding(0, 8, 0, 0);
         commitLayout.Controls.Add(cleanup, 0, 1);
+        _keepOriginal = new ToggleSwitch
+        {
+            Name = "KeepLocalOriginalToggle",
+            Text = "Keep the original",
+            AccessibleName = "Keep original in Local only",
+            AccessibleDescription = "Keep the original clip in Local only after the edited copy uploads.",
+            AutoSize = true,
+            BackColor = ClipCordTheme.SurfaceRaised,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Margin = new Padding(0, 6, 0, 0)
+        };
+        commitLayout.Controls.Add(_keepOriginal, 0, 2);
         _progressLabel = new Label
         {
             Name = "EditorProgressLabel",
@@ -353,9 +415,9 @@ internal sealed class LocalClipEditorView : UserControl
             Font = ClipCordTheme.InterfaceFont(9f),
             TextAlign = ContentAlignment.MiddleLeft,
             AutoEllipsis = true,
-            Margin = new Padding(0, 10, 0, 8)
+            Margin = new Padding(0, 5, 0, 4)
         };
-        commitLayout.Controls.Add(_progressLabel, 0, 2);
+        commitLayout.Controls.Add(_progressLabel, 0, 3);
         _uploadButton = new GradientButton
         {
             Name = "UploadEditedClipButton",
@@ -368,33 +430,38 @@ internal sealed class LocalClipEditorView : UserControl
         };
         _uploadButton.AutoSize = false;
         _uploadButton.Click += UploadClicked;
-        _cancelButton = CreateOutlineButton("Cancel editing", 122);
+        _cancelButton = CreateOutlineButton("Cancel", 104);
         _cancelButton.Name = "CancelClipEditorButton";
-        _cancelButton.Margin = new Padding(8, 0, 0, 0);
+        _cancelButton.AccessibleName = "Cancel editing";
+        _cancelButton.Margin = Padding.Empty;
         _cancelButton.Click += CancelClicked;
-        var commitActions = new FlowLayoutPanel
+        var commitActions = new BufferedTableLayoutPanel
         {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Anchor = AnchorStyles.Right,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            BackColor = ClipCordTheme.Card,
+            Name = "EditorCommitActions",
+            Dock = DockStyle.Top,
+            AutoSize = false,
+            Height = 38,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = ClipCordTheme.SurfaceRaised,
+            Padding = Padding.Empty,
             Margin = Padding.Empty
         };
-        commitActions.Controls.Add(_uploadButton);
-        commitActions.Controls.Add(_cancelButton);
-        commitLayout.Controls.Add(commitActions, 0, 3);
-        commitLayout.Controls.Add(new Label
-        {
-            Text = "No permanent duplicate is created unless Keep original is enabled.",
-            AutoSize = true,
-            ForeColor = ClipCordTheme.ShellMutedText,
-            Font = ClipCordTheme.InterfaceFont(8.5f),
-            Margin = new Padding(0, 10, 0, 0)
-        }, 0, 4);
+        commitActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+        commitActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62));
+        commitActions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _cancelButton.Dock = DockStyle.Fill;
+        _uploadButton.Dock = DockStyle.Fill;
+        _uploadButton.Margin = new Padding(8, 0, 0, 0);
+        commitActions.Controls.Add(_cancelButton, 0, 0);
+        commitActions.Controls.Add(_uploadButton, 1, 0);
+        _commitActions = commitActions;
         _commitCard.Controls.Add(commitLayout);
         root.Controls.Add(_commitCard, 1, 1);
+        _privacyNote = CreatePrivacyNote();
+        root.Controls.Add(_privacyNote, 0, 2);
+        commitActions.Margin = new Padding(14, 6, 0, 0);
+        root.Controls.Add(commitActions, 1, 2);
         Controls.Add(root);
 
         _previewDebounce = new System.Windows.Forms.Timer { Interval = 350 };
@@ -412,7 +479,12 @@ internal sealed class LocalClipEditorView : UserControl
         var bottomHeight = Math.Max(
             _trimCard.Height + _trimCard.Margin.Vertical,
             _commitCard.Height + _commitCard.Margin.Vertical);
-        return new Size(Math.Max(1, proposedSize.Width), Math.Max(1, topHeight + bottomHeight));
+        var footerHeight = Math.Max(
+            _privacyNote.Height + _privacyNote.Margin.Vertical,
+            _commitActions.Height + _commitActions.Margin.Vertical);
+        return new Size(
+            Math.Max(1, proposedSize.Width),
+            Math.Max(1, topHeight + bottomHeight + footerHeight));
     }
 
     internal void CancelActiveOperation()
@@ -456,6 +528,7 @@ internal sealed class LocalClipEditorView : UserControl
             try { _trimRange.SetRange(TimeSpan.Zero, media.Duration, media.Duration); }
             finally { _updatingTrimText = false; }
             UpdateTrimTextFromRange();
+            ResetPlaybackTransport();
             _durationLabel.Text = $"Duration: {FormatTime(media.Duration)} · {GalleryView.FormatBytes(media.SourceBytes)}";
             _trimRange.Enabled = true;
             _uploadButton.Enabled = true;
@@ -530,6 +603,7 @@ internal sealed class LocalClipEditorView : UserControl
             try { _trimRange.SetRange(TimeSpan.Zero, duration, duration); }
             finally { _updatingTrimText = false; }
             UpdateTrimTextFromRange();
+            ResetPlaybackTransport();
             _durationLabel.Text = $"Duration: {FormatTime(duration)} · {GalleryView.FormatBytes(source.Length)}";
             _trimRange.Enabled = true;
             _uploadButton.Enabled = true;
@@ -777,6 +851,8 @@ internal sealed class LocalClipEditorView : UserControl
         _muteAudio.Enabled = !busy;
         _keepOriginal.Enabled = !busy;
         _playButton.Enabled = !busy;
+        _playbackSeekBar.Enabled = !busy && IsPlaybackRunning();
+        UpdatePreviewMuteButton();
         if (busy)
         {
             StopInEditorPlayback();
@@ -1203,10 +1279,8 @@ internal sealed class LocalClipEditorView : UserControl
             var prepared = await _playbackSourceTask!.ConfigureAwait(true);
             if (CanUpdate() && prepared.AudioTrackCount > 1)
             {
-                _durationLabel.Text =
-                    $"Duration: {FormatTime(_media?.Duration ?? TimeSpan.Zero)} · " +
-                    $"{GalleryView.FormatBytes(_media?.SourceBytes ?? 0)} · " +
-                    $"{prepared.AudioTrackCount} audio tracks mixed";
+                _playbackAudioLabel.Text =
+                    $"{prepared.AudioTrackCount} audio tracks mixed — matches the edited upload.";
             }
             else if (CanUpdate() && prepared.AudioTrackCount == ClipPlaybackSource.UnknownAudioTrackCount)
             {
@@ -1214,6 +1288,8 @@ internal sealed class LocalClipEditorView : UserControl
                 // code cannot make: a separate microphone track would go unheard.
                 _progressLabel.Text =
                     "Audio tracks could not be inspected without FFmpeg — if this clip has a separate microphone track, only the first will be audible.";
+                _playbackAudioLabel.Text =
+                    "Audio tracks unverified — preview may use only the first track.";
             }
             return prepared.Path;
         }
@@ -1228,6 +1304,8 @@ internal sealed class LocalClipEditorView : UserControl
             {
                 _progressLabel.Text =
                     "Preview is playing the first audio track only — the tracks could not be mixed.";
+                _playbackAudioLabel.Text =
+                    "Audio mix unavailable — preview is using only the first track.";
             }
             return _source.Path;
         }
@@ -1243,6 +1321,9 @@ internal sealed class LocalClipEditorView : UserControl
         TryCancel(_previewCancellation);
         _trimPlaybackStart = _trimRange.Start;
         _trimPlaybackEnd = _trimRange.End;
+        _seekingPlayback = false;
+        UpdatePlaybackTransport(_trimPlaybackStart);
+        _playbackSeekBar.Enabled = false;
         _playbackGeneration = ++_playbackGenerationCounter;
         _isPlaybackRunning = true;
         _playButton.Text = "Stop preview";
@@ -1268,7 +1349,7 @@ internal sealed class LocalClipEditorView : UserControl
                 if (_mediaElement is null) return;
                 _mediaElement.Stop();
                 _mediaElement.Volume = 1.0;
-                _mediaElement.IsMuted = _muteAudio.Checked;
+                _mediaElement.IsMuted = _muteAudio.Checked || _previewMuted;
                 _mediaElement.Source = new Uri(playbackPath, UriKind.Absolute);
             }
             catch (Exception exception)
@@ -1290,8 +1371,10 @@ internal sealed class LocalClipEditorView : UserControl
         var wasPlaybackRunning = _isPlaybackRunning;
         _isPlaybackRunning = false;
         _playbackTimer.Stop();
+        _seekingPlayback = false;
         _trimPlaybackStart = TimeSpan.Zero;
         _trimPlaybackEnd = TimeSpan.Zero;
+        ResetPlaybackTransport();
         TryCancel(_playbackCancellation);
         var previousPlaybackCancellation = Interlocked.Exchange(ref _playbackCancellation, null);
         previousPlaybackCancellation?.Dispose();
@@ -1336,6 +1419,11 @@ internal sealed class LocalClipEditorView : UserControl
         if (_mediaElement.Position >= _trimPlaybackEnd)
         {
             StopInEditorPlayback(showLastFrame: true);
+            return;
+        }
+        if (!_seekingPlayback)
+        {
+            UpdatePlaybackTransport(_mediaElement.Position);
         }
     }
 
@@ -1356,6 +1444,8 @@ internal sealed class LocalClipEditorView : UserControl
             }
             _trimPlaybackStart = start;
             _trimPlaybackEnd = end;
+            _playbackSeekBar.Enabled = !_busy;
+            UpdatePlaybackTransport(start);
             _mediaElement.Position = start;
             _mediaElement.Play();
             // WPF can silently ignore a pre-roll seek, which would otherwise play the clip
@@ -1402,11 +1492,74 @@ internal sealed class LocalClipEditorView : UserControl
 
     private void MuteAudioChanged(object? sender, EventArgs eventArgs)
     {
+        UpdatePreviewMuteButton();
         if (!_isPlaybackRunning || _mediaElement is null) return;
         PostToMediaDispatcher(() =>
         {
-            if (_mediaElement is not null) _mediaElement.IsMuted = _muteAudio.Checked;
+            if (_mediaElement is not null) _mediaElement.IsMuted = _muteAudio.Checked || _previewMuted;
         });
+    }
+
+    private void PlaybackSeekCommitted(double fraction)
+    {
+        _seekingPlayback = false;
+        if (!_isPlaybackRunning || _mediaElement is null) return;
+        var selectionDuration = _trimPlaybackEnd - _trimPlaybackStart;
+        if (selectionDuration <= TimeSpan.Zero) return;
+        var target = _trimPlaybackStart + TimeSpan.FromSeconds(
+            selectionDuration.TotalSeconds * Math.Clamp(fraction, 0, 1));
+        target = Clamp(target, _trimPlaybackStart, _trimPlaybackEnd);
+        UpdatePlaybackTransport(target);
+        PostToMediaDispatcher(() =>
+        {
+            if (_mediaElement is not null && _isPlaybackRunning)
+            {
+                _mediaElement.Position = target;
+            }
+        });
+    }
+
+    private void UpdatePlaybackTransport(TimeSpan absolutePosition)
+    {
+        var start = IsPlaybackRunning() ? _trimPlaybackStart : _trimRange.Start;
+        var end = IsPlaybackRunning() ? _trimPlaybackEnd : _trimRange.End;
+        if (end < start) end = start;
+        var selectionDuration = end - start;
+        var current = Clamp(absolutePosition, start, end);
+        _playbackSeekBar.SetDuration(selectionDuration);
+        _playbackSeekBar.SetPosition(current - start);
+        _playbackPositionLabel.Text = $"{FormatTime(current)} / {FormatTime(end)}";
+        _playbackPositionLabel.AccessibleName =
+            $"Playback position {FormatTime(current)}; selection ends at {FormatTime(end)}";
+    }
+
+    private void ResetPlaybackTransport()
+    {
+        _playbackSeekBar.Enabled = false;
+        UpdatePlaybackTransport(_trimRange.Start);
+        UpdatePreviewMuteButton();
+    }
+
+    private void TogglePreviewMute()
+    {
+        if (_muteAudio.Checked) return;
+        _previewMuted = !_previewMuted;
+        UpdatePreviewMuteButton();
+        if (!_isPlaybackRunning || _mediaElement is null) return;
+        PostToMediaDispatcher(() =>
+        {
+            if (_mediaElement is not null) _mediaElement.IsMuted = _previewMuted;
+        });
+    }
+
+    private void UpdatePreviewMuteButton()
+    {
+        var outputMuted = _muteAudio.Checked;
+        _previewMuteButton.Text = outputMuted ? "Muted" : _previewMuted ? "Unmute" : "Mute";
+        _previewMuteButton.AccessibleName = outputMuted
+            ? "Preview muted because the edited clip is muted"
+            : _previewMuted ? "Unmute preview playback" : "Mute preview playback";
+        _previewMuteButton.Enabled = !_busy && _media is not null && !outputMuted;
     }
 
     private void PostToMediaDispatcher(Action action)
@@ -1488,11 +1641,167 @@ internal sealed class LocalClipEditorView : UserControl
     {
         Name = name,
         Dock = DockStyle.Fill,
-        BackColor = ClipCordTheme.Card,
-        BorderColor = ClipCordTheme.CardBorder,
+        BackColor = ClipCordTheme.SurfaceRaised,
+        BorderColor = ClipCordTheme.BorderDefault,
         CornerRadius = 15,
         Padding = padding
     };
+
+    private static Control CreatePreviewHeading()
+    {
+        var heading = new BufferedTableLayoutPanel
+        {
+            AutoSize = true,
+            Dock = DockStyle.Top,
+            ColumnCount = 2,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceRaised
+        };
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        heading.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        heading.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        heading.Controls.Add(new Label
+        {
+            Text = "Preview",
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Font = ClipCordTheme.DisplayFont(13f, FontStyle.Bold),
+            Margin = Padding.Empty
+        }, 0, 0);
+        heading.Controls.Add(CreateLocalOnlyChip("EditorLocalOnlyChip"), 1, 0);
+        var subtitle = new Label
+        {
+            Text = "Play the clip, or scrub to choose trim points.",
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextSecondary,
+            Font = ClipCordTheme.InterfaceFont(8.5f),
+            Margin = new Padding(0, 2, 0, 0)
+        };
+        heading.Controls.Add(subtitle, 0, 1);
+        heading.SetColumnSpan(subtitle, 2);
+        return heading;
+    }
+
+    private static Control CreateLocalOnlyChip(string name)
+    {
+        var label = new Label
+        {
+            Text = "●  Local only",
+            AutoSize = true,
+            ForeColor = Color.FromArgb(255, 213, 216),
+            Font = ClipCordTheme.InterfaceFont(8.2f),
+            BackColor = Color.Transparent,
+            Location = new Point(9, 4),
+            UseMnemonic = false,
+            AccessibleRole = AccessibleRole.None
+        };
+        var chip = new RoundedPanel
+        {
+            Name = name,
+            AccessibleName = "Local only clip",
+            AccessibleRole = AccessibleRole.StaticText,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = Color.FromArgb(54, 25, 39),
+            BorderColor = ClipCordTheme.Coral,
+            CornerRadius = 8,
+            Padding = new Padding(9, 4, 9, 4),
+            Margin = new Padding(12, 0, 0, 0),
+            Controls = { label }
+        };
+        return chip;
+    }
+
+    private static Control CreateInformationNote(
+        string name,
+        BrandGlyph glyph,
+        Label copy,
+        string accessibleName)
+    {
+        var note = new RoundedPanel
+        {
+            Name = name,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            MinimumSize = new Size(0, 34),
+            BackColor = ClipCordTheme.SurfaceSunken,
+            BorderColor = ClipCordTheme.BorderDefault,
+            CornerRadius = 8,
+            Padding = new Padding(8, 5, 10, 5),
+            Margin = new Padding(0, 9, 0, 0),
+            AccessibleName = accessibleName,
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        var layout = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceSunken
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 22));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.Controls.Add(new BrandGlyphControl
+        {
+            Glyph = glyph,
+            GlyphColor = Color.FromArgb(62, 211, 151),
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            AccessibleRole = AccessibleRole.None
+        }, 0, 0);
+        copy.AutoSize = false;
+        copy.Dock = DockStyle.Fill;
+        copy.TextAlign = ContentAlignment.MiddleLeft;
+        copy.AutoEllipsis = true;
+        copy.Margin = Padding.Empty;
+        layout.Controls.Add(copy, 1, 0);
+        note.Controls.Add(layout);
+        return note;
+    }
+
+    private static Control CreatePrivacyNote()
+    {
+        var note = new BufferedTableLayoutPanel
+        {
+            Name = "EditorPrivacyNote",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            MinimumSize = new Size(0, 26),
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0, 10, 0, 0),
+            Padding = new Padding(2, 0, 0, 0),
+            BackColor = ClipCordTheme.SurfaceBase,
+            AccessibleName = "Local-only upload privacy information",
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        note.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 22));
+        note.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        note.Controls.Add(new BrandGlyphControl
+        {
+            Glyph = BrandGlyph.Shield,
+            GlyphColor = Color.FromArgb(62, 211, 151),
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            AccessibleRole = AccessibleRole.None
+        }, 0, 0);
+        var copy = CreateMutedLabel(
+            "Playing or browsing a local-only clip never uploads it. Only this button sends anything.");
+        copy.Name = "EditorPrivacyLabel";
+        copy.AutoSize = false;
+        copy.Dock = DockStyle.Fill;
+        copy.AutoEllipsis = true;
+        copy.TextAlign = ContentAlignment.MiddleLeft;
+        copy.Margin = Padding.Empty;
+        note.Controls.Add(copy, 1, 0);
+        return note;
+    }
 
     private static Control CreateSectionHeading(string title, string subtitle)
     {
@@ -1503,7 +1812,7 @@ internal sealed class LocalClipEditorView : UserControl
             ColumnCount = 1,
             RowCount = 2,
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -1533,7 +1842,7 @@ internal sealed class LocalClipEditorView : UserControl
         AutoSize = true,
         ForeColor = ClipCordTheme.Text,
         Font = ClipCordTheme.InterfaceFont(8.5f, FontStyle.Bold),
-        Margin = new Padding(0, 9, 0, 4)
+        Margin = new Padding(0, 6, 0, 3)
     };
 
     private static Label CreateMutedLabel(string text) => new()
@@ -1550,8 +1859,8 @@ internal sealed class LocalClipEditorView : UserControl
         Text = text,
         AccessibleName = accessibleName,
         BorderStyle = BorderStyle.None,
-        BackColor = Color.FromArgb(244, 246, 249),
-        ForeColor = ClipCordTheme.Text,
+        BackColor = ClipCordTheme.SurfaceSunken,
+        ForeColor = ClipCordTheme.TextPrimary,
         Font = ClipCordTheme.InterfaceFont(9.5f),
         Dock = DockStyle.Fill,
         Margin = Padding.Empty
@@ -1561,25 +1870,27 @@ internal sealed class LocalClipEditorView : UserControl
     {
         Height = 36,
         Dock = DockStyle.Top,
-        BackColor = Color.FromArgb(244, 246, 249),
-        BorderColor = ClipCordTheme.CardBorder,
+        BackColor = ClipCordTheme.SurfaceSunken,
+        BorderColor = ClipCordTheme.BorderStrong,
         CornerRadius = 8,
         Padding = new Padding(10, 8, 10, 5),
         Margin = Padding.Empty,
         Controls = { textBox }
     };
 
-    private static OutlineButton CreateOutlineButton(string text, int width) => new()
+    private static OutlineButton CreateOutlineButton(string text, int width, bool primary = false) => new()
     {
         Text = text,
         AutoSize = false,
         Width = width,
         Height = 38,
-        SurfaceColor = Color.FromArgb(25, 35, 52),
-        HoverColor = Color.FromArgb(35, 46, 65),
-        OutlineColor = Color.FromArgb(65, 76, 96),
-        ForeColor = ClipCordTheme.ShellText,
-        Font = ClipCordTheme.InterfaceFont(9f),
+        SurfaceColor = primary ? ClipCordTheme.Violet : ClipCordTheme.SurfaceControl,
+        HoverColor = primary ? Color.FromArgb(157, 85, 255) : ClipCordTheme.SurfaceControlHover,
+        OutlineColor = primary ? ClipCordTheme.Violet : ClipCordTheme.BorderStrong,
+        DisabledSurfaceColor = Color.FromArgb(27, 37, 54),
+        DisabledTextColor = ClipCordTheme.TextTertiary,
+        ForeColor = ClipCordTheme.TextPrimary,
+        Font = ClipCordTheme.InterfaceFont(9f, primary ? FontStyle.Bold : FontStyle.Regular),
         Margin = Padding.Empty
     };
 
@@ -1839,7 +2150,7 @@ internal sealed class TrimRangeControl : Control
     private static void DrawHandle(Graphics graphics, int x, int y, bool active)
     {
         var bounds = new Rectangle(x - 8, y - 8, 16, 16);
-        using var brush = new SolidBrush(active ? ClipCordTheme.Coral : Color.White);
+        using var brush = new SolidBrush(active ? ClipCordTheme.Coral : ClipCordTheme.TextPrimary);
         graphics.FillEllipse(brush, bounds);
         using var outline = new Pen(ClipCordTheme.Violet, 2f);
         graphics.DrawEllipse(outline, bounds);

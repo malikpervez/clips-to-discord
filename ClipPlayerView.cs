@@ -34,6 +34,7 @@ internal sealed class ClipPlayerView : UserControl
     private bool _isPlaying;
     private bool _seeking;
     private bool _playbackStarted;
+    private bool _startupDpiScaleApplied;
     private bool _disposed;
 
     internal ClipPlayerView(GalleryClipEntry clip, IClipPlaybackPreparer? preparer = null)
@@ -48,14 +49,28 @@ internal sealed class ClipPlayerView : UserControl
         Font = ClipCordTheme.InterfaceFont(9.5f);
         Padding = Padding.Empty;
 
+        var page = new BufferedTableLayoutPanel
+        {
+            Name = "ClipPlayerLayout",
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceBase
+        };
+        page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
         var card = new RoundedPanel
         {
             Name = "ClipPlayerCard",
             Dock = DockStyle.Fill,
-            BackColor = ClipCordTheme.Card,
-            BorderColor = ClipCordTheme.CardBorder,
-            CornerRadius = 14,
-            Padding = new Padding(18),
+            BackColor = ClipCordTheme.SurfaceRaised,
+            BorderColor = ClipCordTheme.BorderDefault,
+            CornerRadius = 16,
+            Padding = new Padding(20, 18, 20, 18),
             Margin = new Padding(0, 0, 0, 12)
         };
 
@@ -65,7 +80,7 @@ internal sealed class ClipPlayerView : UserControl
             ColumnCount = 1,
             RowCount = 3,
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -78,8 +93,8 @@ internal sealed class ClipPlayerView : UserControl
         {
             Name = "ClipPlayerSurface",
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(8, 15, 26),
-            BorderColor = Color.FromArgb(55, 68, 90),
+            BackColor = ClipCordTheme.SurfaceChrome,
+            BorderColor = ClipCordTheme.BorderStrong,
             CornerRadius = 12,
             Margin = new Padding(0, 12, 0, 10),
             Padding = new Padding(2)
@@ -121,7 +136,7 @@ internal sealed class ClipPlayerView : UserControl
         // The transport sits below the video rather than over it: ElementHost renders into
         // its own window, so anything Windows Forms paints in the same area lands behind
         // the picture instead of on top of it.
-        _playButton = CreateTransportButton("Play", 92);
+        _playButton = CreateTransportButton("Play", 92, primary: true);
         _playButton.Name = "ClipPlayerPlayButton";
         _playButton.Click += (_, _) => TogglePlayback();
         _playButton.Enabled = false;
@@ -131,7 +146,7 @@ internal sealed class ClipPlayerView : UserControl
         _muteButton.Enabled = false;
         _positionLabel = CreateMutedLabel("0:00.0 / —");
         _positionLabel.Name = "ClipPlayerPositionLabel";
-        _audioLabel = CreateMutedLabel(string.Empty);
+        _audioLabel = CreateMutedLabel("Preparing every detected audio track for playback…");
         _audioLabel.Name = "ClipPlayerAudioLabel";
         _seekBar = new PlaybackSeekBar
         {
@@ -146,10 +161,24 @@ internal sealed class ClipPlayerView : UserControl
         layout.Controls.Add(BuildTransport(), 0, 2);
 
         card.Controls.Add(layout);
-        Controls.Add(card);
+        page.Controls.Add(card, 0, 0);
+        page.Controls.Add(BuildPrivacyNote(), 0, 1);
+        Controls.Add(page);
 
         _positionTimer = new System.Windows.Forms.Timer { Interval = 200 };
         _positionTimer.Tick += (_, _) => RefreshPosition();
+    }
+
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        var width = Math.Max(1, proposedSize.Width);
+        var horizontalCardPadding = ScaleLogical(40);
+        var videoWidth = Math.Max(1, width - horizontalCardPadding);
+        var videoHeight = Math.Clamp(
+            (int)Math.Round(videoWidth / 1.9d),
+            ScaleLogical(260),
+            ScaleLogical(410));
+        return new Size(width, videoHeight + ScaleLogical(194));
     }
 
     private Control BuildHeading()
@@ -158,22 +187,34 @@ internal sealed class ClipPlayerView : UserControl
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            ColumnCount = 1,
+            ColumnCount = 2,
             RowCount = 2,
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        heading.Controls.Add(new Label
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var title = new Label
         {
+            Name = "ClipPlayerTitle",
             Text = _clip.FileName,
-            AutoSize = true,
-            ForeColor = ClipCordTheme.Text,
+            AutoSize = false,
+            AutoEllipsis = true,
+            Dock = DockStyle.Fill,
+            MinimumSize = new Size(0, 28),
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = ClipCordTheme.TextPrimary,
             Font = ClipCordTheme.DisplayFont(13f, FontStyle.Bold),
-            Margin = Padding.Empty
-        }, 0, 0);
-        var route = _clip.Route == GalleryClipRoute.LocalOnly ? "Local only" : "Uploaded";
-        heading.Controls.Add(CreateMutedLabel($"{_clip.GameName} · {route} · {GalleryView.FormatBytes(_clip.Length)}"), 0, 1);
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        };
+        heading.Controls.Add(title, 0, 0);
+        heading.Controls.Add(CreateRouteChip(_clip.Route), 1, 0);
+        var metadata = CreateMutedLabel($"{_clip.GameName} · {GalleryView.FormatBytes(_clip.Length)}");
+        metadata.Name = "ClipPlayerMetadata";
+        metadata.Margin = new Padding(0, 3, 0, 0);
+        heading.Controls.Add(metadata, 0, 1);
+        heading.SetColumnSpan(metadata, 2);
         return heading;
     }
 
@@ -187,7 +228,7 @@ internal sealed class ClipPlayerView : UserControl
             ColumnCount = 4,
             RowCount = 2,
             Margin = Padding.Empty,
-            BackColor = ClipCordTheme.Card
+            BackColor = ClipCordTheme.SurfaceRaised
         };
         transport.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         transport.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -205,21 +246,149 @@ internal sealed class ClipPlayerView : UserControl
         transport.Controls.Add(_positionLabel, 2, 0);
         transport.Controls.Add(_muteButton, 3, 0);
 
-        _audioLabel.Margin = new Padding(0, 8, 0, 0);
-        transport.Controls.Add(_audioLabel, 0, 1);
-        transport.SetColumnSpan(_audioLabel, 4);
+        var audioNote = new RoundedPanel
+        {
+            Name = "ClipPlayerAudioNote",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            MinimumSize = new Size(0, 34),
+            BackColor = ClipCordTheme.SurfaceSunken,
+            BorderColor = ClipCordTheme.BorderDefault,
+            CornerRadius = 8,
+            Padding = new Padding(8, 5, 10, 5),
+            Margin = new Padding(0, 9, 0, 0),
+            AccessibleName = "Playback audio information",
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        var audioLayout = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceSunken
+        };
+        audioLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 22));
+        audioLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var audioGlyph = new BrandGlyphControl
+        {
+            Glyph = BrandGlyph.Activity,
+            GlyphColor = Color.FromArgb(62, 211, 151),
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            AccessibleRole = AccessibleRole.None
+        };
+        _audioLabel.AutoSize = false;
+        _audioLabel.Dock = DockStyle.Fill;
+        _audioLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _audioLabel.AutoEllipsis = true;
+        _audioLabel.Margin = Padding.Empty;
+        audioLayout.Controls.Add(audioGlyph, 0, 0);
+        audioLayout.Controls.Add(_audioLabel, 1, 0);
+        audioNote.Controls.Add(audioLayout);
+        transport.Controls.Add(audioNote, 0, 1);
+        transport.SetColumnSpan(audioNote, 4);
         return transport;
+    }
+
+    private Control BuildPrivacyNote()
+    {
+        var note = new BufferedTableLayoutPanel
+        {
+            Name = "ClipPlayerPrivacyNote",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            MinimumSize = new Size(0, 26),
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = new Padding(2, 0, 0, 0),
+            BackColor = ClipCordTheme.SurfaceBase,
+            AccessibleName = "Playback privacy information",
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        note.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 22));
+        note.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var shield = new BrandGlyphControl
+        {
+            Glyph = BrandGlyph.Shield,
+            GlyphColor = Color.FromArgb(62, 211, 151),
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            AccessibleRole = AccessibleRole.None
+        };
+        var copy = CreateMutedLabel(
+            "Playback happens inside ClipCord. A local-only clip is never handed to another application.");
+        copy.Name = "ClipPlayerPrivacyLabel";
+        copy.Dock = DockStyle.Fill;
+        copy.AutoSize = false;
+        copy.AutoEllipsis = true;
+        copy.TextAlign = ContentAlignment.MiddleLeft;
+        copy.Margin = Padding.Empty;
+        note.Controls.Add(shield, 0, 0);
+        note.Controls.Add(copy, 1, 0);
+        return note;
+    }
+
+    private static Control CreateRouteChip(GalleryClipRoute route)
+    {
+        var localOnly = route == GalleryClipRoute.LocalOnly;
+        var label = new Label
+        {
+            Text = localOnly ? "●  Local only" : "●  Uploaded",
+            AutoSize = true,
+            ForeColor = localOnly ? Color.FromArgb(255, 213, 216) : Color.FromArgb(190, 238, 218),
+            Font = ClipCordTheme.InterfaceFont(8.2f),
+            BackColor = Color.Transparent,
+            Location = new Point(9, 4),
+            Margin = Padding.Empty,
+            UseMnemonic = false,
+            AccessibleRole = AccessibleRole.None
+        };
+        var chip = new RoundedPanel
+        {
+            Name = "ClipPlayerRouteChip",
+            AccessibleName = localOnly ? "Local only clip" : "Uploaded clip",
+            AccessibleRole = AccessibleRole.StaticText,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = localOnly ? Color.FromArgb(54, 25, 39) : Color.FromArgb(19, 49, 47),
+            BorderColor = localOnly ? ClipCordTheme.Coral : Color.FromArgb(48, 184, 130),
+            CornerRadius = 8,
+            Padding = new Padding(9, 4, 9, 4),
+            Margin = new Padding(12, 0, 0, 0)
+        };
+        chip.Controls.Add(label);
+        return chip;
     }
 
     protected override void OnHandleCreated(EventArgs eventArgs)
     {
         base.OnHandleCreated(eventArgs);
+        ApplyStartupDpiScale();
         // A handle is recreated whenever the view is reparented, which must not restart a
         // clip the viewer is part-way through.
         if (_playbackStarted) return;
         _playbackStarted = true;
         _lifetimeCancellation ??= new CancellationTokenSource();
         _ = BeginPlaybackAsync(_lifetimeCancellation.Token);
+    }
+
+    private void ApplyStartupDpiScale()
+    {
+        if (_startupDpiScaleApplied) return;
+        _startupDpiScaleApplied = true;
+        var scale = Math.Max(1f, DeviceDpi / 96f);
+        if (scale > 1.001f)
+        {
+            Scale(new SizeF(scale, scale));
+        }
+        if (Parent is BrandedScrollHost scrollHost)
+        {
+            scrollHost.RefreshContentLayout(preservePosition: false);
+        }
     }
 
     private async Task BeginPlaybackAsync(CancellationToken cancellationToken)
@@ -270,7 +439,7 @@ internal sealed class ClipPlayerView : UserControl
         }
         return prepared.AudioTrackCount == ClipPlaybackSource.UnknownAudioTrackCount
             ? "Audio tracks could not be inspected without FFmpeg — if this clip has a separate microphone track, only the first will be audible."
-            : string.Empty;
+            : "Every detected audio track is available for playback, matching what an upload would contain.";
     }
 
     private void OpenMedia(string path)
@@ -438,6 +607,9 @@ internal sealed class ClipPlayerView : UserControl
             ? "0:00.0"
             : $"{(int)value.TotalMinutes}:{value.Seconds:00}.{value.Milliseconds / 100}";
 
+    private int ScaleLogical(int value) =>
+        Math.Max(1, (int)Math.Round(value * DeviceDpi / 96d));
+
     private static Label CreateMutedLabel(string text) => new()
     {
         Text = text,
@@ -448,16 +620,18 @@ internal sealed class ClipPlayerView : UserControl
         BackColor = Color.Transparent
     };
 
-    private static OutlineButton CreateTransportButton(string text, int width) => new()
+    private static OutlineButton CreateTransportButton(string text, int width, bool primary = false) => new()
     {
         Text = text,
         Width = width,
         Height = 36,
-        SurfaceColor = Color.White,
-        HoverColor = Color.FromArgb(246, 243, 253),
-        OutlineColor = ClipCordTheme.CardBorder,
-        ForeColor = ClipCordTheme.Text,
-        Font = ClipCordTheme.InterfaceFont(8.5f),
+        SurfaceColor = primary ? ClipCordTheme.Violet : ClipCordTheme.SurfaceControl,
+        HoverColor = primary ? Color.FromArgb(157, 85, 255) : ClipCordTheme.SurfaceControlHover,
+        OutlineColor = primary ? ClipCordTheme.Violet : ClipCordTheme.BorderStrong,
+        DisabledSurfaceColor = Color.FromArgb(27, 37, 54),
+        DisabledTextColor = ClipCordTheme.TextTertiary,
+        ForeColor = ClipCordTheme.TextPrimary,
+        Font = ClipCordTheme.InterfaceFont(8.5f, primary ? FontStyle.Bold : FontStyle.Regular),
         Margin = Padding.Empty
     };
 
@@ -617,7 +791,7 @@ internal sealed class PlaybackSeekBar : Control
             trackTop,
             Math.Max(1, Width - metrics.ThumbDiameter),
             metrics.TrackHeight);
-        using (var background = new SolidBrush(Enabled ? Color.FromArgb(228, 219, 250) : Color.FromArgb(232, 233, 238)))
+        using (var background = new SolidBrush(Enabled ? ClipCordTheme.SurfaceControlHover : ClipCordTheme.BorderDefault))
         using (var path = RoundedPanel.CreateRoundedPath(trackRect, metrics.TrackHeight))
         {
             graphics.FillPath(background, path);
@@ -627,7 +801,7 @@ internal sealed class PlaybackSeekBar : Control
         if (filledWidth > 0)
         {
             var filled = new Rectangle(trackRect.X, trackRect.Y, filledWidth, trackRect.Height);
-            using var brush = new SolidBrush(Enabled ? ClipCordTheme.Violet : Color.FromArgb(190, 192, 200));
+            using var brush = new SolidBrush(Enabled ? ClipCordTheme.Violet : ClipCordTheme.TextTertiary);
             using var path = RoundedPanel.CreateRoundedPath(filled, metrics.TrackHeight);
             graphics.FillPath(brush, path);
         }
@@ -639,9 +813,9 @@ internal sealed class PlaybackSeekBar : Control
             metrics.ThumbDiameter,
             metrics.ThumbDiameter);
         var paintScale = Height / (float)LogicalHeight;
-        using var thumbBrush = new SolidBrush(Enabled ? Color.White : Color.FromArgb(240, 240, 244));
+        using var thumbBrush = new SolidBrush(Enabled ? ClipCordTheme.TextPrimary : ClipCordTheme.TextSecondary);
         using var thumbPen = new Pen(
-            Enabled ? ClipCordTheme.Violet : Color.FromArgb(190, 192, 200),
+            Enabled ? ClipCordTheme.Violet : ClipCordTheme.TextTertiary,
             Math.Max(1f, 2f * paintScale));
         graphics.FillEllipse(thumbBrush, thumbRect);
         graphics.DrawEllipse(thumbPen, thumbRect);

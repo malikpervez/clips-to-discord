@@ -28,9 +28,41 @@ try
         return;
     }
 
+    if (args.Length == 2 && args[0].Equals("--render-home", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(args[1], SettingsPage.Home),
+            "Home preview");
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-activity", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(args[1], SettingsPage.Activity),
+            "Activity preview");
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-gallery", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(args[1], SettingsPage.Gallery),
+            "Gallery preview");
+        return;
+    }
+
     if (args.Length == 2 && args[0].Equals("--render-gallery-editor", StringComparison.Ordinal))
     {
-        RenderGalleryEditorPreview(args[1]);
+        RunPreviewOnStaThread(
+            () => RenderGalleryEditorPreview(args[1]),
+            "Gallery editor preview");
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-gallery-player", StringComparison.Ordinal))
+    {
+        RenderGalleryPlayerPreview(args[1]);
         return;
     }
 }
@@ -481,20 +513,24 @@ try
     }
     Assert(ReferenceEquals(ClipCordTheme.InterfaceFont(10f), ClipCordTheme.InterfaceFont(10f)),
         "ClipCord fonts must be cached instead of allocating GDI font handles for every control.");
-    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Activity, 144) == new Size(1564, 1256),
-        "Activity must preserve its approved width and add only the top-navigation height.");
-    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, 96) == new Size(1080, 886),
-        "Settings must preserve its approved width and add only the top-navigation height.");
-    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Gallery, 96) == new Size(1100, 890),
-        "The Gallery page must share the expanded top-navigation design size.");
-    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.About, 96) == new Size(1100, 890) &&
-           SettingsForm.GetDesignedOpeningSize(SettingsPage.About, 144) == new Size(1650, 1236) &&
-           SettingsForm.GetDesignedOpeningSize(SettingsPage.About, 192) == new Size(2200, 1582),
-        "About must preserve its approved opening size at 100%, 150%, and 200% DPI.");
-    Assert(SettingsForm.GetScaledMinimumSize(144) == new Size(1350, 975),
-        "The resize floor must scale with the active Windows DPI.");
+    AssertFigmaIconAssets();
+    AssertGalleryThumbnailContracts(Path.Combine(temporaryRoot, "gallery-thumbnail-contracts"));
+    Assert(Enum.GetValues<SettingsPage>().All(page =>
+               SettingsForm.GetDesignedOpeningSize(page, 96) == new Size(1200, 760)),
+        "Every route must use the redesigned 1200x760 shared shell at 100% DPI.");
+    Assert(SettingsForm.GetDesignedOpeningSize(SettingsPage.Activity, 144) == new Size(1800, 1140) &&
+           SettingsForm.GetDesignedOpeningSize(SettingsPage.About, 192) == new Size(2400, 1520),
+        "The shared shell must scale its full 1200x760 design consistently at 150% and 200% DPI.");
+    Assert(SettingsForm.MinimumDesignedClientSize == new Size(960, 620) &&
+           SettingsForm.GetScaledMinimumSize(144) == new Size(1440, 930),
+        "The redesigned 960x620 resize floor must scale with the active Windows DPI.");
+    Assert(SettingsForm.NavigationRailLogicalWidth == 216 &&
+           SettingsForm.PageHeaderLogicalHeight == 64 &&
+           SettingsForm.SaveBarLogicalHeight == 66,
+        "The shared shell's rail, page header, and conditional save-bar geometry must remain pinned to the Figma contract.");
     AssertAboutPageSupport(Path.Combine(temporaryRoot, "about-support"));
     AssertBrandedActivityScrollHost();
+    AssertActivityProjection();
 
     AssertActivityHistory(Path.Combine(temporaryRoot, "activity-history"));
     AssertSettingsFormLayout(new AppSettings(
@@ -1121,6 +1157,85 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
         "A recovered local-only move must never be redirected into the uploaded archive.");
 }
 
+static void AssertActivityProjection()
+{
+    var now = new DateTime(2026, 8, 20, 16, 0, 0, DateTimeKind.Utc);
+    var uploadedOlder = new ClipActivityEntry
+    {
+        Id = Guid.Parse("00000000-0000-0000-0000-000000000001"),
+        CreatedUtc = now.AddHours(-5),
+        UpdatedUtc = now.AddHours(-4),
+        FileName = "Halo older.mp4",
+        GameName = "Halo Infinite",
+        State = ClipActivityState.Archived,
+        Route = ClipActivityRoute.Uploaded
+    };
+    var local = new ClipActivityEntry
+    {
+        Id = Guid.Parse("00000000-0000-0000-0000-000000000002"),
+        CreatedUtc = now.AddHours(-4),
+        UpdatedUtc = now.AddHours(-3),
+        FileName = "Apex local.mp4",
+        GameName = "Apex Legends",
+        State = ClipActivityState.Archived,
+        Route = ClipActivityRoute.LocalOnly
+    };
+    var retrying = new ClipActivityEntry
+    {
+        Id = Guid.Parse("00000000-0000-0000-0000-000000000003"),
+        CreatedUtc = now.AddHours(-3),
+        UpdatedUtc = now.AddHours(-2),
+        FileName = "Counter-Strike retry.mp4",
+        GameName = "Counter-Strike 2",
+        State = ClipActivityState.Retrying
+    };
+    var failed = new ClipActivityEntry
+    {
+        Id = Guid.Parse("00000000-0000-0000-0000-000000000004"),
+        CreatedUtc = now.AddHours(-2),
+        UpdatedUtc = now.AddHours(-1),
+        FileName = "Valorant failed.mp4",
+        GameName = "Valorant",
+        State = ClipActivityState.Failed
+    };
+    var uploadedNewest = new ClipActivityEntry
+    {
+        Id = Guid.Parse("00000000-0000-0000-0000-000000000005"),
+        CreatedUtc = now.AddHours(-1),
+        UpdatedUtc = now.AddMinutes(-2),
+        FileName = "Halo newest.mp4",
+        GameName = "Halo Infinite",
+        State = ClipActivityState.Completed,
+        Route = ClipActivityRoute.Uploaded
+    };
+    // Deliberately oldest-first: the projection, not fixture order, must own sorting.
+    var snapshot = new ClipActivitySnapshot([uploadedOlder, local, retrying, failed, uploadedNewest]);
+
+    var all = ActivityView.ProjectEntries(snapshot, ActivityFilter.All, null);
+    Assert(all.Entries.Select(entry => entry.Id).SequenceEqual([
+               uploadedNewest.Id, failed.Id, retrying.Id, local.Id, uploadedOlder.Id
+           ]),
+        "Activity projection must sort by UpdatedUtc newest-first rather than trusting store insertion order.");
+    Assert(all.Counts == new ActivityFilterCounts(5, 2, 1, 1, 1),
+        $"Activity chips must show actual unfiltered snapshot counts; got {all.Counts}.");
+
+    var uploadedHalo = ActivityView.ProjectEntries(snapshot, ActivityFilter.Uploaded, "  hALO  ");
+    Assert(uploadedHalo.Entries.Select(entry => entry.Id).SequenceEqual([uploadedNewest.Id, uploadedOlder.Id]) &&
+           uploadedHalo.Counts == all.Counts,
+        "Uploaded must be a route filter, search must be trimmed/case-insensitive, and chip counts must not collapse to the visible subset.");
+    var localByGame = ActivityView.ProjectEntries(snapshot, ActivityFilter.LocalOnly, "legends");
+    Assert(localByGame.Entries.Count == 1 && localByGame.Entries[0].Id == local.Id,
+        "Activity search must match the game name inside the selected route.");
+    Assert(ActivityView.ProjectEntries(snapshot, ActivityFilter.Retrying, "retry.mp4").Entries
+               .Single().Id == retrying.Id &&
+           ActivityView.ProjectEntries(snapshot, ActivityFilter.Failed, "halo").Entries.Count == 0,
+        "Retrying/Failed chips must filter current state and then intersect the clip/game search.");
+    Assert(ActivityView.FormatRelativeTime(now.AddSeconds(-20), now) == "Just now" &&
+           ActivityView.FormatRelativeTime(now.AddMinutes(-14), now) == "14 min ago" &&
+           ActivityView.FormatRelativeTime(now.AddHours(-2), now) == "2 h ago",
+        "Activity relative timestamps must remain deterministic at minute and hour boundaries.");
+}
+
 static void AssertActivityHistory(string root)
 {
     Directory.CreateDirectory(root);
@@ -1452,6 +1567,306 @@ static void RecordConcurrentActivities(ActivityHistoryStore store, string root, 
     }
 }
 
+static void AssertFigmaIconAssets()
+{
+    const string resourcePrefix = "ClipsToDiscord.Assets.FigmaIcons.";
+    var expected = new Dictionary<FigmaIconAsset, (string FileName, string Sha256)>
+    {
+        [FigmaIconAsset.About] = ("about.png", "75ccb0fff9cf1b20dddfe69e52ab1454c3ab780e9e57fc551ad03cbb84611f63"),
+        [FigmaIconAsset.Activity] = ("activity.png", "e554febc29160a06cf3fa0d4f2c96a588e715ff0ee21f13729ce6d1460beabd7"),
+        [FigmaIconAsset.ArrowRight] = ("arrow-right.png", "a58377d09ce909c12cc81bdf164a24b1d49a565228886adc1cdf55d9caa1bbed"),
+        [FigmaIconAsset.Bolt] = ("bolt.png", "838518842a4e6007969c4885476706410db290c81da0bd04907ceb8d5b0452ae"),
+        [FigmaIconAsset.Check] = ("check.png", "8c84455f48add96786b59c2f1d71ec07f4663e0d937b14a4d6e2ebcf9c964a2c"),
+        [FigmaIconAsset.ChevronRight] = ("chevron-right.png", "3a46b243c84b607d12f2e22c7c1bcb6b615a583288e492e4cff9df9e92766e15"),
+        [FigmaIconAsset.Clock] = ("clock.png", "da18e4f5e86c4cf840f12d0b94175988b5a19d41263251e64d2b3ea40d02e8a6"),
+        [FigmaIconAsset.External] = ("external.png", "48d0435ca376de91be57f9d57fd6918a532b0689b96a187b93acda3de48ec696"),
+        [FigmaIconAsset.Film] = ("film.png", "5cdab9d22795aa1818a30095713e3a8b0c7b6d1c17fd4cb64dc7d72c3e348ddb"),
+        [FigmaIconAsset.Folder] = ("folder.png", "fc9aa588cfadbdc8cc5531292a4a4facd930376941d32e6b9907a4fb2d7bde80"),
+        [FigmaIconAsset.Gallery] = ("gallery.png", "ed6a0a7bc4a7a337178fb1415fe92039294e62b4c24d5021b9357a42927f1f42"),
+        [FigmaIconAsset.Home] = ("home.png", "6557993d604a612d4ae2c06a5d2b2de5454089bcaa3aa7fe97ca1356ae3d5c0f"),
+        [FigmaIconAsset.More] = ("more.png", "7825ca39fd29e36d4884d7ca4924e0a27f4e82e473e6e650a5ae8813aa9f343c"),
+        [FigmaIconAsset.Play] = ("play.png", "37709608177cda025a60f73093ca50dc2f1cd6a21a6c7227300a1c1d235e3227"),
+        [FigmaIconAsset.Refresh] = ("refresh.png", "76de4b8515f3a30b10a22aef9aea7bedcefebea1ddd3ea7d6526fe2cab537ff8"),
+        [FigmaIconAsset.Search] = ("search.png", "5864d203d75f638db750af490cc957f15d16e08e65c2a7c0c03c6705a3779fd1"),
+        [FigmaIconAsset.Settings] = ("settings.png", "c66fbb264e0b2493606b50618665b035c6551a3d9b4fce8e44462b58212d9e65"),
+        [FigmaIconAsset.Shield] = ("shield.png", "80a16c83d41e6ba022f60011e88707ad5af6a429fa93b93d951aa9fa39b35921"),
+        [FigmaIconAsset.Trim] = ("trim.png", "e231336c071756e0bb62f946bdece590f614f8aa0334665d75a244a1e01d967d"),
+        [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde")
+    };
+    var enumAssets = Enum.GetValues<FigmaIconAsset>();
+    Assert(enumAssets.Length == 20 && enumAssets.ToHashSet().SetEquals(expected.Keys),
+        $"The approved Figma icon catalog must contain exactly 20 pinned assets; got {string.Join(", ", enumAssets)}.");
+
+    var assembly = typeof(FigmaIconRenderer).Assembly;
+    var actualResources = assembly.GetManifestResourceNames()
+        .Where(name => name.StartsWith(resourcePrefix, StringComparison.Ordinal))
+        .ToHashSet(StringComparer.Ordinal);
+    var expectedResources = expected.Values
+        .Select(value => resourcePrefix + value.FileName)
+        .ToHashSet(StringComparer.Ordinal);
+    Assert(actualResources.SetEquals(expectedResources),
+        $"Embedded Figma icon resources diverged from the 20 approved exports: " +
+        $"expected={string.Join(", ", expectedResources.OrderBy(name => name, StringComparer.Ordinal))}; " +
+        $"actual={string.Join(", ", actualResources.OrderBy(name => name, StringComparer.Ordinal))}.");
+    foreach (var (asset, contract) in expected)
+    {
+        var resourceName = resourcePrefix + contract.FileName;
+        using var stream = assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded Figma icon '{resourceName}' was not found.");
+        using var bytes = new MemoryStream();
+        stream.CopyTo(bytes);
+        var payload = bytes.ToArray();
+        var actualHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload)).ToLowerInvariant();
+        Assert(actualHash == contract.Sha256,
+            $"Figma icon {asset} no longer matches its approved raster export: expected {contract.Sha256}, got {actualHash}.");
+        using var imageStream = new MemoryStream(payload, writable: false);
+        using var image = Image.FromStream(imageStream);
+        Assert(image.Size == new Size(96, 96),
+            $"Figma icon {asset} must remain a square 96x96 alpha mask; got {image.Size}.");
+    }
+
+    var expectedMappings = new Dictionary<BrandGlyph, FigmaIconAsset>
+    {
+        [BrandGlyph.Home] = FigmaIconAsset.Home,
+        [BrandGlyph.Settings] = FigmaIconAsset.Settings,
+        [BrandGlyph.Activity] = FigmaIconAsset.Activity,
+        [BrandGlyph.Gallery] = FigmaIconAsset.Gallery,
+        [BrandGlyph.About] = FigmaIconAsset.About,
+        [BrandGlyph.Folder] = FigmaIconAsset.Folder,
+        [BrandGlyph.FolderOpen] = FigmaIconAsset.Folder,
+        [BrandGlyph.Shield] = FigmaIconAsset.Shield,
+        [BrandGlyph.AppStatus] = FigmaIconAsset.Bolt,
+        [BrandGlyph.Diagnostics] = FigmaIconAsset.About,
+        [BrandGlyph.Credits] = FigmaIconAsset.Gallery,
+        [BrandGlyph.FileText] = FigmaIconAsset.External,
+        [BrandGlyph.ReportProblem] = FigmaIconAsset.External,
+        [BrandGlyph.Upload] = FigmaIconAsset.Upload,
+        [BrandGlyph.Clock] = FigmaIconAsset.Clock,
+        [BrandGlyph.Film] = FigmaIconAsset.Film,
+        [BrandGlyph.ArrowRight] = FigmaIconAsset.ArrowRight,
+        [BrandGlyph.ChevronRight] = FigmaIconAsset.ChevronRight,
+        [BrandGlyph.External] = FigmaIconAsset.External,
+        [BrandGlyph.Refresh] = FigmaIconAsset.Refresh,
+        [BrandGlyph.Play] = FigmaIconAsset.Play,
+        [BrandGlyph.Trim] = FigmaIconAsset.Trim,
+        [BrandGlyph.Search] = FigmaIconAsset.Search,
+        [BrandGlyph.More] = FigmaIconAsset.More,
+        [BrandGlyph.Check] = FigmaIconAsset.Check
+    };
+    foreach (var (glyph, expectedAsset) in expectedMappings)
+    {
+        Assert(FigmaIconRenderer.TryGetBrandAsset(glyph, out var actualAsset) && actualAsset == expectedAsset,
+            $"Brand glyph {glyph} must resolve to the approved Figma {expectedAsset} export; got {actualAsset}.");
+    }
+    Assert(!FigmaIconRenderer.TryGetBrandAsset(BrandGlyph.Destination, out _),
+        "The Discord destination brand mark must remain custom artwork instead of being aliased to a generic Figma upload icon.");
+}
+
+static void AssertHomeViewLifecycle(AppSettings settings)
+{
+    using var history = new ActivityHistoryStore(string.Empty);
+    history.Transition(new ClipActivityUpdate(
+        Path.Combine(settings.ClipsFolder, "Halo uploaded.mp4"),
+        ClipActivityState.Archived,
+        GameName: "Halo Infinite",
+        OriginalBytes: 12L * 1024 * 1024,
+        CurrentPath: Path.Combine(settings.ClipsFolder, "uploaded", "Halo uploaded.mp4"),
+        Route: ClipActivityRoute.Uploaded,
+        CompressedBytes: 4L * 1024 * 1024));
+    history.Transition(new ClipActivityUpdate(
+        Path.Combine(settings.ClipsFolder, "Apex local.mp4"),
+        ClipActivityState.Archived,
+        GameName: "Apex Legends",
+        OriginalBytes: 9L * 1024 * 1024,
+        CurrentPath: Path.Combine(settings.ClipsFolder, "local-only", "Apex local.mp4"),
+        Route: ClipActivityRoute.LocalOnly));
+    history.Transition(new ClipActivityUpdate(
+        Path.Combine(settings.ClipsFolder, "Valorant failed.mp4"),
+        ClipActivityState.Failed,
+        GameName: "Valorant",
+        Error: "Safe test failure"));
+
+    var archiveSnapshot = new GallerySnapshot(
+        [new GalleryGameEntry("Apex Legends",
+        [
+            new GalleryClipEntry(
+                Path.Combine(settings.ClipsFolder, "local-only", "Apex", "one.mp4"),
+                "one.mp4",
+                "Apex Legends",
+                GalleryClipRoute.LocalOnly,
+                5L * 1024 * 1024,
+                DateTime.UtcNow),
+            new GalleryClipEntry(
+                Path.Combine(settings.ClipsFolder, "local-only", "Apex", "two.mp4"),
+                "two.mp4",
+                "Apex Legends",
+                GalleryClipRoute.LocalOnly,
+                7L * 1024 * 1024,
+                DateTime.UtcNow)
+        ])],
+        []);
+    using var host = new Form
+    {
+        ClientSize = new Size(984, 696),
+        ShowInTaskbar = false,
+        StartPosition = FormStartPosition.Manual,
+        Location = new Point(-20000, -20000)
+    };
+    using var home = new HomeView(
+        settings,
+        history,
+        watcherStatusProvider: () => "Discord open — watching for clips",
+        discordRunningProvider: () => true,
+        galleryScanner: (_, _) => archiveSnapshot,
+        utcNowProvider: () => new DateTime(2026, 8, 20, 16, 0, 0, DateTimeKind.Utc),
+        showPageHeader: false);
+    host.Controls.Add(home);
+    host.Show();
+    Application.DoEvents();
+
+    var sourceEndpoint = EnumerateControls(home).Single(control => control.Name == "HomeSourceEndpoint");
+    var destinationEndpoint = EnumerateControls(home).Single(control => control.Name == "HomeDestinationEndpoint");
+    Assert(EnumerateControls(sourceEndpoint).OfType<BrandGlyphControl>().Single().Glyph == BrandGlyph.Folder &&
+           EnumerateControls(destinationEndpoint).OfType<BrandGlyphControl>().Single().Glyph == BrandGlyph.Upload,
+        "Home's watched-folder to Discord route must use the approved Figma folder and upload-cloud semantics.");
+    var metricGlyphs = new Dictionary<string, BrandGlyph>
+    {
+        ["HomeRecentActivityMetric"] = BrandGlyph.Activity,
+        ["HomeRecentUploadsMetric"] = BrandGlyph.Upload,
+        ["HomeLocalArchiveMetric"] = BrandGlyph.Film
+    };
+    foreach (var (name, glyph) in metricGlyphs)
+    {
+        var metric = EnumerateControls(home).Single(control => control.Name == name);
+        Assert(EnumerateControls(metric).OfType<HomeMetricGlyph>().Single().Glyph == glyph,
+            $"Home metric '{name}' must retain its approved Figma {glyph} icon.");
+    }
+    var shortcutGlyphs = new Dictionary<string, BrandGlyph>
+    {
+        ["HomeOpenUploadedFolderButton"] = BrandGlyph.Folder,
+        ["HomeOpenLocalOnlyFolderButton"] = BrandGlyph.Folder,
+        ["HomeOpenLogsButton"] = BrandGlyph.External,
+        ["HomeCheckUpdatesButton"] = BrandGlyph.Refresh
+    };
+    foreach (var (name, glyph) in shortcutGlyphs)
+    {
+        var shortcut = EnumerateControls(home).OfType<OutlineButton>().Single(button => button.Name == name);
+        Assert(shortcut.LeadingGlyph == glyph &&
+               shortcut.TrailingIcon == FigmaIconAsset.ChevronRight &&
+               shortcut.AlignContentLeft,
+            $"Home shortcut '{name}' must use its approved Figma {glyph} icon, right chevron, and left-aligned content.");
+    }
+    var privacyIcon = EnumerateControls(home).OfType<FigmaIconControl>()
+        .Single(control => control.Name == "HomePrivacyIcon");
+    Assert(privacyIcon.Asset == FigmaIconAsset.Shield &&
+           EnumerateControls(home).Count(control => control.Name == "HomeRouteArrow") == 1,
+        "Home must retain the approved shield privacy mark and one dedicated Figma route arrow.");
+
+    string LabelText(string name) => EnumerateControls(home)
+        .OfType<Label>()
+        .Single(label => label.Name == name)
+        .Text;
+
+    Assert(!home.IsViewActive && history.SubscriptionCount == 0,
+        "Constructing hidden Home must not subscribe or scan in the background.");
+    Assert(LabelText("HomeSourceNameLabel") == Path.GetFileName(settings.ClipsFolder) &&
+           LabelText("HomeSourcePathLabel") == settings.ClipsFolder &&
+           LabelText("HomeCaptureSourceLabel") == AppSettings.DescribeCaptureSource(settings.CaptureSource),
+        "Home must describe the configured capture source from saved settings rather than placeholder Figma data.");
+    Assert(LabelText("HomeDestinationNameLabel") == "Discord webhook" &&
+           LabelText("HomeDestinationDetailLabel").Contains(
+               AppSettings.NormalizeUploaderName(settings.UploaderName),
+               StringComparison.Ordinal) &&
+           LabelText("HomeRouteLabel") == "Discord route" &&
+           !EnumerateControls(home).OfType<Label>().Any(label =>
+               label.Text.Contains(settings.WebhookUrl, StringComparison.Ordinal)),
+        "Home must show the real saved route and uploader without ever rendering the webhook URL.");
+    Assert(LabelText("HomeRecentActivityCountLabel") == "3" &&
+           LabelText("HomeRecentUploadsCountLabel") == "1" &&
+           LabelText("HomeRecentUploadsDetailLabel").Contains("4.0 MB", StringComparison.Ordinal),
+        "Home metrics must be derived from retained local history, including bytes actually sent.");
+
+    home.ActivateView();
+    WaitForUiCondition(
+        () => LabelText("HomeLocalArchiveCountLabel") == "2",
+        TimeSpan.FromSeconds(3),
+        "Home did not adopt its on-demand Local-only archive scan.");
+    Assert(home.IsViewActive && history.SubscriptionCount == 1 &&
+           LabelText("HomeLocalArchiveDetailLabel").Contains("12.0 MB", StringComparison.Ordinal),
+        "Active Home must own exactly one history subscription and show real Local-only bytes.");
+
+    history.Transition(new ClipActivityUpdate(
+        Path.Combine(settings.ClipsFolder, "Rocket League queued.mp4"),
+        ClipActivityState.Queued,
+        GameName: "Rocket League"));
+    WaitForUiCondition(
+        () => LabelText("HomeRecentActivityCountLabel") == "4",
+        TimeSpan.FromSeconds(3),
+        "Active Home did not receive a live activity snapshot.");
+    home.DeactivateView();
+    Assert(!home.IsViewActive && history.SubscriptionCount == 0,
+        "Leaving Home must synchronously detach its live-history subscription.");
+    history.Transition(new ClipActivityUpdate(
+        Path.Combine(settings.ClipsFolder, "Inactive update.mp4"),
+        ClipActivityState.Hashing,
+        GameName: "Inactive"));
+    Application.DoEvents();
+    Assert(LabelText("HomeRecentActivityCountLabel") == "4",
+        "Inactive Home must not keep observing history in the background.");
+    home.ActivateView();
+    Assert(LabelText("HomeRecentActivityCountLabel") == "5" && history.SubscriptionCount == 1,
+        "Reactivating Home must refresh the snapshot before attaching one new subscription.");
+    home.DeactivateView();
+    AssertHomePrivacyTextFits(home);
+    host.Close();
+
+    using var cancellationHistory = new ActivityHistoryStore(string.Empty);
+    using var scanStarted = new ManualResetEventSlim();
+    using var scanCancelled = new ManualResetEventSlim();
+    using var blockingHome = new HomeView(
+        settings,
+        cancellationHistory,
+        galleryScanner: (_, cancellationToken) =>
+        {
+            scanStarted.Set();
+            try
+            {
+                cancellationToken.WaitHandle.WaitOne();
+                cancellationToken.ThrowIfCancellationRequested();
+                return new GallerySnapshot([], []);
+            }
+            catch (OperationCanceledException)
+            {
+                scanCancelled.Set();
+                throw;
+            }
+        },
+        showPageHeader: false);
+    blockingHome.ActivateView();
+    Assert(scanStarted.Wait(TimeSpan.FromSeconds(3)),
+        "Activating Home must start its archive scan on demand.");
+    blockingHome.DeactivateView();
+    Assert(scanCancelled.Wait(TimeSpan.FromSeconds(3)) && cancellationHistory.SubscriptionCount == 0,
+        "Leaving Home must cancel an in-flight archive scan and detach history observation.");
+}
+
+static void AssertHomePrivacyTextFits(Control root)
+{
+    var privacy = EnumerateControls(root).OfType<Label>()
+        .Single(label => label.Name == "HomePrivacyNote");
+    var available = new Size(
+        Math.Max(1, privacy.ClientSize.Width - privacy.Padding.Horizontal),
+        int.MaxValue);
+    var measured = TextRenderer.MeasureText(
+        privacy.Text,
+        privacy.Font,
+        available,
+        TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+    Assert(!privacy.AutoEllipsis &&
+           measured.Height <= privacy.ClientSize.Height - privacy.Padding.Vertical + 1,
+        $"Home privacy copy must wrap without truncation: measured={measured}, client={privacy.ClientSize}, padding={privacy.Padding}.");
+}
+
 static void AssertSettingsFormLayout(AppSettings settings)
 {
     Exception? failure = null;
@@ -1459,8 +1874,12 @@ static void AssertSettingsFormLayout(AppSettings settings)
     {
         try
         {
+            TraceSmokeStep("Settings layout: Home lifecycle and truthful data");
+            AssertHomeViewLifecycle(settings);
             TraceSmokeStep("Settings layout: pre-handle Gallery lifecycle");
             AssertGalleryPreHandleLifecycle(settings);
+            TraceSmokeStep("Settings layout: visible Gallery thumbnails");
+            AssertGalleryThumbnailLifecycle(settings);
             TraceSmokeStep("Settings layout: Gallery playback prewarm");
             AssertGalleryPlaybackPrewarm(settings);
             TraceSmokeStep("Settings layout: Gallery Local-only editor flow");
@@ -1497,8 +1916,15 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 var save = EnumerateControls(activityThenSettings)
                     .OfType<Button>()
                     .Single(button => button.Text == "Save changes");
+                Assert(activityThenSettings.AcceptButton is null && !save.Visible,
+                    "Activity-to-Settings navigation must keep the save bar collapsed while the draft is pristine.");
+                var uploader = EnumerateControls(activityThenSettings)
+                    .OfType<TextBox>()
+                    .Single(textBox => textBox.AccessibleName == "Uploader name");
+                uploader.Text += " updated";
+                Application.DoEvents();
                 Assert(ReferenceEquals(activityThenSettings.AcceptButton, save) && save.Visible,
-                    "Activity-to-Settings navigation must restore the real save action.");
+                    "Editing Settings after Activity navigation must reveal the real conditional save action.");
                 save.PerformClick();
                 Assert(activityThenSettings.DialogResult == DialogResult.OK &&
                        activityThenSettings.SavedSettings is not null,
@@ -1518,6 +1944,30 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 AudioKbps: 96,
                 IncrementAttempt: true,
                 Detail: "Compression complete; preparing the Discord upload."));
+            activityHistory.Transition(new ClipActivityUpdate(
+                Path.Combine(settings.ClipsFolder, "Halo uploaded.mp4"),
+                ClipActivityState.Archived,
+                GameName: "Halo Infinite",
+                OriginalBytes: 40L * 1024 * 1024,
+                CurrentPath: Path.Combine(settings.ClipsFolder, "uploaded", "Halo uploaded.mp4"),
+                Route: ClipActivityRoute.Uploaded));
+            activityHistory.Transition(new ClipActivityUpdate(
+                Path.Combine(settings.ClipsFolder, "Apex local.mp4"),
+                ClipActivityState.Archived,
+                GameName: "Apex Legends",
+                OriginalBytes: 50L * 1024 * 1024,
+                CurrentPath: Path.Combine(settings.ClipsFolder, "local-only", "Apex local.mp4"),
+                Route: ClipActivityRoute.LocalOnly));
+            activityHistory.Transition(new ClipActivityUpdate(
+                Path.Combine(settings.ClipsFolder, "Counter-Strike retry.mp4"),
+                ClipActivityState.Retrying,
+                GameName: "Counter-Strike 2",
+                IncrementAttempt: true));
+            activityHistory.Transition(new ClipActivityUpdate(
+                Path.Combine(settings.ClipsFolder, "Valorant failed.mp4"),
+                ClipActivityState.Failed,
+                GameName: "Valorant",
+                Error: "Safe test failure"));
             using var form = new SettingsForm(
                 settings,
                 checkForUpdatesAsync: _ => Task.CompletedTask,
@@ -1528,15 +1978,35 @@ static void AssertSettingsFormLayout(AppSettings settings)
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
             AssertControlsFit(form);
             var designedOpeningSize = form.Size;
-            AssertSettingsCardsOpenWithoutScrolling(form);
             form.Show();
             Application.DoEvents();
+            AssertSettingsCardsOpenWithoutScrolling(form);
             AssertControlsFit(form);
-            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
+            AssertSharedShellLayout(form);
+            AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
+            AssertSettingsDirtySaveBar(form);
+            form.ShowPage(SettingsPage.Gallery);
+            Application.DoEvents();
+            AssertGalleryHeaderActionPlacement(form, expectedSharedHeader: true);
+            form.ShowPage(SettingsPage.Settings);
+            Application.DoEvents();
+            var baselineSubscriptions = activityHistory.SubscriptionCount;
+            form.ShowPage(SettingsPage.Home);
+            Application.DoEvents();
+            var homePage = EnumerateControls(form).OfType<HomeView>().Single();
+            Assert(form.Text == "ClipCord — Home" && homePage.Visible && homePage.IsViewActive &&
+                   EnumerateControls(form).Single(control => control.Name == "HomeNavItem").AccessibleDescription == "Current page" &&
+                   EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageTitleLabel").Text == "Home" &&
+                   EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageSubtitleLabel").Text == "Everything ClipCord is doing right now" &&
+                   activityHistory.SubscriptionCount == baselineSubscriptions + 1,
+                "Home navigation must activate its truthful dashboard and exactly one page-scoped history subscription.");
+            form.ShowPage(SettingsPage.Settings);
+            Application.DoEvents();
+            Assert(!homePage.IsViewActive && activityHistory.SubscriptionCount == baselineSubscriptions,
+                "Leaving Home must detach only Home's subscription while preserving Activity's owned subscription.");
             AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, designedOpeningSize);
             AssertSettingsTextFieldsAligned(form);
             AssertSettingsCardGrid(form);
-            AssertSettingsFeatureIcons(form);
             AssertCompressionTargetPickerInteraction(form);
             AssertCriticalTextFits(form);
             AssertAccessibility(form);
@@ -1575,26 +2045,27 @@ static void AssertSettingsFormLayout(AppSettings settings)
             form.Hide();
             form.Size = form.MinimumSize;
             form.PerformLayout();
-            AssertControlsFit(form);
             form.Show();
             Application.DoEvents();
             AssertControlsFit(form);
-            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
+            AssertSharedShellLayout(form);
+            AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
             AssertSettingsCardGrid(form);
             AssertSettingsTextFieldsAligned(form);
             AssertCriticalTextFits(form);
+            AssertSettingsMinimumViewport(form);
             form.Hide();
 
             var buttonTexts = EnumerateControls(form)
                 .OfType<Button>()
                 .Select(button => button.Text)
                 .ToHashSet(StringComparer.Ordinal);
-            Assert(new[] { "Browse", "Test webhook", "Check for updates", "Save changes", "Cancel" }
+            Assert(new[] { "Browse", "Test webhook", "Check for updates", "Save changes", "Discard" }
                     .All(buttonTexts.Contains),
                 "The settings form must keep all action buttons available.");
             var startupCheckbox = EnumerateControls(form)
                 .OfType<CheckBox>()
-                .Single(checkBox => checkBox.Text == "Start with Windows");
+                .Single(checkBox => checkBox.Name == "StartWithWindowsToggle");
             Assert(startupCheckbox.Width > 0 && startupCheckbox.Height > 0,
                 "The Start with Windows checkbox must occupy visible layout space.");
             var modeHotkey = EnumerateControls(form)
@@ -1615,12 +2086,16 @@ static void AssertSettingsFormLayout(AppSettings settings)
             var uploadModeHelper = EnumerateControls(form)
                 .OfType<Label>()
                 .Single(label => label.Name == "UploadModeHelperLabel");
-            var privacySummary = EnumerateControls(form)
-                .OfType<Label>()
-                .Single(label => label.Name == "PrivacySummaryLabel");
+            var localRoute = EnumerateControls(form).OfType<OutlineButton>()
+                .Single(button => button.AccessibleName == "Keep new clips local only");
+            var discordRoute = EnumerateControls(form).OfType<OutlineButton>()
+                .Single(button => button.AccessibleName == "Route new clips to Discord");
             Assert(uploadModeHelper.Text.Contains("No Discord request", StringComparison.Ordinal) &&
-                   privacySummary.Text.Contains("Local-only mode", StringComparison.Ordinal),
-                "Turning uploads off must immediately explain the local-only behavior.");
+                   localRoute.AccessibleDescription == "Selected route" &&
+                   localRoute.AccessibilityObject.State.HasFlag(AccessibleStates.Checked) &&
+                   discordRoute.AccessibleDescription != "Selected route" &&
+                   !discordRoute.AccessibilityObject.State.HasFlag(AccessibleStates.Checked),
+                "Turning uploads off must immediately explain local-only behavior and update the real rail route selection.");
 
             var steelSeriesButton = EnumerateControls(form).OfType<Button>()
                 .Single(button => button.Name == "SteelSeriesCaptureSourceButton");
@@ -1629,7 +2104,9 @@ static void AssertSettingsFormLayout(AppSettings settings)
             var captureHelper = EnumerateControls(form).OfType<Label>()
                 .Single(label => label.Name == "CaptureSourceHelperLabel");
             Assert(steelSeriesButton.AccessibleDescription == "Selected capture source" &&
+                   steelSeriesButton.AccessibilityObject.State.HasFlag(AccessibleStates.Checked) &&
                    nvidiaButton.AccessibleDescription != "Selected capture source" &&
+                   !nvidiaButton.AccessibilityObject.State.HasFlag(AccessibleStates.Checked) &&
                    !captureHelper.Text.Contains("subfolders", StringComparison.Ordinal),
                 "The clip source card must default to SteelSeries GG and describe the flat scan.");
             var raiseClick = typeof(Control).GetMethod(
@@ -1638,7 +2115,9 @@ static void AssertSettingsFormLayout(AppSettings settings)
             raiseClick.Invoke(nvidiaButton, [EventArgs.Empty]);
             Application.DoEvents();
             Assert(nvidiaButton.AccessibleDescription == "Selected capture source" &&
+                   nvidiaButton.AccessibilityObject.State.HasFlag(AccessibleStates.Checked) &&
                    steelSeriesButton.AccessibleDescription != "Selected capture source" &&
+                   !steelSeriesButton.AccessibilityObject.State.HasFlag(AccessibleStates.Checked) &&
                    captureHelper.Text.Contains("<game> subfolders", StringComparison.Ordinal),
                 "Choosing NVIDIA must move the selection and explain the per-game scan.");
             // Choosing NVIDIA must never block saving, whatever the folder currently holds.
@@ -1697,70 +2176,145 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .Single(control => control.Name == "ActivityList");
             Assert(!activityScrollHost.AutoScroll && !activityList.AutoScroll,
                 "Activity must not expose the native Windows scrollbar.");
+            Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 5,
+                "The Activity page must render the current bounded history through its newest-first projection.");
+            Assert(!EnumerateControls(form).Single(control => control.Name == "ActivityEmbeddedHeader").Visible &&
+                   EnumerateControls(form).Single(control => control.Name == "ActivitySearchTextBox").Visible &&
+                   EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageTitleLabel").Text == "Activity" &&
+                   EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageSubtitleLabel").Text == "Recent clip activity stored on this PC",
+                "The shared header must own Activity's title while its search and actions remain available in the body.");
+            var activityFilters = EnumerateControls(form)
+                .OfType<Button>()
+                .Where(button => button.Name.StartsWith("ActivityFilter", StringComparison.Ordinal))
+                .ToDictionary(button => button.Name, StringComparer.Ordinal);
+            Assert(activityFilters.Count == 5 &&
+                   activityFilters["ActivityFilterAllButton"].AccessibleName == "All, 5 clips" &&
+                   activityFilters["ActivityFilterUploadedButton"].AccessibleName == "Uploaded, 1 clip" &&
+                   activityFilters["ActivityFilterLocalOnlyButton"].AccessibleName == "Local only, 1 clip" &&
+                   activityFilters["ActivityFilterRetryingButton"].AccessibleName == "Retrying, 1 clip" &&
+                   activityFilters["ActivityFilterFailedButton"].AccessibleName == "Failed, 1 clip",
+                "Activity filter chips must expose actual full-snapshot counts rather than Figma sample numbers.");
+            var activitySearch = EnumerateControls(form).OfType<TextBox>()
+                .Single(textBox => textBox.Name == "ActivitySearchTextBox");
+            activitySearch.Text = "  hALO ";
+            Application.DoEvents();
             Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 1,
-                "The Activity page must render the current bounded history.");
+                "Activity search must trim and match clip/game text case-insensitively.");
+            activityFilters["ActivityFilterUploadedButton"].PerformClick();
+            Application.DoEvents();
+            Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 1 &&
+                   activityFilters["ActivityFilterUploadedButton"].AccessibleDescription == "Selected filter",
+                "The Uploaded route chip must intersect the active search and publish its selected state.");
+            activitySearch.Text = "valorant";
+            Application.DoEvents();
+            Assert(EnumerateControls(form).All(control => control.Name != "ActivityCard" || !control.Visible) &&
+                   EnumerateControls(form).Any(control => control.Name == "ActivityEmptyState" && control.Visible),
+                "An empty Activity projection must show its filtered empty state rather than stale rows.");
+            activityFilters["ActivityFilterFailedButton"].PerformClick();
+            Application.DoEvents();
+            Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 1,
+                "The Failed state chip must recover the matching failure without changing the search.");
+            activitySearch.Clear();
+            activityFilters["ActivityFilterAllButton"].PerformClick();
+            Application.DoEvents();
+            Assert(EnumerateControls(form).Count(control => control.Name == "ActivityCard" && control.Visible) == 5,
+                "Clearing Activity search and returning to All must restore every retained row.");
             Assert(EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenUploadedFolderButton") &&
                    EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenLogsButton") &&
                    EnumerateControls(form).OfType<Button>().Any(button => button.Name == "OpenFileLocationButton"),
                 "Activity must expose uploaded-folder, log, and per-clip location actions.");
+            AssertActivityShowInFolderContentFits(form, GetDpiScale(form));
             AssertControlsFit(form);
             AssertCriticalTextFits(form);
 
             TraceSmokeStep("Settings layout: Gallery interaction");
             form.ShowPage(SettingsPage.Gallery);
             WaitForUiCondition(
-                () => EnumerateControls(form).Count(control => control.Name == "GalleryGameCard") == 2,
+                () => EnumerateControls(form).OfType<GalleryGameFilterButton>()
+                    .Count(control => control.Name == "GalleryGameFilterButton") == 2,
                 TimeSpan.FromSeconds(5),
-                "Gallery did not finish its on-demand archive scan.");
+                "Gallery did not finish its on-demand game-rail scan.");
             Assert(form.Text.EndsWith("Gallery", StringComparison.Ordinal) &&
                    EnumerateControls(form).Single(control => control.Name == "GalleryView").Visible,
                 "Gallery navigation must activate the branded Gallery page.");
+            AssertGalleryHeaderActionPlacement(form, expectedSharedHeader: false);
             var galleryView = EnumerateControls(form).OfType<GalleryView>().Single();
+            Assert((GalleryGameFilterButton.CountTextFlags & TextFormatFlags.NoPadding) != 0,
+                "Gallery game counts must be drawn with the same no-padding text contract used to measure their rectangles.");
+            var gallerySearch = EnumerateControls(form).OfType<TextBox>()
+                .Single(textBox => textBox.Name == "GallerySearchTextBox");
+            var unfilteredGalleryCardCount = EnumerateControls(form).Count(control => control.Name == "GalleryClipCard");
+            gallerySearch.Text = "Battlefield";
+            Application.DoEvents();
+            var filteredGalleryCardCount = EnumerateControls(form).Count(control => control.Name == "GalleryClipCard");
+            Assert(filteredGalleryCardCount > 0 && filteredGalleryCardCount < unfilteredGalleryCardCount,
+                "Gallery search must filter the live clip grid before Escape is tested.");
+            var processDialogKey = typeof(SettingsForm).GetMethod(
+                "ProcessDialogKey",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var escapeHandled = (bool)processDialogKey.Invoke(form, [Keys.Escape])!;
+            Application.DoEvents();
+            var currentPage = (SettingsPage)typeof(SettingsForm).GetField(
+                "_currentPage",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(form)!;
+            Assert(escapeHandled && gallerySearch.TextLength == 0 &&
+                   form.Visible && !form.IsDisposed &&
+                   currentPage == SettingsPage.Gallery &&
+                   EnumerateControls(form).Single(control => control.Name == "GalleryView").Visible &&
+                   EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == unfilteredGalleryCardCount,
+                "The real Settings dialog-key path must clear a nonempty Gallery search before it navigates or closes the window.");
             var galleryGridForDisposal = (GalleryGridPanel)typeof(GalleryView).GetField(
-                    "_gameGrid",
+                    "_clipGrid",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
                 .GetValue(galleryView)!;
             var galleryListForDisposal = (ActivityListPanel)typeof(GalleryView).GetField(
-                    "_clipList",
+                    "_gameFilterList",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
                 .GetValue(galleryView)!;
-            var topNavigation = EnumerateControls(form).Single(control => control.Name == "TopNavigation");
+            var navigationRail = EnumerateControls(form).Single(control => control.Name == "NavigationRail");
+            var sharedHeader = EnumerateControls(form).Single(control => control.Name == "CustomTitleBar");
             var pageHost = EnumerateControls(form).Single(control => control.Name == "PageHost");
-            Assert(topNavigation.Bottom <= pageHost.Top,
-                "The primary navigation must remain above the page content instead of using a sidebar.");
+            Assert(navigationRail.Right <= pageHost.Left &&
+                   sharedHeader.Left == pageHost.Left && sharedHeader.Bottom <= pageHost.Top,
+                "The shared shell must keep its 216px navigation rail left of both the page header and page content.");
             Assert(EnumerateControls(form).Single(control => control.Name == "GalleryNavItem").TabStop,
-                "Gallery must be keyboard reachable from the top navigation.");
-            var gameCard = EnumerateControls(form)
-                .OfType<GalleryGameCard>()
-                .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
-            gameCard.Focus();
-            Assert(gameCard.Focused, "The Gallery game card must accept keyboard focus.");
+                "Gallery must be keyboard reachable from the left navigation rail.");
+            var gameFilter = EnumerateControls(form)
+                .OfType<GalleryGameFilterButton>()
+                .Single(control => control.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+            gameFilter.Focus();
+            Assert(gameFilter.Focused, "The Gallery game-rail filter must accept keyboard focus.");
             typeof(Control).GetMethod(
                     "OnKeyDown",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-                .Invoke(gameCard, [new KeyEventArgs(Keys.Enter)]);
+                .Invoke(gameFilter, [new KeyEventArgs(Keys.Enter)]);
             Application.DoEvents();
             Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2 &&
                    EnumerateControls(form).OfType<Button>().Any(button => button.Name == "PlayGalleryClipButton") &&
                    EnumerateControls(form).OfType<Button>().Any(button => button.Name == "ShowGalleryClipButton"),
-                "Enter must open a Gallery game and expose uploaded and local-only clip actions.");
-            EnumerateControls(form).OfType<Button>()
-                .Single(button => button.Name == "GalleryBackButton")
-                .PerformClick();
+                "Enter must select a Gallery game and expose uploaded and local-only clip actions.");
+            var allGames = EnumerateControls(form)
+                .OfType<GalleryGameFilterButton>()
+                .Single(control => control.Name == "GalleryAllGamesFilterButton");
+            typeof(Control).GetMethod(
+                    "OnClick",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(allGames, [EventArgs.Empty]);
             Application.DoEvents();
-            gameCard = EnumerateControls(form)
-                .OfType<GalleryGameCard>()
-                .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
-            gameCard.Focus();
+            gameFilter = EnumerateControls(form)
+                .OfType<GalleryGameFilterButton>()
+                .Single(control => control.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+            gameFilter.Focus();
             typeof(Control).GetMethod(
                     "OnKeyDown",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-                .Invoke(gameCard, [new KeyEventArgs(Keys.Space)]);
+                .Invoke(gameFilter, [new KeyEventArgs(Keys.Space)]);
             Application.DoEvents();
             Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2,
-                "Space must open a focused Gallery game card through its keyboard handler.");
+                "Space must select a focused Gallery game-rail entry through its keyboard handler.");
             AssertControlsFit(form);
-            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
+            AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
             AssertCriticalTextFits(form);
 
             TraceSmokeStep("Settings layout: About navigation and geometry");
@@ -1771,7 +2325,7 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 .Invoke(aboutNavigation, [EventArgs.Empty]);
             Application.DoEvents();
             var aboutView = EnumerateControls(form).OfType<AboutView>().Single();
-            var footer = EnumerateControls(form).Single(control => control.Name == "FooterLayout");
+            var saveBarHost = EnumerateControls(form).Single(control => control.Name == "SettingsSaveBarHost");
             var saveButton = EnumerateControls(form).OfType<Button>().Single(button => button.Text == "Save changes");
             Assert(form.Text == "ClipCord — About" &&
                    aboutView.Visible &&
@@ -1780,15 +2334,15 @@ static void AssertSettingsFormLayout(AppSettings settings)
                    !EnumerateControls(form).Single(control => control.Name == "GalleryView").Visible,
                 "About navigation must activate one real page inside the branded shell.");
             Assert(aboutNavigation.AccessibleDescription == "Current page" &&
-                   new[] { "SettingsNavItem", "ActivityNavItem", "GalleryNavItem" }
+                   new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "GalleryNavItem" }
                        .Select(name => EnumerateControls(form).Single(control => control.Name == name))
                        .All(control => string.IsNullOrEmpty(control.AccessibleDescription)),
                 "About navigation must expose the current-page state without leaving another page selected.");
             Assert(!saveButton.Visible && form.AcceptButton is null && form.SavedSettings is null &&
-                   !footer.Visible &&
+                   !saveBarHost.Visible &&
                    ((TableLayoutPanel)EnumerateControls(form).Single(control => control.Name == "RootLayout"))
-                       .RowStyles[3].Height == 0,
-                "About must remove Settings save/footer actions rather than creating an implicit save path.");
+                       .RowStyles[2].Height == 0,
+                "About must collapse Settings' dirty save bar without creating an implicit save path.");
             AssertAboutLayout(form, GetDpiScale(form));
             AssertAboutCopyAndAccessibility(form);
             var aboutDesignedSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.About, form.DeviceDpi);
@@ -1800,12 +2354,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
 
             form.ShowPage(SettingsPage.Settings);
             Application.DoEvents();
-            Assert(footer.Visible &&
-                   ((TableLayoutPanel)EnumerateControls(form).Single(control => control.Name == "RootLayout"))
-                       .RowStyles[3].Height == SettingsForm.FooterLogicalHeight &&
-                   saveButton.Visible && ReferenceEquals(form.AcceptButton, saveButton),
-                "Returning from About to Settings must restore the normal footer and save action.");
-            AssertSettingsFooterLayout(form, requireLogicalHeight: true);
+            Assert(saveBarHost.Visible && saveButton.Visible && ReferenceEquals(form.AcceptButton, saveButton),
+                "Returning from About to a dirty Settings draft must restore its conditional save action.");
+            AssertConditionalSaveBarLayout(form, expectedVisible: true, requireLogicalHeight: true);
+            AssertConditionalSaveBarLayout(form, expectedVisible: true, requireLogicalHeight: true);
             Assert(EnumerateControls(form).OfType<Label>().Any(label => label.Text == "Local only"),
                 "The branded header must present the complete local-only watcher status.");
             var headerLogo = EnumerateControls(form)
@@ -1814,11 +2366,14 @@ static void AssertSettingsFormLayout(AppSettings settings)
             var productName = EnumerateControls(form)
                 .OfType<Label>()
                 .Single(control => control.Name == "ProductNameLabel");
+            var productVersion = EnumerateControls(form)
+                .OfType<Label>()
+                .Single(control => control.Name == "ProductVersionLabel");
             Assert(ClipCordLogoControl.EmbeddedAssetSize == new Size(1024, 1024),
                 "The branded header must render the full-resolution embedded app-icon.png asset.");
             Assert(Math.Min(headerLogo.Width, headerLogo.Height) >= productName.Height,
                 $"The branded header logo must be at least as tall as the wordmark; logo={headerLogo.Size}, wordmark={productName.Size}.");
-            AssertVerticalCentersMatch(headerLogo, productName);
+            AssertBrandClusterVerticallyCentered(headerLogo, productName, productVersion);
             AssertOfficialLogoArtworkPainted(headerLogo);
 
             using var updateDialog = new UpdateAvailableDialog(
@@ -1867,15 +2422,19 @@ static void AssertSettingsFormLayout(AppSettings settings)
             }
 
             TraceSmokeStep("Settings layout: update and round-trip dialogs");
+            TraceSmokeStep("Settings layout: Settings round trip");
             AssertSettingsRoundTrip(settings);
+            TraceSmokeStep("Settings layout: Settings update close protection");
             AssertManualCheckCloseProtection(
                 settings,
                 SettingsPage.Settings,
                 "SettingsCheckUpdatesButton");
+            TraceSmokeStep("Settings layout: About update close protection");
             AssertManualCheckCloseProtection(
                 settings,
                 SettingsPage.About,
                 "AboutCheckUpdatesButton");
+            TraceSmokeStep("Settings layout: update and round-trip dialogs complete");
             form.Dispose();
             Assert(galleryGridForDisposal.IsDisposed && galleryListForDisposal.IsDisposed,
                 "Both Gallery content panels must be disposed, including the one detached from the scroll host.");
@@ -1883,6 +2442,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertSettingsScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Settings 200% scaling");
             AssertSettingsScaledLayout(settings, 2f);
+            TraceSmokeStep("Settings layout: Activity action 150% scaling");
+            AssertActivityScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Activity action 200% scaling");
+            AssertActivityScaledLayout(settings, 2f);
             TraceSmokeStep("Settings layout: Gallery 150% scaling");
             AssertGalleryScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Gallery 200% scaling");
@@ -1902,9 +2465,16 @@ static void AssertSettingsFormLayout(AppSettings settings)
             {
                 emptyGalleryGrid.Controls.Add(emptyGalleryState);
                 emptyGalleryGrid.Reflow();
-                Assert(emptyGalleryState.Width == emptyGalleryGrid.ClientSize.Width &&
-                       emptyGalleryGrid.MeasureContentHeight() == 160,
-                    "The Gallery empty state must span the viewport and report its actual content height.");
+                var expectedEmptyHeight = (int)Math.Round(
+                    160 * Math.Max(96, emptyGalleryGrid.DeviceDpi) / 96d);
+                var expectedEmptyWidth = emptyGalleryGrid.ClientSize.Width - emptyGalleryGrid.Padding.Horizontal;
+                var measuredEmptyHeight = emptyGalleryGrid.MeasureContentHeight();
+                Assert(emptyGalleryState.Width == expectedEmptyWidth &&
+                       emptyGalleryState.Height == expectedEmptyHeight &&
+                       measuredEmptyHeight == expectedEmptyHeight + emptyGalleryGrid.Padding.Vertical,
+                    $"The Gallery empty state must span the padded viewport and report its DPI-scaled content height: " +
+                    $"state={emptyGalleryState.Bounds}, viewport={emptyGalleryGrid.ClientSize}, " +
+                    $"padding={emptyGalleryGrid.Padding}, measured={measuredEmptyHeight}, dpi={emptyGalleryGrid.DeviceDpi}.");
             }
             Assert(activityHistory.SubscriptionCount == 0,
                 "Closing the Settings/Activity window must detach its live-history subscription.");
@@ -3028,18 +3598,21 @@ static void AssertAboutViewActions(AppSettings settings)
             $"An About project button attempted to open an untrusted target: {start.FileName}.");
     }
 
-    var checkButton = buttons["AboutCheckUpdatesButton"];
+    var checkButton = view.UpdateActionButton;
+    Assert(checkButton.Name == "AboutCheckUpdatesButton" &&
+           !EnumerateControls(view).Contains(checkButton),
+        "About must expose its update action to the shared shell header instead of duplicating it inside the page body.");
     checkButton.PerformClick();
     Assert(checkRequests == 1,
         "The About update button must raise exactly one request through its owner-provided lifecycle.");
     view.SetBusy(true, updateChecksAvailable: true);
-    Assert(buttons.Values.All(button => !button.Enabled),
+    Assert(!checkButton.Enabled && buttons.Values.All(button => !button.Enabled),
         "A busy About update must disable update, diagnostics, and project actions together.");
     checkButton.PerformClick();
     Assert(checkRequests == 1,
         "A disabled About update button must not start a second request.");
     view.SetBusy(false, updateChecksAvailable: true);
-    Assert(buttons.Values.All(button => button.Enabled),
+    Assert(checkButton.Enabled && buttons.Values.All(button => button.Enabled),
         "About actions must be restored after the shared update lifecycle completes.");
 
     host.Hide();
@@ -3068,7 +3641,7 @@ static void AssertAboutLayout(SettingsForm form, float expectedScale)
         name =>
         {
             var control = EnumerateControls(view).Single(candidate => candidate.Name == name);
-            return new Rectangle(control.PointToScreen(Point.Empty), control.Size);
+            return GetBoundsRelativeTo(control, form);
         },
         StringComparer.Ordinal);
     var hero = bounds["AboutHero"];
@@ -3076,50 +3649,126 @@ static void AssertAboutLayout(SettingsForm form, float expectedScale)
     var diagnostics = bounds["AboutDiagnosticsCard"];
     var privacy = bounds["AboutPrivacyCard"];
     var credits = bounds["AboutCreditsCard"];
-    Assert(status.Top == diagnostics.Top && status.Bottom == diagnostics.Bottom &&
-           Math.Abs(status.Width - diagnostics.Width) <= 1 &&
-           diagnostics.Left - status.Right == expectedGap,
-        $"The upper About cards must form an equal row with a {expectedGap}px gap: status={status}, diagnostics={diagnostics}.");
-    Assert(privacy.Top == credits.Top && privacy.Bottom == credits.Bottom &&
-           Math.Abs(privacy.Width - credits.Width) <= 1 &&
-           credits.Left - privacy.Right == expectedGap,
-        $"The lower About cards must form an equal row with a {expectedGap}px gap: privacy={privacy}, credits={credits}.");
+    var expectedHorizontalPadding = (int)Math.Round(28 * expectedScale);
+    var expectedTwoColumns = content.ClientSize.Width - expectedHorizontalPadding * 2 >=
+                             (int)Math.Round(720 * expectedScale);
+    if (expectedTwoColumns)
+    {
+        Assert(status.Top == diagnostics.Top &&
+               Math.Abs(status.Width - diagnostics.Width) <= 1 &&
+               diagnostics.Left - status.Right == expectedGap &&
+               privacy.Left == status.Left && credits.Left == diagnostics.Left &&
+               privacy.Top - status.Bottom == expectedGap &&
+               credits.Top - diagnostics.Bottom == expectedGap &&
+               Math.Abs(privacy.Width - status.Width) <= 1 &&
+               Math.Abs(credits.Width - diagnostics.Width) <= 1 &&
+               Math.Abs(privacy.Bottom - credits.Bottom) <= 1,
+            $"The wide About page must preserve the approved staggered two-column rhythm: " +
+            $"status={status}, diagnostics={diagnostics}, privacy={privacy}, credits={credits}, gap={expectedGap}.");
+        Assert(diagnostics.Height < status.Height && privacy.Top > credits.Top && privacy.Height < credits.Height,
+            $"The About grid must remain intentionally staggered rather than regressing to equal rows: " +
+            $"status={status}, diagnostics={diagnostics}, privacy={privacy}, credits={credits}.");
+    }
+    else
+    {
+        var stack = new[] { status, diagnostics, privacy, credits };
+        Assert(stack.All(bounds => bounds.Left == hero.Left && Math.Abs(bounds.Right - hero.Right) <= 1) &&
+               diagnostics.Top - status.Bottom == expectedGap &&
+               privacy.Top - diagnostics.Bottom == expectedGap &&
+               credits.Top - privacy.Bottom == expectedGap,
+            $"The narrow About page must reflow to one full-width card stack with uniform gaps: " +
+            string.Join(", ", stack));
+    }
     Assert(status.Top - hero.Bottom == expectedGap &&
-           privacy.Top - status.Bottom == expectedGap &&
-           hero.Left == status.Left && hero.Left == privacy.Left &&
-           Math.Abs(hero.Right - diagnostics.Right) <= 1 &&
-           Math.Abs(hero.Right - credits.Right) <= 1,
-        $"The About hero and card grid must share one aligned content width and uniform vertical gaps: hero={hero}, status={status}, privacy={privacy}.");
+           hero.Left == status.Left &&
+           Math.Abs(hero.Right - (expectedTwoColumns ? diagnostics.Right : status.Right)) <= 1,
+        $"The About hero and card grid must share one aligned content width: hero={hero}, status={status}, diagnostics={diagnostics}.");
+    AssertAboutSectionMetrics(view, "AboutStatusCard", [33, 33, 33, 33], expectedScale);
+    AssertAboutSectionMetrics(view, "AboutDiagnosticsCard", [33, 8, 33, 14, 13], expectedScale);
+    AssertAboutSectionMetrics(view, "AboutPrivacyCard", [26, 26, 26, 34, 53, 33], expectedScale);
+    AssertAboutSectionMetrics(view, "AboutCreditsCard", [54, 54, 54, 34, 33], expectedScale);
 
     var labels = EnumerateControls(view).OfType<Label>().ToArray();
     var version = typeof(AboutView).Assembly.GetName().Version ?? new Version(0, 0, 0);
     var releaseVersion = labels.Single(label => label.Name == "AboutReleaseVersionLabel").Text;
-    Assert(releaseVersion == $"Stable · v{AboutPageSupport.FormatApplicationVersion(version)}",
-        $"About must display the three-part assembly product version, not a hard-coded or four-part value; got '{releaseVersion}'.");
+    var releaseDot = labels.Single(label => label.Name == "AboutReleaseStatusDot");
+    Assert(releaseVersion == $"Stable  ·  v{AboutPageSupport.FormatApplicationVersion(version)}" &&
+           releaseDot.Text == "●" &&
+           releaseDot.ForeColor == Color.FromArgb(50, 190, 126) &&
+           releaseDot.AccessibleRole == AccessibleRole.None &&
+           !releaseDot.TabStop,
+        $"About must show the three-part product version beside one silent green status dot; " +
+        $"version='{releaseVersion}', dot='{releaseDot.Text}'/{releaseDot.ForeColor}.");
     Assert(labels.Count(label => label.Text == "Dixon Yamada") == 1 &&
            labels.Count(label => label.Text == "Certified Looter") == 1 &&
            labels.Count(label => label.Text == "Papi Jawn") == 1 &&
            labels.Count(label => label.Text == "Certified Shooter · LeBron’s Legacy") == 1 &&
+           labels.Count(label => label.Text == "twspeakman") == 1 &&
+           labels.Count(label => label.Text == "The Bald Headed Demon") == 1 &&
            !labels.Any(label => label.Text.Contains("Local-First Companion", StringComparison.OrdinalIgnoreCase)),
-        "About must preserve the approved two-person credit copy and remove Local-First Companion.");
-    Assert(EnumerateControls(view).Count(control => control.Name is "AboutDixonCredit" or "AboutPapiCredit") == 2 &&
+        "About must preserve all three approved Figma credits and remove Local-First Companion.");
+    Assert(EnumerateControls(view).Count(control => control.Name is
+               "AboutDixonCredit" or "AboutPapiCredit" or "AboutTwspeakmanCredit") == 3 &&
            EnumerateControls(view).Single(control => control.Name == "AboutDixonCredit").AccessibleName ==
            "Dixon Yamada, Certified Looter" &&
            EnumerateControls(view).Single(control => control.Name == "AboutPapiCredit").AccessibleName ==
-           "Papi Jawn, Certified Shooter · LeBron’s Legacy",
-        "The two credit cards must expose the exact approved names and joined Papi Jawn title to assistive technology.");
+           "Papi Jawn, Certified Shooter · LeBron’s Legacy" &&
+           EnumerateControls(view).Single(control => control.Name == "AboutTwspeakmanCredit").AccessibleName ==
+           "twspeakman, The Bald Headed Demon",
+        "All three credit cards must expose the exact approved Figma names and titles to assistive technology.");
     Assert(!EnumerateControls(view).OfType<ScrollableControl>().Any(control => control.AutoScroll),
         "About must use ClipCord's branded viewport instead of a native Windows scrollbar.");
 }
 
 static float GetDpiScale(Control control) => Math.Max(96, control.DeviceDpi) / 96f;
 
+static void AssertAboutSectionMetrics(
+    AboutView view,
+    string cardName,
+    IReadOnlyList<int> logicalBodyRows,
+    float expectedScale)
+{
+    var card = EnumerateControls(view).OfType<RoundedPanel>()
+        .Single(control => control.Name == cardName);
+    var body = EnumerateControls(card).OfType<AboutMetricTableLayoutPanel>()
+        .Single(control => control.Name == cardName + "Body");
+    card.PerformLayout();
+    body.Parent?.PerformLayout();
+    body.PerformLayout();
+
+    var expectedHorizontalPadding = (int)Math.Round(20 * expectedScale);
+    var expectedVerticalPadding = (int)Math.Round(18 * expectedScale);
+    Assert(Math.Abs(card.Padding.Left - expectedHorizontalPadding) <= 1 &&
+           Math.Abs(card.Padding.Right - expectedHorizontalPadding) <= 1 &&
+           Math.Abs(card.Padding.Top - expectedVerticalPadding) <= 1 &&
+           Math.Abs(card.Padding.Bottom - expectedVerticalPadding) <= 1,
+        $"{cardName} must preserve Figma's 20x18 internal padding at {expectedScale:F2}x; got {card.Padding}.");
+
+    var sectionLayout = body.Parent as AboutMetricTableLayoutPanel
+        ?? throw new InvalidOperationException($"{cardName}'s body is not hosted by the metric layout.");
+    var sectionRows = sectionLayout.GetRowHeights();
+    var expectedHeadingHeight = (int)Math.Round(47 * expectedScale);
+    Assert(sectionRows.Length == 2 && Math.Abs(sectionRows[0] - expectedHeadingHeight) <= 1,
+        $"{cardName} must keep Figma's 47px heading row at {expectedScale:F2}x; got [{string.Join(", ", sectionRows)}].");
+
+    var actualRows = body.GetRowHeights();
+    Assert(actualRows.Length == logicalBodyRows.Count,
+        $"{cardName} must keep exactly {logicalBodyRows.Count} body rows; got {actualRows.Length}.");
+    for (var index = 0; index < logicalBodyRows.Count; index++)
+    {
+        var expectedHeight = (int)Math.Round(logicalBodyRows[index] * expectedScale);
+        Assert(Math.Abs(actualRows[index] - expectedHeight) <= 1,
+            $"{cardName} row {index} diverged from the Figma {logicalBodyRows[index]}px metric at " +
+            $"{expectedScale:F2}x: expected {expectedHeight}px, got {actualRows[index]}px " +
+            $"([{string.Join(", ", actualRows)}]).");
+    }
+}
+
 static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisible = true)
 {
     var view = EnumerateControls(form).OfType<AboutView>().Single();
-    var requiredButtons = new[]
+    var requiredBodyButtons = new[]
     {
-        "AboutCheckUpdatesButton",
         "AboutOpenLogsButton",
         "AboutCopyDiagnosticsButton",
         "AboutOpenDataFolderButton",
@@ -3132,13 +3781,22 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         "AboutLicensesButton"
     };
     var buttons = EnumerateControls(view).OfType<Button>()
-        .Where(button => requiredButtons.Contains(button.Name, StringComparer.Ordinal))
+        .Where(button => requiredBodyButtons.Contains(button.Name, StringComparer.Ordinal))
         .ToArray();
-    Assert(buttons.Length == requiredButtons.Length &&
+    var updateButton = EnumerateControls(form).OfType<Button>()
+        .Single(button => button.Name == "AboutCheckUpdatesButton");
+    var pageActionHost = EnumerateControls(form).OfType<FlowLayoutPanel>()
+        .Single(control => control.Name == "PageActionHost");
+    Assert(buttons.Length == requiredBodyButtons.Length &&
            buttons.All(button => (!requireVisible || button.Visible) && button.TabStop &&
                                  button.AccessibleRole == AccessibleRole.PushButton &&
-                                 !string.IsNullOrWhiteSpace(button.AccessibleName)),
-        "Every About action must remain visible, keyboard reachable, and named as a push button.");
+                                 !string.IsNullOrWhiteSpace(button.AccessibleName)) &&
+           (!requireVisible || updateButton.Visible) && updateButton.TabStop &&
+           updateButton.AccessibleRole == AccessibleRole.PushButton &&
+           !string.IsNullOrWhiteSpace(updateButton.AccessibleName) &&
+           ReferenceEquals(updateButton.Parent, pageActionHost) &&
+           !EnumerateControls(view).Contains(updateButton),
+        "Every About action must remain keyboard reachable and named, with the single update CTA hosted only in the shared page header.");
 
     var requiredCopy = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -3151,6 +3809,8 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         "Certified Looter",
         "Papi Jawn",
         "Certified Shooter · LeBron’s Legacy",
+        "twspeakman",
+        "The Bald Headed Demon",
         "Check for updates",
         "Open logs",
         "Copy diagnostics",
@@ -3163,10 +3823,12 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         "Roadmap",
         "Licenses"
     };
+    var bodyCopy = requiredCopy.Where(text => text != "Check for updates").ToHashSet(StringComparer.Ordinal);
     var textControls = EnumerateControls(view)
-        .Where(control => (!requireVisible || control.Visible) && requiredCopy.Contains(control.Text))
+        .Where(control => (!requireVisible || control.Visible) && bodyCopy.Contains(control.Text))
         .ToArray();
-    Assert(textControls.Select(control => control.Text).ToHashSet(StringComparer.Ordinal).SetEquals(requiredCopy),
+    Assert(textControls.Select(control => control.Text).ToHashSet(StringComparer.Ordinal).SetEquals(bodyCopy) &&
+           updateButton.Text == "Check for updates",
         "The live About page is missing approved mockup copy or actions.");
     foreach (var control in textControls)
     {
@@ -3174,6 +3836,19 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         Assert(measured.Width <= control.ClientSize.Width + 4 && measured.Height <= control.ClientSize.Height + 4,
             $"About text '{control.Text}' is ellipsized or clipped: measured={measured}, client={control.ClientSize}.");
     }
+
+    var diagnosticsStatus = EnumerateControls(view).OfType<Label>()
+        .Single(label => label.Name == "AboutActionStatusLabel");
+    var diagnosticsStatusSize = TextRenderer.MeasureText(
+        diagnosticsStatus.Text,
+        diagnosticsStatus.Font,
+        Size.Empty,
+        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+    Assert(diagnosticsStatus.Margin == Padding.Empty &&
+           diagnosticsStatusSize.Width <= diagnosticsStatus.ClientSize.Width + 2 &&
+           diagnosticsStatusSize.Height <= diagnosticsStatus.ClientSize.Height + 2,
+        $"About's compact Figma diagnostics note is clipped: measured={diagnosticsStatusSize}, " +
+        $"client={diagnosticsStatus.ClientSize}, margin={diagnosticsStatus.Margin}.");
 
     var multilineLabels = EnumerateControls(view).OfType<Label>()
         .Where(label => (!requireVisible || label.Visible) &&
@@ -3202,19 +3877,9 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
             $"About heading '{heading}' must paint its ampersand instead of treating it as a mnemonic marker.");
     }
 
-    var expectedActionGlyphs = new Dictionary<string, BrandGlyph>
-    {
-        ["AboutOpenLogsButton"] = BrandGlyph.FileText,
-        ["AboutCopyDiagnosticsButton"] = BrandGlyph.Copy,
-        ["AboutOpenDataFolderButton"] = BrandGlyph.FolderOpen,
-        ["AboutReportProblemButton"] = BrandGlyph.ReportProblem
-    };
-    foreach (var (name, glyph) in expectedActionGlyphs)
-    {
-        var button = EnumerateControls(view).OfType<OutlineButton>().Single(candidate => candidate.Name == name);
-        Assert(button.LeadingGlyph == glyph,
-            $"About action '{name}' must retain its approved leading icon ({glyph}).");
-    }
+    Assert(buttons.OfType<OutlineButton>().All(button => button.LeadingGlyph is null) &&
+           updateButton is OutlineButton { LeadingGlyph: BrandGlyph.Refresh },
+        "Figma's About body actions must remain text-only while the shared-header update CTA retains its refresh icon.");
 
     var sectionIcons = EnumerateControls(view).OfType<AboutSectionIcon>().ToArray();
     var sectionGlyphs = sectionIcons
@@ -3223,7 +3888,6 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         .ToArray();
     var expectedSectionGlyphs = new[]
     {
-        BrandGlyph.Shield,
         BrandGlyph.AppStatus,
         BrandGlyph.Diagnostics,
         BrandGlyph.Credits,
@@ -3238,35 +3902,31 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
 
     var content = EnumerateControls(view).OfType<AboutContentLayout>().Single();
     var effectiveScale = content.ScaledGap / 14f;
-    var settingsIconSides = EnumerateControls(form).OfType<BrandIconTile>()
-        .Select(icon => icon.Width)
-        .Distinct()
-        .ToArray();
     var featureIcons = sectionIcons.Where(icon => icon.Name == "AboutFeatureIcon").ToArray();
     var featureIconSides = featureIcons.Select(icon => icon.Width).Distinct().ToArray();
-    var releaseIcon = sectionIcons.Single(icon => icon.Name == "AboutReleaseIcon");
-    Assert(AboutView.ReleaseIconLogicalSize == 44 && AboutView.FeatureIconLogicalSize == 48,
-        "The approved About icon hierarchy must remain 44px for the compact release badge and 48px for feature cards.");
+    var heroLogo = EnumerateControls(view).OfType<ClipCordLogoControl>()
+        .Single(control => control.Name == "AboutHeroLogo");
+    Assert(AboutView.ReleaseIconLogicalSize == 48 && AboutView.FeatureIconLogicalSize == 30,
+        "The approved About icon hierarchy must remain 48px for the hero logo and 30px for compact section glyphs.");
     Assert(featureIcons.Length == 4 &&
-           settingsIconSides.Length == 1 && featureIconSides.Length == 1 &&
+           featureIconSides.Length == 1 &&
            featureIcons.All(icon => Math.Abs(icon.Width - icon.Height) <= 1) &&
-           featureIconSides[0] >= AboutView.FeatureIconLogicalSize &&
-           featureIconSides[0] >= (int)Math.Floor(settingsIconSides[0] * 0.72f) &&
-           featureIconSides[0] <= (int)Math.Ceiling(settingsIconSides[0] * 1.05f),
-        $"The four About feature-card icons must stay uniformly enlarged and visually comparable to Settings: " +
-        $"About={string.Join(", ", featureIcons.Select(icon => $"{icon.Glyph}={icon.Size}"))}; " +
-        $"Settings side={string.Join(", ", settingsIconSides)}.");
-    var expectedReleaseIconSide = (int)Math.Round(
-        featureIconSides[0] * AboutView.ReleaseIconLogicalSize / (double)AboutView.FeatureIconLogicalSize);
-    Assert(Math.Abs(releaseIcon.Width - releaseIcon.Height) <= 1 &&
-           Math.Abs(releaseIcon.Width - expectedReleaseIconSide) <= 1 &&
-           releaseIcon.Width < featureIconSides[0],
-        $"The compact About release icon must retain its {AboutView.ReleaseIconLogicalSize}:" +
-        $"{AboutView.FeatureIconLogicalSize} scale ratio as a square " +
-        $"without competing with the feature-card icons: release={releaseIcon.Size}, " +
-        $"features={string.Join(", ", featureIconSides)}, expected side={expectedReleaseIconSide}px.");
+           Math.Abs(featureIconSides[0] - AboutView.FeatureIconLogicalSize * effectiveScale) <= 2,
+        $"The four About feature-card icons must stay uniformly sized from their own semantic token: " +
+        $"About={string.Join(", ", featureIcons.Select(icon => $"{icon.Glyph}={icon.Size}"))}, scale={effectiveScale:F2}.");
+    var expectedHeroSide = (int)Math.Round(AboutView.ReleaseIconLogicalSize * effectiveScale);
+    Assert(Math.Abs(heroLogo.Width - heroLogo.Height) <= 1 &&
+           Math.Abs(heroLogo.Width - expectedHeroSide) <= 2 &&
+           heroLogo.Width > featureIconSides[0] &&
+           heroLogo.AccessibleRole == AccessibleRole.None &&
+           string.IsNullOrWhiteSpace(heroLogo.AccessibleName),
+        $"The About hero must retain one larger decorative ClipCord logo without competing with section glyphs: " +
+        $"hero={heroLogo.Size}, features={string.Join(", ", featureIconSides)}, expected={expectedHeroSide}px.");
     var expectedAvatarSide = (int)Math.Round(34 * effectiveScale);
-    foreach (var avatarName in new[] { "AboutDixonCreditAvatar", "AboutPapiCreditAvatar" })
+    foreach (var avatarName in new[]
+             {
+                 "AboutDixonCreditAvatar", "AboutPapiCreditAvatar", "AboutTwspeakmanCreditAvatar"
+             })
     {
         var avatar = EnumerateControls(view).OfType<AboutAvatarControl>().Single(control => control.Name == avatarName);
         var preferredSize = avatar.GetPreferredSize(Size.Empty);
@@ -3299,6 +3959,7 @@ static void AssertManualCheckCloseProtection(
     var releaseCheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var checkedBusyState = false;
     var invocationCount = 0;
+    Exception? uiFailure = null;
     IWin32Window? callbackOwner = null;
     using var form = new SettingsForm(
         settings,
@@ -3309,51 +3970,284 @@ static void AssertManualCheckCloseProtection(
             await releaseCheck.Task;
         },
         initialPage: openingPage);
+    void ScheduleRecoveryClose()
+    {
+        var recoveryTimer = new System.Windows.Forms.Timer { Interval = 40 };
+        recoveryTimer.Tick += (_, _) =>
+        {
+            if (!form.IsDisposed && form.Visible) form.Close();
+            if (!form.IsDisposed && form.Visible) return;
+            recoveryTimer.Stop();
+            recoveryTimer.Dispose();
+        };
+        recoveryTimer.Start();
+    }
     form.Shown += (_, _) =>
     {
-        var buttons = EnumerateControls(form).OfType<Button>().ToArray();
-        var checkButton = buttons.Single(button => button.Name == initiatingButtonName);
-        var cancelButton = buttons.Single(button => button.Text == (openingPage == SettingsPage.Settings ? "Cancel" : "Close"));
-        var titleButtons = EnumerateControls(form).OfType<TitleBarButton>().ToArray();
-        checkButton.PerformClick();
-
-        var inspectTimer = new System.Windows.Forms.Timer { Interval = 20 };
-        inspectTimer.Tick += (_, _) =>
+        try
         {
-            inspectTimer.Stop();
-            inspectTimer.Dispose();
-            var updateButtons = buttons.Where(button =>
-                button.Name is "SettingsCheckUpdatesButton" or "AboutCheckUpdatesButton").ToArray();
-            var aboutActions = buttons.Where(button => button.Name.StartsWith("About", StringComparison.Ordinal)).ToArray();
-            Assert(invocationCount == 1 && ReferenceEquals(callbackOwner, form) &&
-                   updateButtons.All(button => !button.Enabled) &&
-                   aboutActions.All(button => !button.Enabled) &&
-                   !cancelButton.Enabled && titleButtons.All(button => !button.Enabled),
-                $"{initiatingButtonName} must use the shared single-flight update lifecycle and disable every conflicting action.");
-            foreach (var updateButton in updateButtons) updateButton.PerformClick();
-            Assert(invocationCount == 1,
-                "Disabled Settings/About update buttons must not start a concurrent update check.");
-            form.Close();
-            Assert(form.Visible,
-                $"A user close request must not dispose {openingPage} while its update callback is in flight.");
-            checkedBusyState = true;
-            releaseCheck.TrySetResult();
+            var buttons = EnumerateControls(form).OfType<Button>().ToArray();
+            var checkButton = buttons.Single(button => button.Name == initiatingButtonName);
+            var titleButtons = EnumerateControls(form).OfType<TitleBarButton>().ToArray();
+            Control cancelButton = openingPage == SettingsPage.Settings
+                ? buttons.Single(button => button.Name == "DiscardSettingsButton")
+                : titleButtons.Single(button => button.Name == "CloseButton");
+            checkButton.PerformClick();
 
-            var closeTimer = new System.Windows.Forms.Timer { Interval = 20 };
-            closeTimer.Tick += (_, _) =>
+            var inspectTimer = new System.Windows.Forms.Timer { Interval = 20 };
+            inspectTimer.Tick += (_, _) =>
             {
-                closeTimer.Stop();
-                closeTimer.Dispose();
-                form.Close();
+                inspectTimer.Stop();
+                inspectTimer.Dispose();
+                try
+                {
+                    var updateButtons = buttons.Where(button =>
+                        button.Name is "SettingsCheckUpdatesButton" or "AboutCheckUpdatesButton").ToArray();
+                    var aboutActions = buttons.Where(button => button.Name.StartsWith("About", StringComparison.Ordinal)).ToArray();
+                    Assert(invocationCount == 1 && ReferenceEquals(callbackOwner, form) &&
+                           updateButtons.All(button => !button.Enabled) &&
+                           aboutActions.All(button => !button.Enabled) &&
+                           !cancelButton.Enabled && titleButtons.All(button => !button.Enabled),
+                        $"{initiatingButtonName} must use the shared single-flight update lifecycle and disable every conflicting action.");
+                    foreach (var updateButton in updateButtons) updateButton.PerformClick();
+                    Assert(invocationCount == 1,
+                        "Disabled Settings/About update buttons must not start a concurrent update check.");
+                    form.Close();
+                    Assert(form.Visible,
+                        $"A user close request must not dispose {openingPage} while its update callback is in flight.");
+                    checkedBusyState = true;
+                    releaseCheck.TrySetResult();
+
+                    var closeTimer = new System.Windows.Forms.Timer { Interval = 20 };
+                    closeTimer.Tick += (_, _) =>
+                    {
+                        closeTimer.Stop();
+                        closeTimer.Dispose();
+                        form.Close();
+                    };
+                    closeTimer.Start();
+                }
+                catch (Exception exception)
+                {
+                    uiFailure = exception;
+                    releaseCheck.TrySetResult();
+                    ScheduleRecoveryClose();
+                }
             };
-            closeTimer.Start();
-        };
-        inspectTimer.Start();
+            inspectTimer.Start();
+        }
+        catch (Exception exception)
+        {
+            uiFailure = exception;
+            releaseCheck.TrySetResult();
+            ScheduleRecoveryClose();
+        }
     };
 
     form.ShowDialog();
+    if (uiFailure is not null)
+    {
+        throw new InvalidOperationException($"The {openingPage} update lifecycle probe failed on the UI thread.", uiFailure);
+    }
     Assert(checkedBusyState && invocationCount == 1 && ReferenceEquals(callbackOwner, form),
         $"The {initiatingButtonName} close-protection test did not complete through the shared callback.");
+}
+
+static void AssertGalleryHeaderActionPlacement(SettingsForm form, bool expectedSharedHeader)
+{
+    var actions = EnumerateControls(form)
+        .OfType<FlowLayoutPanel>()
+        .Single(control => control.Name == "GalleryHeaderActions");
+    var sharedHost = EnumerateControls(form)
+        .OfType<FlowLayoutPanel>()
+        .Single(control => control.Name == "PageActionHost");
+    var embeddedHeader = EnumerateControls(form)
+        .OfType<TableLayoutPanel>()
+        .Single(control => control.Name == "GalleryEmbeddedHeader");
+    Assert(expectedSharedHeader
+            ? ReferenceEquals(actions.Parent, sharedHost) && sharedHost.Visible
+            : ReferenceEquals(actions.Parent, embeddedHeader),
+        expectedSharedHeader
+            ? "At the 1200px designed width, Gallery search and actions must move into the shared page header."
+            : "Below the 1050px responsive threshold, Gallery search and actions must return to its embedded header.");
+    Assert(actions.Parent is not null &&
+           actions.Left >= -1 && actions.Top >= -1 &&
+           actions.Right <= actions.Parent.ClientSize.Width + 1 &&
+           actions.Bottom <= actions.Parent.ClientSize.Height + 1,
+        $"Gallery's reparented header actions must fit their {(expectedSharedHeader ? "shared" : "embedded")} host: " +
+        $"actions={actions.Bounds}, host={actions.Parent?.ClientRectangle}.");
+    Assert(EnumerateControls(actions).OfType<TextBox>().Any(textBox => textBox.Name == "GallerySearchTextBox") &&
+           EnumerateControls(actions).OfType<Button>().Any(button => button.Name == "RefreshGalleryButton") &&
+           EnumerateControls(actions).OfType<Button>().Any(button => button.Name == "OpenClipsFolderButton") &&
+           EnumerateControls(form).OfType<Button>().Any(button => button.Name == "GallerySortButton"),
+        "Reparenting Gallery's header actions must preserve its real search, refresh, and folder controls as one unit, " +
+        "while keeping the real sort action in the body filter row.");
+}
+
+static void AssertGalleryThumbnailContracts(string testRoot)
+{
+    var uploadedGame = Directory.CreateDirectory(Path.Combine(testRoot, "uploaded", "Apex Legends")).FullName;
+    var clipPath = Path.Combine(uploadedGame, "Apex opening frame.mp4");
+    File.WriteAllBytes(clipPath, [1, 2, 3, 4, 5, 6, 7, 8]);
+    var source = new FileInfo(clipPath);
+    var clip = new GalleryClipEntry(
+        source.FullName,
+        source.Name,
+        "Apex Legends",
+        GalleryClipRoute.Uploaded,
+        source.Length,
+        source.LastWriteTimeUtc);
+
+    static bool HasPair(IReadOnlyList<string> values, string option, string value)
+    {
+        for (var index = 0; index + 1 < values.Count; index++)
+        {
+            if (values[index] == option && values[index + 1] == value) return true;
+        }
+        return false;
+    }
+
+    var outputPath = Path.Combine(testRoot, "thumbnail.partial");
+    var arguments = GalleryThumbnailProvider.BuildThumbnailArguments(source.FullName, outputPath).ToArray();
+    Assert(HasPair(arguments, "-ss", "0.25") &&
+           HasPair(arguments, "-i", source.FullName) &&
+           HasPair(arguments, "-map", "0:v:0") &&
+           HasPair(arguments, "-vf", "scale=min(640\\,iw):-2") &&
+           HasPair(arguments, "-frames:v", "1") &&
+           arguments.Contains("-an") && arguments.Contains("-sn") && arguments.Contains("-dn") &&
+           HasPair(arguments, "-map_metadata", "-1") &&
+           HasPair(arguments, "-map_chapters", "-1") &&
+           arguments[^1] == outputPath,
+        "Gallery thumbnails must decode one bounded near-start video frame without audio, chapters, or metadata.");
+    var openingArguments = GalleryThumbnailProvider
+        .BuildThumbnailArguments(source.FullName, outputPath, seekSeconds: 0d)
+        .ToArray();
+    Assert(HasPair(openingArguments, "-ss", "0"),
+        "Very short clips must retry at the true opening frame instead of losing their thumbnail.");
+
+    var resolved = GalleryThumbnailProvider.ResolveSafeSource(testRoot, clip);
+    Assert(resolved.FullName.Equals(source.FullName, StringComparison.OrdinalIgnoreCase),
+        "A normal one-game-deep uploaded clip must pass thumbnail source confinement.");
+    var firstKey = GalleryThumbnailProvider.BuildCacheKey(source);
+    Assert(firstKey == GalleryThumbnailProvider.BuildCacheKey(new FileInfo(clipPath)),
+        "The unchanged clip identity must reuse its Gallery thumbnail cache key.");
+    File.WriteAllBytes(clipPath, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    Assert(firstKey != GalleryThumbnailProvider.BuildCacheKey(new FileInfo(clipPath)),
+        "Changing a clip's length must invalidate its Gallery thumbnail cache key.");
+    var staleRejected = false;
+    try { GalleryThumbnailProvider.ResolveSafeSource(testRoot, clip); }
+    catch (IOException) { staleRejected = true; }
+    Assert(staleRejected,
+        "A clip replaced after catalog scanning must be rejected before thumbnail decoding.");
+
+    var outsidePath = Path.Combine(testRoot, "outside.mp4");
+    File.WriteAllBytes(outsidePath, [9, 8, 7]);
+    var outside = new FileInfo(outsidePath);
+    var outsideRejected = false;
+    try
+    {
+        GalleryThumbnailProvider.ResolveSafeSource(testRoot, new GalleryClipEntry(
+            outside.FullName,
+            outside.Name,
+            "Outside",
+            GalleryClipRoute.Uploaded,
+            outside.Length,
+            outside.LastWriteTimeUtc));
+    }
+    catch (IOException) { outsideRejected = true; }
+    Assert(outsideRejected,
+        "Thumbnail decoding must reject a path outside the selected Gallery route archive.");
+
+    var wideCrop = GalleryThumbnailTile.CalculateCoverSource(new Size(3840, 1080), new Size(300, 132));
+    var tallCrop = GalleryThumbnailTile.CalculateCoverSource(new Size(1080, 1920), new Size(300, 132));
+    Assert(wideCrop.Width < 3840 && Math.Abs(wideCrop.Height - 1080) < 1 && wideCrop.X > 0 &&
+           Math.Abs(tallCrop.Width - 1080) < 1 && tallCrop.Height < 1920 && tallCrop.Y > 0,
+        $"Gallery thumbnails must center-crop to cover cards without stretching: wide={wideCrop}, tall={tallCrop}.");
+}
+
+static void AssertGalleryThumbnailLifecycle(AppSettings settings)
+{
+    var root = Path.Combine(settings.ClipsFolder, "thumbnail-lifecycle-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var game = Directory.CreateDirectory(Path.Combine(root, "uploaded", "Thumbnail Game")).FullName;
+        for (var index = 0; index < 18; index++)
+        {
+            File.WriteAllBytes(Path.Combine(game, $"Thumbnail Game clip {index:00}.mp4"),
+                Enumerable.Repeat((byte)(index + 1), 128 + index).ToArray());
+        }
+
+        var provider = new RecordingGalleryThumbnailProvider(blockUntilCancelled: false);
+        using (var host = new Form
+        {
+            ClientSize = new Size(984, 696),
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-20000, -20000)
+        })
+        using (var gallery = new GalleryView(root, thumbnailProvider: provider))
+        {
+            host.Controls.Add(gallery);
+            host.Show();
+            Application.DoEvents();
+            Assert(provider.CallCount == 0,
+                "Constructing and showing an inactive Gallery must not decode thumbnails or add Always-Watching work.");
+
+            gallery.Activate(root);
+            WaitForUiCondition(
+                () => EnumerateControls(gallery).Count(control => control.Name == "GalleryClipCard") == 18,
+                TimeSpan.FromSeconds(5),
+                "Gallery did not populate the thumbnail lifecycle fixture.");
+            WaitForUiCondition(
+                () => provider.CallCount > 0 &&
+                      EnumerateControls(gallery).OfType<GalleryThumbnailTile>().Any(tile => tile.HasThumbnail),
+                TimeSpan.FromSeconds(5),
+                "Visible Gallery cards did not adopt their beginning-frame thumbnails.");
+            var firstViewportCalls = provider.CallCount;
+            Assert(firstViewportCalls < 18,
+                $"Gallery must request only viewport-visible thumbnails; requested {firstViewportCalls} of 18 before scrolling.");
+
+            var scrollHost = EnumerateControls(gallery).OfType<BrandedScrollHost>()
+                .Single(control => control.Name == "GalleryScrollHost");
+            scrollHost.ScrollBy(int.MaxValue);
+            Application.DoEvents();
+            WaitForUiCondition(
+                () => provider.CallCount > firstViewportCalls,
+                TimeSpan.FromSeconds(5),
+                "Scrolling Gallery must request the newly visible row's thumbnails.");
+            gallery.Deactivate();
+            host.Close();
+        }
+
+        var blocking = new RecordingGalleryThumbnailProvider(blockUntilCancelled: true);
+        using (var host = new Form
+        {
+            ClientSize = new Size(984, 696),
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-20000, -20000)
+        })
+        using (var gallery = new GalleryView(root, thumbnailProvider: blocking))
+        {
+            host.Controls.Add(gallery);
+            host.Show();
+            gallery.Activate(root);
+            WaitForUiCondition(
+                () => blocking.CallCount > 0,
+                TimeSpan.FromSeconds(5),
+                "The blocking Gallery thumbnail provider was never invoked.");
+            gallery.Deactivate();
+            WaitForUiCondition(
+                () => blocking.CancellationCount == blocking.CallCount,
+                TimeSpan.FromSeconds(5),
+                "Leaving Gallery must cancel every visible-card thumbnail decode.");
+            host.Close();
+        }
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); } catch { }
+    }
 }
 
 static void AssertGalleryScaledLayout(AppSettings settings, float scale)
@@ -3367,13 +4261,15 @@ static void AssertGalleryScaledLayout(AppSettings settings, float scale)
         form.Show();
         form.ShowPage(SettingsPage.Gallery);
         WaitForUiCondition(
-            () => EnumerateControls(form).Any(control => control.Name == "GalleryGameCard"),
+            () => EnumerateControls(form).Any(control => control.Name == "GalleryClipCard"),
             TimeSpan.FromSeconds(5),
             $"Gallery did not populate before the {scale:F1}x layout check.");
         TraceSmokeStep($"Gallery {scale:F1}x: archive populated");
         var gallery = EnumerateControls(form).OfType<GalleryView>().Single();
-        var topNavigation = EnumerateControls(form)
-            .Single(control => control.Name == "TopNavigation");
+        var navigationRail = EnumerateControls(form)
+            .Single(control => control.Name == "NavigationRail");
+        var sharedHeader = EnumerateControls(form)
+            .Single(control => control.Name == "CustomTitleBar");
         // Synthetic scaling should model Windows' startup-DPI pass, which occurs
         // before the window is displayed. Scaling an already-visible oversized
         // form can deadlock WinForms layout on a small headless CI desktop.
@@ -3381,7 +4277,7 @@ static void AssertGalleryScaledLayout(AppSettings settings, float scale)
         TraceSmokeStep($"Gallery {scale:F1}x: applying synthetic startup scale");
         form.Scale(new SizeF(scale, scale));
         TraceSmokeStep($"Gallery {scale:F1}x: geometry scaled");
-        var featureControls = new[] { (Control)gallery, topNavigation }
+        var featureControls = new[] { (Control)gallery, navigationRail, sharedHeader }
             .SelectMany(root => new[] { root }.Concat(EnumerateControls(root)))
             .Distinct();
         foreach (var control in featureControls)
@@ -3422,23 +4318,23 @@ static void AssertGalleryPreHandleLifecycle(AppSettings settings)
         .OfType<Button>()
         .Single(button => button.Name == "RefreshGalleryButton");
     Assert(refresh.Enabled &&
-           EnumerateControls(gallery).All(control => control.Name != "GalleryGameCard"),
+           EnumerateControls(gallery).All(control => control.Name != "GalleryClipCard"),
         "Deactivate must cancel a pre-handle scan, restore Refresh, and reject its late completion.");
 
     gallery.Activate(settings.ClipsFolder);
     WaitForUiCondition(
-        () => EnumerateControls(gallery).Any(control => control.Name == "GalleryGameCard"),
+        () => EnumerateControls(gallery).Any(control => control.Name == "GalleryClipCard"),
         TimeSpan.FromSeconds(5),
         "Activate must populate Gallery even before its control handle is created.");
     Assert(!gallery.IsHandleCreated,
         "On-demand Gallery scanning must not require an invisible native window handle.");
     gallery.Deactivate();
     var cardsBeforeInactiveRefresh = EnumerateControls(gallery)
-        .Count(control => control.Name == "GalleryGameCard");
+        .Count(control => control.Name == "GalleryClipCard");
     gallery.RefreshCatalog(settings.ClipsFolder);
     Application.DoEvents();
     Assert(refresh.Enabled &&
-           EnumerateControls(gallery).Count(control => control.Name == "GalleryGameCard") == cardsBeforeInactiveRefresh,
+           EnumerateControls(gallery).Count(control => control.Name == "GalleryClipCard") == cardsBeforeInactiveRefresh,
         "RefreshCatalog must remain a no-op while Gallery is inactive.");
 }
 
@@ -3457,16 +4353,10 @@ static void AssertGalleryPlaybackPrewarm(AppSettings settings)
     form.Show();
     gallery.Activate(settings.ClipsFolder);
     WaitForUiCondition(
-        () => EnumerateControls(gallery).OfType<GalleryGameCard>().Any(),
+        () => EnumerateControls(gallery).OfType<Button>().Any(button =>
+            button.Name == "PlayGalleryClipButton" && button.Enabled),
         TimeSpan.FromSeconds(5),
         "Gallery did not populate before its playback-prewarm check.");
-    var game = EnumerateControls(gallery).OfType<GalleryGameCard>().First();
-    typeof(Control).GetMethod(
-            "OnClick",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-        .Invoke(game, [EventArgs.Empty]);
-    Application.DoEvents();
-
     var play = EnumerateControls(gallery)
         .OfType<Button>()
         .First(button => button.Name == "PlayGalleryClipButton" && button.Enabled);
@@ -3489,6 +4379,27 @@ static void AssertGalleryPlaybackPrewarm(AppSettings settings)
     form.Close();
 }
 
+static Rectangle GetBoundsRelativeTo(Control control, Control ancestor)
+{
+    Assert(control != ancestor && IsDescendantOf(control, ancestor),
+        $"Control '{control.Name}' must be a descendant of '{ancestor.Name}' before comparing layout bounds.");
+    var location = control.Location;
+    for (var parent = control.Parent; parent is not null && parent != ancestor; parent = parent.Parent)
+    {
+        location.Offset(parent.Left, parent.Top);
+    }
+    return new Rectangle(location, control.Size);
+}
+
+static bool IsDescendantOf(Control control, Control ancestor)
+{
+    for (var parent = control.Parent; parent is not null; parent = parent.Parent)
+    {
+        if (ReferenceEquals(parent, ancestor)) return true;
+    }
+    return false;
+}
+
 static void AssertControlsFit(Form form)
 {
     form.PerformLayout();
@@ -3503,7 +4414,13 @@ static void AssertControlsFit(Form form)
                    control.Bottom <= parentBounds.Bottom + 1,
                 $"Control {control.GetType().Name} '{control.Name}' ('{control.Text}') is clipped by parent " +
                 $"{control.Parent.GetType().Name} '{control.Parent.Name}': child={control.Bounds}, parent={parentBounds}, " +
-                $"grandparent={control.Parent.Parent?.GetType().Name} '{control.Parent.Parent?.Name}' bounds={control.Parent.Parent?.Bounds}.");
+                $"accessible='{control.AccessibleName}', cell=" +
+                $"{(control.Parent is TableLayoutPanel table ? table.GetCellPosition(control) : new TableLayoutPanelCellPosition(-1, -1))}, " +
+                $"columns={(control.Parent is TableLayoutPanel parentTable ? string.Join('/', parentTable.GetColumnWidths()) : "n/a")}, " +
+                $"childDock={control.Dock}, childAnchor={control.Anchor}, parentAutoSize={control.Parent.AutoSize}, " +
+                $"parentDock={control.Parent.Dock}, parentAnchor={control.Parent.Anchor}, " +
+                $"grandparent={control.Parent.Parent?.GetType().Name} '{control.Parent.Parent?.Name}' bounds={control.Parent.Parent?.Bounds}, " +
+                $"greatGrandparent={control.Parent.Parent?.Parent?.GetType().Name} '{control.Parent.Parent?.Parent?.Name}' bounds={control.Parent.Parent?.Parent?.Bounds}.");
         }
         var bounds = control.Bounds;
         for (var parent = control.Parent; parent is not null && parent != form; parent = parent.Parent)
@@ -3526,19 +4443,66 @@ static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
     var cards = EnumerateControls(form)
         .OfType<ScrollableControl>()
         .Single(control => control.Name == "SettingsCards");
+    var host = GetSettingsScrollHost(form);
     cards.PerformLayout();
-    Assert(!cards.VerticalScroll.Visible && cards.AutoScrollPosition.Y == 0,
-        $"Settings must open with every card visible without scrolling; viewport={cards.ClientSize}, display={cards.DisplayRectangle}.");
+    host.RefreshContentLayout();
+    Assert(!cards.AutoScroll && !cards.VerticalScroll.Visible && !host.HasOverflow && host.ScrollOffset == 0,
+        $"Settings must open with every card visible and no native scrollbar; viewport={host.ClientSize}, cards={cards.Size}.");
 }
 
 static void AssertSettingsCardsScrollOnlyWhenScreenConstrained(SettingsForm form, Size designedOpeningSize)
 {
-    var cards = EnumerateControls(form)
-        .OfType<ScrollableControl>()
-        .Single(control => control.Name == "SettingsCards");
-    if (!cards.VerticalScroll.Visible) return;
+    var host = GetSettingsScrollHost(form);
+    host.RefreshContentLayout();
+    if (!host.HasOverflow) return;
     Assert(form.Height < designedOpeningSize.Height,
-        $"Settings may scroll only when the screen reduced its designed opening height; designed={designedOpeningSize}, actual={form.Size}.");
+        $"Settings may use its branded scrollbar only when the screen reduced its designed opening height; designed={designedOpeningSize}, actual={form.Size}.");
+}
+
+static void AssertSettingsMinimumViewport(SettingsForm form)
+{
+    var host = GetSettingsScrollHost(form);
+    var cards = EnumerateControls(form).Single(control => control.Name == "SettingsCards");
+    host.RefreshContentLayout();
+    Assert(!EnumerateControls(form).OfType<ScrollableControl>().Any(control => control.AutoScroll),
+        "Settings must use the branded viewport rather than a native Windows scrollbar at MinimumSize.");
+    Assert(host.HasOverflow == (cards.Height > host.ClientSize.Height),
+        $"Settings branded overflow must match its content at MinimumSize: host={host.ClientSize}, cards={cards.Size}, overflow={host.HasOverflow}.");
+
+    var hotkey = EnumerateControls(form).OfType<TextBox>()
+        .Single(textBox => textBox.AccessibleName == "Global upload-mode shortcut");
+    var hotkeyText = TextRenderer.MeasureText(
+        hotkey.Text,
+        hotkey.Font,
+        Size.Empty,
+        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+    Assert(hotkey.ClientSize.Width >= hotkeyText.Width,
+        $"The global shortcut must show its complete saved chord at MinimumSize: client={hotkey.ClientSize}, measured={hotkeyText}.");
+
+    var reachabilityTargets = new Control[]
+    {
+        EnumerateControls(form).Single(control => control.Name == "CompressionTargetPresetButton"),
+        EnumerateControls(form).OfType<Button>().Single(button => button.Name == "SettingsCheckUpdatesButton")
+    };
+    foreach (var target in reachabilityTargets)
+    {
+        host.EnsureControlVisible(target);
+        Application.DoEvents();
+        var bounds = host.RectangleToClient(target.RectangleToScreen(target.ClientRectangle));
+        Assert(bounds.Top >= -1 && bounds.Bottom <= host.ClientSize.Height + 1,
+            $"Settings must scroll its '{target.AccessibleName ?? target.Text}' action fully into view at MinimumSize: target={bounds}, host={host.ClientSize}.");
+    }
+}
+
+static BrandedScrollHost GetSettingsScrollHost(Control root)
+{
+    var hosts = EnumerateControls(root)
+        .OfType<BrandedScrollHost>()
+        .Where(control => control.Name == "SettingsScrollHost")
+        .ToArray();
+    Assert(hosts.Length == 1,
+        $"Settings must expose exactly one branded SettingsScrollHost; found {hosts.Length}.");
+    return hosts[0];
 }
 
 static void AssertSettingsTextFieldsAligned(SettingsForm form)
@@ -3550,7 +4514,7 @@ static void AssertSettingsTextFieldsAligned(SettingsForm form)
         .ToArray();
     Assert(fields.Length == 3, "The three primary Settings text fields must remain discoverable.");
     var screenBounds = fields
-        .Select(control => new Rectangle(control.PointToScreen(Point.Empty), control.Size))
+        .Select(control => GetBoundsRelativeTo(control, form))
         .ToArray();
     Assert(screenBounds.Select(bounds => bounds.Left).Distinct().Count() == 1 &&
            screenBounds.Select(bounds => bounds.Height).Distinct().Count() == 1,
@@ -3574,7 +4538,7 @@ static void AssertSettingsCardGrid(SettingsForm form)
 
     var bounds = cards.ToDictionary(
         pair => pair.Key,
-        pair => new Rectangle(pair.Value.PointToScreen(Point.Empty), pair.Value.Size),
+        pair => GetBoundsRelativeTo(pair.Value, form),
         StringComparer.Ordinal);
     var source = bounds["ClipSourceCard"];
     var discord = bounds["DiscordDestinationCard"];
@@ -3596,9 +4560,9 @@ static void AssertSettingsCardGrid(SettingsForm form)
     var preferencesTail = GetUnpaintedCardTail(cards["AppPreferencesCard"]);
     var uploadTailLimit = GetMaximumCardTail(cards["UploadBehaviorCard"]);
     var preferencesTailLimit = GetMaximumCardTail(cards["AppPreferencesCard"]);
-    Assert(uploadTail <= uploadTailLimit && uploadTail <= (int)Math.Ceiling(upload.Height * .20) &&
-           preferencesTail <= preferencesTailLimit && preferencesTail <= (int)Math.Ceiling(preferences.Height * .20),
-        $"The lower Settings cards must hug their painted content instead of stretching into empty panels: uploadTail={uploadTail}/{upload.Height}, preferencesTail={preferencesTail}/{preferences.Height}.");
+    Assert(uploadTail <= uploadTailLimit && uploadTail <= (int)Math.Ceiling(upload.Height * .40) &&
+           preferencesTail <= preferencesTailLimit && preferencesTail <= (int)Math.Ceiling(preferences.Height * .40),
+        $"The balanced lower Settings row must keep its painted content materially present instead of regressing to mostly-empty stretched panels: uploadTail={uploadTail}/{upload.Height}, preferencesTail={preferencesTail}/{preferences.Height}.");
 
     var compression = EnumerateControls(form)
         .OfType<TextBox>()
@@ -3650,7 +4614,7 @@ static int GetUnpaintedCardTail(Control card)
 {
     var paintedBottom = EnumerateControls(card)
         .Where(control => control.Width > 0 && control.Height > 0 &&
-                          control is Label or Button or TextBox or CheckBox or BrandIconTile)
+                          control is Label or Button or TextBox or CheckBox or BrandGlyphControl)
         .Select(control => GetLocationRelativeToAncestor(control, card).Y + control.Height)
         .DefaultIfEmpty(0)
         .Max();
@@ -3671,9 +4635,10 @@ static Point GetLocationRelativeToAncestor(Control control, Control ancestor)
 
 static int GetMaximumCardTail(Control card)
 {
-    var tile = EnumerateControls(card).OfType<BrandIconTile>().Single();
-    var scale = tile.Width / 64d;
-    return Math.Max(12, (int)Math.Ceiling(32 * scale));
+    // The new Application stack makes the equal-height Routing card intentionally airier.
+    // This still catches the former 67%-empty stretch while allowing one compact control row
+    // of visual breathing room at each DPI.
+    return Math.Max(28, (int)Math.Ceiling(56 * card.DeviceDpi / 96d));
 }
 
 static void AssertCompressionTargetPickerInteraction(SettingsForm form)
@@ -3716,67 +4681,6 @@ static void AssertCompressionTargetPickerInteraction(SettingsForm form)
     input.Text = originalText;
 }
 
-static void AssertSettingsFeatureIcons(SettingsForm form, int minimumSide = 64)
-{
-    var expected = new Dictionary<string, BrandGlyph>(StringComparer.Ordinal)
-    {
-        ["ClipSourceCardIcon"] = BrandGlyph.ClipSource,
-        ["DiscordDestinationCardIcon"] = BrandGlyph.DiscordDestination,
-        ["UploadBehaviorCardIcon"] = BrandGlyph.UploadBehavior,
-        ["AppPreferencesCardIcon"] = BrandGlyph.AppPreferences
-    };
-    var tiles = EnumerateControls(form).OfType<BrandIconTile>().ToArray();
-    Assert(tiles.Length == expected.Count,
-        $"Settings must expose exactly four feature icon tiles; found {tiles.Length}.");
-    Assert(tiles.Select(tile => tile.Size).Distinct().Count() == 1 &&
-           tiles[0].Width >= minimumSide &&
-           tiles[0].Height >= minimumSide,
-        $"All feature icons must share the approved enlarged size of at least {minimumSide}px: {string.Join(", ", tiles.Select(tile => $"{tile.Name}={tile.Size}"))}.");
-
-    var signatures = new HashSet<ulong>();
-    foreach (var tile in tiles)
-    {
-        Assert(expected.TryGetValue(tile.Name, out var expectedGlyph) && tile.Glyph == expectedGlyph,
-            $"Feature icon '{tile.Name}' uses {tile.Glyph} instead of its dedicated {expectedGlyph} artwork.");
-        Assert(tile.AccessibleRole == AccessibleRole.Graphic && !string.IsNullOrWhiteSpace(tile.AccessibleName),
-            $"Feature icon '{tile.Name}' must remain a named, noninteractive graphic.");
-
-        using var bitmap = new Bitmap(tile.Width, tile.Height);
-        tile.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
-        var brightCount = 0;
-        var left = bitmap.Width;
-        var top = bitmap.Height;
-        var right = -1;
-        var bottom = -1;
-        ulong signature = 1469598103934665603;
-        for (var y = 0; y < bitmap.Height; y++)
-        {
-            for (var x = 0; x < bitmap.Width; x++)
-            {
-                var pixel = bitmap.GetPixel(x, y);
-                var bright = pixel.R >= 210 && pixel.G >= 210 && pixel.B >= 210;
-                signature ^= bright ? (byte)1 : (byte)0;
-                signature *= 1099511628211;
-                if (!bright) continue;
-                brightCount++;
-                left = Math.Min(left, x);
-                top = Math.Min(top, y);
-                right = Math.Max(right, x);
-                bottom = Math.Max(bottom, y);
-            }
-        }
-
-        Assert(brightCount >= bitmap.Width * bitmap.Height / 100 && right > left && bottom > top,
-            $"Feature icon '{tile.Name}' did not paint enough high-contrast detail ({brightCount} pixels).");
-        Assert(right - left + 1 >= bitmap.Width * .45 && bottom - top + 1 >= bitmap.Height * .45,
-            $"Feature icon '{tile.Name}' is still visually undersized: detailBounds={Rectangle.FromLTRB(left, top, right + 1, bottom + 1)}, tile={bitmap.Size}.");
-        signatures.Add(signature);
-    }
-
-    Assert(signatures.Count == expected.Count,
-        "Each Settings section must use distinct feature artwork; duplicate rendered icon masks were found.");
-}
-
 static void AssertSettingsRoundTrip(AppSettings original)
 {
     using var form = new SettingsForm(original, checkForUpdatesAsync: _ => Task.CompletedTask);
@@ -3791,7 +4695,7 @@ static void AssertSettingsRoundTrip(AppSettings original)
     ((TextBox)controls.Single(control => control.AccessibleName == "Compression target in megabytes")).Text = "37 MB";
     ((TextBox)controls.Single(control => control.AccessibleName == "Global upload-mode shortcut")).Text =
         "Ctrl + Shift + U";
-    var startup = controls.OfType<CheckBox>().Single(control => control.Text == "Start with Windows");
+    var startup = controls.OfType<CheckBox>().Single(control => control.Name == "StartWithWindowsToggle");
     startup.Checked = !original.StartWithWindows;
     var uploadToDiscord = controls.OfType<CheckBox>()
         .Single(control => control.Name == "UploadToDiscordToggle");
@@ -3826,12 +4730,13 @@ static void AssertCriticalTextFits(Form form)
         "Local only",
         "Start with Windows",
         "Save changes",
-        "Cancel",
+        "Discard",
         "Recent activity",
         "Open uploaded folder",
         "Open logs",
         "Show in folder",
         "Settings",
+        "Home",
         "Activity",
         "Gallery",
         "About",
@@ -3848,7 +4753,7 @@ static void AssertCriticalTextFits(Form form)
             $"Text '{control.Text}' does not fit {control.GetType().Name}: measured={measured}, client={control.ClientSize}.");
     }
 
-    foreach (var toggle in EnumerateControls(form).OfType<ToggleSwitch>())
+    foreach (var toggle in EnumerateControls(form).OfType<ToggleSwitch>().Where(toggle => toggle.Visible))
     {
         var toggleText = TextRenderer.MeasureText(toggle.Text, toggle.Font, Size.Empty, TextFormatFlags.SingleLine);
         Assert(toggleText.Width <= toggle.GetTextBounds().Width + 4 &&
@@ -3880,7 +4785,7 @@ static void AssertAccessibility(Form form)
     }
 
     foreach (var decorative in EnumerateControls(form).Where(control =>
-                 control is BrandGlyphControl or BrandIconTile or ClipCordLogoControl or GradientStrip))
+                 control is BrandGlyphControl or ClipCordLogoControl or GradientStrip))
     {
         Assert(!decorative.TabStop,
             $"Decorative control {decorative.GetType().Name} must not be a keyboard tab stop.");
@@ -3891,9 +4796,15 @@ static void AssertAccessibility(Form form)
     Assert(EnumerateControls(form).Single(control => control.Name == "AboutNavItem").TabStop,
         "About must be keyboard reachable.");
     Assert(EnumerateControls(form).Single(control => control.Name == "SettingsNavItem").TabStop,
-        "The current Settings navigation item must participate in the top navigation keyboard order.");
+        "The current Settings navigation item must participate in the left-rail keyboard order.");
     Assert(EnumerateControls(form).Single(control => control.Name == "GalleryNavItem").TabStop,
-        "Gallery must be keyboard reachable from the top navigation.");
+        "Gallery must be keyboard reachable from the left navigation rail.");
+    Assert(EnumerateControls(form).Single(control => control.Name == "HomeNavItem").TabStop,
+        "Home must be keyboard reachable from the left navigation rail.");
+    var aboutNavigation = EnumerateControls(form).Single(control => control.Name == "AboutNavItem");
+    var aboutPage = EnumerateControls(form).Single(control => control.Name == "AboutView");
+    Assert(!string.Equals(aboutNavigation.AccessibleName, aboutPage.AccessibleName, StringComparison.Ordinal),
+        "The About rail destination and About page container must have distinct accessible names.");
 }
 
 static void AssertOpaqueCustomControlsPaintEveryPixel(Form form)
@@ -3907,7 +4818,6 @@ static void AssertOpaqueCustomControlsPaintEveryPixel(Form form)
         typeof(GradientButton),
         typeof(OutlineButton),
         typeof(TitleBarButton),
-        typeof(BrandIconTile),
         typeof(ClipCordLogoControl),
         typeof(GradientStrip)
     };
@@ -3960,12 +4870,17 @@ static void AssertDpiRefit(SettingsForm form)
     form.RefitDpiSensitiveControls();
 }
 
-static void AssertVerticalCentersMatch(Control first, Control second)
+static void AssertBrandClusterVerticallyCentered(Control logo, Control productName, Control productVersion)
 {
-    var firstCenter = first.PointToScreen(new Point(first.Width / 2, first.Height / 2));
-    var secondCenter = second.PointToScreen(new Point(second.Width / 2, second.Height / 2));
-    Assert(Math.Abs(firstCenter.Y - secondCenter.Y) <= 1,
-        $"The logo and wordmark must remain vertically centered; centers were {firstCenter.Y} and {secondCenter.Y}.");
+    var logoBounds = new Rectangle(logo.PointToScreen(Point.Empty), logo.Size);
+    var nameBounds = new Rectangle(productName.PointToScreen(Point.Empty), productName.Size);
+    var versionBounds = new Rectangle(productVersion.PointToScreen(Point.Empty), productVersion.Size);
+    var brandCopyBounds = Rectangle.Union(nameBounds, versionBounds);
+    var logoCenter = logoBounds.Top + logoBounds.Height / 2;
+    var copyCenter = brandCopyBounds.Top + brandCopyBounds.Height / 2;
+    Assert(Math.Abs(logoCenter - copyCenter) <= 2,
+        $"The rail logo must remain vertically centered against the complete name/version brand lockup: " +
+        $"logo={logoBounds}, name={nameBounds}, version={versionBounds}, centers={logoCenter}/{copyCenter}.");
 }
 
 static void AssertOfficialLogoArtworkPainted(ClipCordLogoControl logo)
@@ -4309,8 +5224,8 @@ static void RenderSettingsPreview(string outputPath)
     form.Show();
     Application.DoEvents();
     AssertSettingsCardGrid(form);
-    AssertSettingsFeatureIcons(form);
-    AssertSettingsFooterLayout(form, requireLogicalHeight: true);
+    AssertSharedShellLayout(form);
+    AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
     using var bitmap = new Bitmap(form.Width, form.Height);
     form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
     bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
@@ -4328,17 +5243,7 @@ static void AssertGalleryEditorScaledLayout(AppSettings settings, float scale)
             initialPage: SettingsPage.Gallery,
             manualClipEditService: new FakeManualClipEditService());
         form.Show();
-        WaitForUiCondition(
-            () => EnumerateControls(form).OfType<GalleryGameCard>().Any(card =>
-                card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true),
-            TimeSpan.FromSeconds(5),
-            $"Gallery editor did not populate before the {scale:F1}x layout check.");
-        var gameCard = EnumerateControls(form).OfType<GalleryGameCard>().Single(card =>
-            card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
-        typeof(Control).GetMethod(
-                "OnClick",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .Invoke(gameCard, [EventArgs.Empty]);
+        SelectGalleryGame(form, "Battlefield");
         EnumerateControls(form).OfType<Button>()
             .Single(button => button.Name == "GalleryLocalOnlyFilterButton")
             .PerformClick();
@@ -4352,10 +5257,11 @@ static void AssertGalleryEditorScaledLayout(AppSettings settings, float scale)
             $"Gallery editor did not initialize before the {scale:F1}x layout check.");
 
         var gallery = EnumerateControls(form).OfType<GalleryView>().Single();
-        var topNavigation = EnumerateControls(form).Single(control => control.Name == "TopNavigation");
+        var navigationRail = EnumerateControls(form).Single(control => control.Name == "NavigationRail");
+        var sharedHeader = EnumerateControls(form).Single(control => control.Name == "CustomTitleBar");
         form.Hide();
         form.Scale(new SizeF(scale, scale));
-        var featureControls = new[] { (Control)gallery, topNavigation }
+        var featureControls = new[] { (Control)gallery, navigationRail, sharedHeader }
             .SelectMany(root => new[] { root }.Concat(EnumerateControls(root)))
             .Distinct();
         foreach (var control in featureControls)
@@ -4419,6 +5325,23 @@ static void AssertLocalClipEditorLayout(SettingsForm form, float scale)
            preview.Right < options.Left && trim.Right < commit.Left,
         $"Gallery editor {scale:F1}x must keep two aligned, non-overlapping card rows: " +
         string.Join(", ", cards.Select(card => $"{card.Name}={card.Bounds}")));
+
+    var previewSurface = EnumerateControls(editor).Single(control => control.Name == "EditorPreviewSurface");
+    var mediaHost = EnumerateControls(editor).Single(control => control.Name == "EditorPreviewHost");
+    Assert(ReferenceEquals(mediaHost.Parent, previewSurface),
+        "The editor's ElementHost must remain inside the dedicated video surface.");
+    var previewSurfaceBounds = GetBoundsRelativeTo(previewSurface, editor);
+    foreach (var name in new[]
+             {
+                 "PlayEditorSourceButton", "EditorPlaybackSeekBar",
+                 "EditorPlaybackPositionLabel", "MuteEditorPreviewButton"
+             })
+    {
+        var transportControl = EnumerateControls(editor).Single(control => control.Name == name);
+        var transportBounds = GetBoundsRelativeTo(transportControl, editor);
+        Assert(!previewSurface.Contains(transportControl) && !previewSurfaceBounds.IntersectsWith(transportBounds),
+            $"Editor transport '{name}' must stay below and outside the ElementHost video surface: surface={previewSurfaceBounds}, control={transportBounds}.");
+    }
 }
 
 static void RenderGalleryEditorPreview(string outputPath)
@@ -4453,15 +5376,7 @@ static void RenderGalleryEditorPreview(string outputPath)
             initialPage: SettingsPage.Gallery,
             manualClipEditService: new FakeManualClipEditService());
         form.Show();
-        WaitForUiCondition(
-            () => EnumerateControls(form).OfType<GalleryGameCard>().Any(),
-            TimeSpan.FromSeconds(5),
-            "Gallery editor preview did not populate its game card.");
-        var gameCard = EnumerateControls(form).OfType<GalleryGameCard>().Single();
-        typeof(Control).GetMethod(
-                "OnClick",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .Invoke(gameCard, [EventArgs.Empty]);
+        SelectGalleryGame(form, "Battlefield");
         EnumerateControls(form).OfType<Button>()
             .Single(button => button.Name == "GalleryLocalOnlyFilterButton")
             .PerformClick();
@@ -4489,6 +5404,128 @@ static void RenderGalleryEditorPreview(string outputPath)
     }
 }
 
+static void RunPreviewOnStaThread(Action render, string description)
+{
+    Exception? failure = null;
+    using var completed = new ManualResetEventSlim();
+    var thread = new Thread(() =>
+    {
+        try { render(); }
+        catch (Exception exception) { failure = exception; }
+        finally { completed.Set(); }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    if (!completed.Wait(TimeSpan.FromSeconds(30)))
+    {
+        throw new TimeoutException($"{description} did not finish within 30 seconds.");
+    }
+    thread.Join();
+    if (failure is not null)
+    {
+        throw new InvalidOperationException($"{description} failed.", failure);
+    }
+}
+
+static void RenderGalleryPlayerPreview(string outputPath)
+{
+    Exception? failure = null;
+    using var completed = new ManualResetEventSlim();
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+            if (!string.IsNullOrWhiteSpace(outputDirectory)) Directory.CreateDirectory(outputDirectory);
+            var fixtureRoot = Path.Combine(
+                Path.GetTempPath(),
+                "ClipsToDiscordTests",
+                "gallery-player-render-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var localGame = Directory.CreateDirectory(Path.Combine(
+                    fixtureRoot,
+                    "local-only",
+                    "Battlefield™-6")).FullName;
+                var localClip = Path.Combine(localGame, "Battlefield local match.mp4");
+                var ffmpeg = FfmpegCompressor.FindExecutable()
+                    ?? throw new InvalidOperationException("ffmpeg.exe is required to render the Gallery player preview.");
+                RunFfmpegFixture(ffmpeg,
+                [
+                    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=4",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+                    "-f", "lavfi", "-i", "sine=frequency=880:duration=4",
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest",
+                    localClip
+                ]);
+
+                using var form = new SettingsForm(
+                    new AppSettings(
+                        fixtureRoot,
+                        "https://discord.com/api/webhooks/123456/preview-token",
+                        true,
+                        95,
+                        "PlayerOne",
+                        true),
+                    checkForUpdatesAsync: _ => Task.CompletedTask,
+                    initialPage: SettingsPage.Gallery);
+                form.Show();
+                SelectGalleryGame(form, "Battlefield");
+                EnumerateControls(form).OfType<Button>()
+                    .Single(button => button.Name == "GalleryLocalOnlyFilterButton")
+                    .PerformClick();
+                EnumerateControls(form).OfType<Button>()
+                    .Single(button => button.Name == "PlayGalleryClipButton")
+                    .PerformClick();
+                WaitForUiCondition(
+                    () => EnumerateControls(form).OfType<ClipPlayerView>().Any() &&
+                          EnumerateControls(form).OfType<Button>().Any(button =>
+                              button.Name == "ClipPlayerPlayButton" && button.Enabled) &&
+                          EnumerateControls(form).OfType<Label>().Any(label =>
+                              label.Name == "ClipPlayerAudioLabel" &&
+                              label.Text.Contains("2 audio tracks", StringComparison.Ordinal)),
+                    TimeSpan.FromSeconds(15),
+                    "Gallery player preview did not initialize its mixed-audio playback controls.");
+                form.PerformLayout();
+                EnumerateControls(form).OfType<GalleryView>().Single().RefreshViewport();
+                Application.DoEvents();
+                using var bitmap = new Bitmap(form.Width, form.Height);
+                form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+                form.Hide();
+            }
+            finally
+            {
+                try { Directory.Delete(fixtureRoot, recursive: true); } catch { }
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+        finally
+        {
+            completed.Set();
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    if (!completed.Wait(TimeSpan.FromSeconds(30)))
+    {
+        throw new TimeoutException("Gallery player preview did not finish within 30 seconds.");
+    }
+    thread.Join();
+    if (failure is not null)
+    {
+        throw new InvalidOperationException("Gallery player preview failed.", failure);
+    }
+}
+
 static void AssertGalleryEditorFlow(AppSettings settings)
 {
     var service = new FakeManualClipEditService();
@@ -4498,19 +5535,7 @@ static void AssertGalleryEditorFlow(AppSettings settings)
         initialPage: SettingsPage.Gallery,
         manualClipEditService: service);
     form.Show();
-    WaitForUiCondition(
-        () => EnumerateControls(form).OfType<GalleryGameCard>().Any(card =>
-            card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true),
-        TimeSpan.FromSeconds(5),
-        "The Local-only editor flow did not populate its game-first Gallery entry.");
-    var gameCard = EnumerateControls(form)
-        .OfType<GalleryGameCard>()
-        .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
-    typeof(Control).GetMethod(
-            "OnClick",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-        .Invoke(gameCard, [EventArgs.Empty]);
-    Application.DoEvents();
+    SelectGalleryGame(form, "Battlefield");
     Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2 &&
            EnumerateControls(form).OfType<Button>().Count(button => button.Name == "EditGalleryClipButton") == 1,
         "A selected game must show both routes while exposing Edit & upload only on its Local-only clip.");
@@ -4552,7 +5577,11 @@ static void AssertGalleryEditorFlow(AppSettings settings)
     Assert(EnumerateControls(form).OfType<Button>()
                .Single(button => button.Name == "GalleryBackButton").Text == "Back to clips" &&
            EnumerateControls(editor).OfType<Label>().Any(label =>
-               label.Text.Contains("Recycle Bin", StringComparison.OrdinalIgnoreCase)),
+               label.Text.Contains("stays untouched until Discord confirms", StringComparison.OrdinalIgnoreCase)) &&
+           EnumerateControls(editor).OfType<Label>().Any(label =>
+               label.Text.Contains("recycles the original", StringComparison.OrdinalIgnoreCase)) &&
+           (keepOriginal.AccessibleDescription ?? string.Empty)
+               .Contains("after the edited copy uploads", StringComparison.OrdinalIgnoreCase),
         "The editor must explain its safe original-file disposition and provide a return path to the selected game.");
     AssertControlsFit(form);
     AssertCriticalTextFits(form);
@@ -4618,18 +5647,18 @@ static void AssertGalleryEditorFlow(AppSettings settings)
         "Cancelling a pre-confirmation editor operation did not unwind its busy lifecycle.");
     Assert(service.LastRequest is { Source.Route: GalleryClipRoute.LocalOnly, KeepOriginal: false } &&
            File.Exists(service.LastRequest.Source.Path) &&
-           EnumerateControls(form).Single(control => control.Name == "SettingsNavItem").Enabled,
-        "Editor cancellation must preserve the Local-only source and restore navigation.");
+           EnumerateControls(form).Single(control => control.Name == "SettingsNavItem").Enabled &&
+           EnumerateControls(form).OfType<LocalClipEditorView>().Count() == 1 &&
+           !EnumerateControls(form).Any(control => control.Name == "GalleryClipCard"),
+        "Cancelling an in-flight edit must preserve the Local-only source, restore navigation, and keep the editor open for another attempt.");
 
-    EnumerateControls(form).OfType<Button>()
-        .Single(button => button.Name == "GalleryBackButton")
-        .PerformClick();
+    cancelEditorButton.PerformClick();
     Application.DoEvents();
     Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 1 &&
            EnumerateControls(form).OfType<Button>()
                .Single(button => button.Name == "GalleryLocalOnlyFilterButton")
                .AccessibleDescription == "Selected filter",
-        "Leaving the editor must return to the same game and Local-only filter.");
+        "Cancelling the editor must return to the same game and Local-only filter.");
     EnumerateControls(form).OfType<Button>()
         .Single(button => button.Name == "GalleryUploadedFilterButton")
         .PerformClick();
@@ -5119,21 +6148,28 @@ static void AssertActivityEditorHandoff(AppSettings settings)
     withoutService.Close();
 }
 
-static LocalClipEditorView OpenLocalOnlyEditor(SettingsForm form)
+static void SelectGalleryGame(Control root, string gameName)
 {
     WaitForUiCondition(
-        () => EnumerateControls(form).OfType<GalleryGameCard>().Any(card =>
-            card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true),
+        () => EnumerateControls(root).OfType<GalleryGameFilterButton>().Any(control =>
+            control.Name == "GalleryGameFilterButton" &&
+            control.AccessibleName?.Contains(gameName, StringComparison.OrdinalIgnoreCase) == true),
         TimeSpan.FromSeconds(5),
-        "The Local-only editor flow did not populate its game-first Gallery entry.");
-    var gameCard = EnumerateControls(form)
-        .OfType<GalleryGameCard>()
-        .Single(card => card.AccessibleName?.Contains("Battlefield", StringComparison.OrdinalIgnoreCase) == true);
+        $"Gallery did not populate its '{gameName}' game-rail entry.");
+    var gameFilter = EnumerateControls(root)
+        .OfType<GalleryGameFilterButton>()
+        .Single(control => control.Name == "GalleryGameFilterButton" &&
+                           control.AccessibleName?.Contains(gameName, StringComparison.OrdinalIgnoreCase) == true);
     typeof(Control).GetMethod(
             "OnClick",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-        .Invoke(gameCard, [EventArgs.Empty]);
+        .Invoke(gameFilter, [EventArgs.Empty]);
     Application.DoEvents();
+}
+
+static LocalClipEditorView OpenLocalOnlyEditor(SettingsForm form)
+{
+    SelectGalleryGame(form, "Battlefield");
     EnumerateControls(form).OfType<Button>()
         .Single(button => button.Name == "EditGalleryClipButton")
         .PerformClick();
@@ -5145,81 +6181,174 @@ static LocalClipEditorView OpenLocalOnlyEditor(SettingsForm form)
     return EnumerateControls(form).OfType<LocalClipEditorView>().Single();
 }
 
-static void AssertSettingsFooterLayout(SettingsForm form, bool requireLogicalHeight)
+static void AssertSharedShellLayout(SettingsForm form)
 {
     var root = EnumerateControls(form)
         .OfType<TableLayoutPanel>()
         .Single(control => control.Name == "RootLayout");
-    var footer = EnumerateControls(form).Single(control => control.Name == "FooterLayout");
-    var glyph = EnumerateControls(footer)
-        .OfType<BrandGlyphControl>()
-        .Single(control => control.Name == "FooterPrivacyGlyph");
-    var messageStack = EnumerateControls(footer)
-        .Single(control => control.Name == "FooterMessageStack");
-    var actions = EnumerateControls(footer)
-        .Single(control => control.Name == "FooterActions");
-    var privacy = EnumerateControls(footer)
-        .OfType<Label>()
-        .Single(control => control.Name == "PrivacySummaryLabel");
-    var status = EnumerateControls(footer)
-        .OfType<Label>()
-        .Single(control => control.Name == "FooterStatusLabel");
+    var rail = EnumerateControls(form).Single(control => control.Name == "NavigationRail");
+    var header = EnumerateControls(form).Single(control => control.Name == "CustomTitleBar");
+    var pageHost = EnumerateControls(form).Single(control => control.Name == "PageHost");
+    var saveBarHost = EnumerateControls(form).Single(control => control.Name == "SettingsSaveBarHost");
+    var logicalScale = Math.Max(1d, form.DeviceDpi / 96d);
+    var expectedRailWidth = (int)Math.Round(SettingsForm.NavigationRailLogicalWidth * logicalScale);
+    var expectedHeaderHeight = (int)Math.Round(SettingsForm.PageHeaderLogicalHeight * logicalScale);
+    var saveBarCell = root.GetCellPosition(saveBarHost);
 
-    if (requireLogicalHeight)
-    {
-        Assert(root.RowStyles[3].SizeType == SizeType.Absolute &&
-               Math.Abs(root.RowStyles[3].Height - SettingsForm.FooterLogicalHeight) < .1f,
-            $"The Settings footer must remain {SettingsForm.FooterLogicalHeight}px instead of being scaled independently: " +
-            $"actual={root.RowStyles[3].Height}px, dpi={form.DeviceDpi}.");
-    }
+    Assert(root.ColumnCount == 2 && root.RowCount == 3 &&
+           root.ColumnStyles[0].SizeType == SizeType.Absolute &&
+           root.RowStyles[0].SizeType == SizeType.Absolute,
+        "The redesigned shell must remain a two-column, three-row rail/header/page/save-bar grid.");
+    Assert(Math.Abs(rail.Width - expectedRailWidth) <= 1 &&
+           Math.Abs(header.Height - expectedHeaderHeight) <= 1,
+        $"The shared rail/header geometry drifted: rail={rail.Width}/{expectedRailWidth}, header={header.Height}/{expectedHeaderHeight}, dpi={form.DeviceDpi}.");
+    Assert(rail.Left == 0 && rail.Top == 0 && rail.Bottom == root.ClientSize.Height &&
+           header.Left == rail.Right && header.Top == 0 &&
+           pageHost.Left == rail.Right && pageHost.Top == header.Bottom &&
+           saveBarCell.Column == 1 && saveBarCell.Row == 2 &&
+           (!saveBarHost.Visible || saveBarHost.Left == rail.Right),
+        $"Rail, page header, page host, and save bar must share one non-overlapping shell grid: root={root.ClientRectangle}, rail={rail.Bounds}, header={header.Bounds}, page={pageHost.Bounds}, save={saveBarHost.Bounds}, saveVisible={saveBarHost.Visible}, saveCell=({saveBarCell.Column},{saveBarCell.Row}).");
+    Assert(!EnumerateControls(form).Any(control => control.Name is "TopNavigation" or "FooterLayout"),
+        "The legacy top navigation and always-on footer must not survive inside the redesigned left-rail shell.");
 
-    Assert(Math.Abs(glyph.Width - glyph.Height) <= 1 && glyph.Width >= 20,
-        $"The footer privacy glyph must retain a square drawing surface: {glyph.Bounds}.");
+    var navigation = EnumerateControls(form).Single(control => control.Name == "SideNavigation");
+    var expectedItems = new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "GalleryNavItem", "AboutNavItem" };
+    var actualItems = navigation.Controls.Cast<Control>().Select(control => control.Name).ToArray();
+    Assert(actualItems.SequenceEqual(expectedItems) &&
+           navigation.Controls.Cast<Control>().All(control =>
+               control.TabStop && control.AccessibleRole == AccessibleRole.MenuItem),
+        $"The left rail must expose five ordered keyboard menu items; got {string.Join(", ", actualItems)}.");
+    Assert(EnumerateControls(form).Single(control => control.Name == "RailStatusCard").Visible &&
+           EnumerateControls(form).OfType<Button>().Count(button =>
+               button.AccessibleRole == AccessibleRole.RadioButton &&
+               button.AccessibleName is "Route new clips to Discord" or "Keep new clips local only") == 2,
+        "The rail footer must keep the real route switch and watcher status instead of decorative sample data.");
+    Assert(EnumerateControls(form).OfType<TitleBarButton>().Count() == 3 &&
+           EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageTitleLabel").Visible &&
+           EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageSubtitleLabel").Visible,
+        "The shared header must retain page identity and all three custom window actions.");
 
-    var contentCenterTwice = footer.Padding.Top * 2 +
-                             footer.ClientSize.Height - footer.Padding.Vertical;
-    static int CenterTwice(Control control, Control ancestor)
-    {
-        var location = GetLocationRelativeToAncestor(control, ancestor);
-        return location.Y * 2 + control.Height;
-    }
-
-    foreach (var (name, control) in new[]
-             {
-                 ("privacy glyph", (Control)glyph),
-                 ("message stack", messageStack),
-                 ("footer actions", actions)
-             })
-    {
-        Assert(Math.Abs(CenterTwice(control, footer) - contentCenterTwice) <= 2,
-            $"The {name} must be vertically centered in the footer: control={control.Bounds}, " +
-            $"footer={footer.ClientRectangle}, padding={footer.Padding}.");
-    }
-
-    if (string.IsNullOrWhiteSpace(status.Text))
-    {
-        Assert(!status.Visible && messageStack.Height <= privacy.Height + 1,
-            $"An empty footer status must collapse completely instead of reserving a blank row: " +
-            $"statusVisible={status.Visible}, status={status.Size}, stack={messageStack.Size}, privacy={privacy.Size}.");
-        Assert(Math.Abs(CenterTwice(privacy, footer) - CenterTwice(glyph, footer)) <= 2,
-            $"The privacy copy must align with its glyph when no transient status is shown: " +
-            $"privacy={GetLocationRelativeToAncestor(privacy, footer)} {privacy.Size}, glyph={glyph.Bounds}.");
-    }
-    else if (form.Visible)
-    {
-        Assert(status.Visible && messageStack.Height >= status.Height + privacy.Height - 1,
-            $"A nonempty footer status must expand into the centered two-line message stack: " +
-            $"statusVisible={status.Visible}, status={status.Size}, stack={messageStack.Size}, privacy={privacy.Size}.");
-    }
-
-    var buttons = EnumerateControls(actions)
-        .OfType<Button>()
-        .Where(button => !form.Visible || button.Visible)
+    var expectedNavigationGlyphSide = (int)Math.Round(16 * logicalScale);
+    var navigationGlyphs = EnumerateControls(navigation).OfType<BrandGlyphControl>()
+        .Where(control => control.Name == "NavigationGlyph")
         .ToArray();
-    Assert(buttons.Length is >= 1 and <= 2 &&
-           buttons.All(button => Math.Abs(CenterTwice(button, footer) - contentCenterTwice) <= 2),
-        $"Save and Cancel must share the footer's vertical center: " +
-        string.Join(", ", buttons.Select(button => $"{button.Text}={GetLocationRelativeToAncestor(button, footer)} {button.Size}")));
+    Assert(navigationGlyphs.Length == 5 && navigationGlyphs.All(control =>
+               Math.Abs(Math.Min(control.Width, control.Height) - expectedNavigationGlyphSide) <= 1 &&
+               Math.Abs(control.Width - control.Height) <= 1),
+        $"The five shared-rail Figma glyphs must retain their compact 16px logical width; " +
+        $"expected={expectedNavigationGlyphSide}, actual={string.Join(", ", navigationGlyphs.Select(control => control.Size))}.");
+}
+
+static void AssertConditionalSaveBarLayout(
+    SettingsForm form,
+    bool expectedVisible,
+    bool requireLogicalHeight)
+{
+    var root = EnumerateControls(form)
+        .OfType<TableLayoutPanel>()
+        .Single(control => control.Name == "RootLayout");
+    var host = EnumerateControls(form).Single(control => control.Name == "SettingsSaveBarHost");
+    var bar = EnumerateControls(form).Single(control => control.Name == "SettingsSaveBar");
+    var summary = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "DirtySettingsSummaryLabel");
+    var save = EnumerateControls(form).OfType<Button>().Single(button => button.Text == "Save changes");
+    var discard = EnumerateControls(form).OfType<Button>()
+        .Single(button => button.Name == "DiscardSettingsButton");
+    var rowHeight = root.RowStyles[2].Height;
+
+    Assert(root.RowStyles[2].SizeType == SizeType.Absolute &&
+           (expectedVisible ? rowHeight > 0 : rowHeight == 0),
+        $"The conditional Settings save row has the wrong state: expectedVisible={expectedVisible}, row={rowHeight}.");
+    if (requireLogicalHeight && expectedVisible)
+    {
+        var expectedHeight = (int)Math.Round(
+            SettingsForm.SaveBarLogicalHeight * Math.Max(96, form.DeviceDpi) / 96d);
+        Assert(Math.Abs(rowHeight - expectedHeight) < .1f,
+            $"The visible save bar must use its {SettingsForm.SaveBarLogicalHeight}px logical row " +
+            $"({expectedHeight}px at {form.DeviceDpi} DPI); got {rowHeight}px.");
+    }
+
+    Assert(host.Visible == expectedVisible &&
+           bar.Visible == expectedVisible &&
+           save.Visible == expectedVisible &&
+           discard.Visible == expectedVisible,
+        $"Save-bar host, surface, and actions must transition together; host={host.Visible}, bar={bar.Visible}, save={save.Visible}, discard={discard.Visible}.");
+    if (expectedVisible)
+    {
+        Assert(!string.IsNullOrWhiteSpace(summary.Text) && ReferenceEquals(form.AcceptButton, save),
+            "A dirty Settings draft must explain its unsaved count and make Save the explicit Enter action.");
+        foreach (var button in new[] { save, discard })
+        {
+            var bounds = bar.RectangleToClient(button.RectangleToScreen(button.ClientRectangle));
+            Assert(bounds.Left >= 0 && bounds.Top >= 0 &&
+                   bounds.Right <= bar.ClientSize.Width && bounds.Bottom <= bar.ClientSize.Height,
+                $"Conditional save action '{button.Text}' escaped the save bar: button={bounds}, bar={bar.ClientSize}.");
+        }
+    }
+    else
+    {
+        Assert(form.AcceptButton is null,
+            "A pristine or non-Settings page must not retain an invisible default save action.");
+    }
+}
+
+static void AssertSettingsDirtySaveBar(SettingsForm form)
+{
+    var uploader = EnumerateControls(form).OfType<TextBox>()
+        .Single(textBox => textBox.AccessibleName == "Uploader name");
+    var startup = EnumerateControls(form).OfType<CheckBox>()
+        .Single(checkBox => checkBox.Name == "StartWithWindowsToggle");
+    var summary = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "DirtySettingsSummaryLabel");
+    var discard = EnumerateControls(form).OfType<Button>()
+        .Single(button => button.Name == "DiscardSettingsButton");
+    var uploadToggle = EnumerateControls(form).OfType<CheckBox>()
+        .Single(checkBox => checkBox.Name == "UploadToDiscordToggle");
+    var originalUploader = uploader.Text;
+    var originalStartup = startup.Checked;
+    var originalRoute = uploadToggle.Checked;
+
+    AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
+    uploader.Text = originalUploader + " draft";
+    Application.DoEvents();
+    AssertConditionalSaveBarLayout(form, expectedVisible: true, requireLogicalHeight: true);
+    Assert(summary.Text.StartsWith("1 unsaved change", StringComparison.Ordinal),
+        $"One edited field must report exactly one unsaved change; got '{summary.Text}'.");
+    startup.Checked = !originalStartup;
+    Application.DoEvents();
+    Assert(summary.Text.StartsWith("2 unsaved changes", StringComparison.Ordinal),
+        $"Dirty count must track distinct changed fields; got '{summary.Text}'.");
+
+    form.ShowPage(SettingsPage.Activity);
+    Application.DoEvents();
+    AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
+    Assert(uploader.Text != originalUploader && startup.Checked != originalStartup,
+        "Navigating away must hide, not silently discard, the Settings draft.");
+    form.ShowPage(SettingsPage.Settings);
+    Application.DoEvents();
+    AssertConditionalSaveBarLayout(form, expectedVisible: true, requireLogicalHeight: true);
+    discard.PerformClick();
+    Application.DoEvents();
+    Assert(uploader.Text == originalUploader && startup.Checked == originalStartup,
+        "Discard must restore every staged field from the applied settings.");
+    AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
+
+    var stagedRoute = EnumerateControls(form).OfType<Button>().Single(button =>
+        button.AccessibleName == (originalRoute ? "Keep new clips local only" : "Route new clips to Discord"));
+    stagedRoute.PerformClick();
+    Application.DoEvents();
+    Assert(uploadToggle.Checked != originalRoute &&
+           stagedRoute.AccessibleDescription == "Selected route" &&
+           EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageTitleLabel").Text == "Settings",
+        "The rail route switch must stage a real Settings change, select the requested route, and navigate to Settings.");
+    AssertConditionalSaveBarLayout(form, expectedVisible: true, requireLogicalHeight: true);
+    Assert(summary.Text.StartsWith("1 unsaved change", StringComparison.Ordinal),
+        "A staged rail route change must count as one unsaved Settings field.");
+    discard.PerformClick();
+    Application.DoEvents();
+    Assert(uploadToggle.Checked == originalRoute,
+        "Discarding a staged rail route must restore the applied routing mode.");
+    AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: true);
 }
 
 static void RenderAboutPreview(string outputPath)
@@ -5250,6 +6379,248 @@ static void RenderAboutPreview(string outputPath)
     form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
     bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
     form.Hide();
+}
+
+static void RenderSharedPagePreview(string outputPath, SettingsPage page)
+{
+    if (page is not (SettingsPage.Home or SettingsPage.Activity or SettingsPage.Gallery))
+    {
+        throw new ArgumentOutOfRangeException(nameof(page), page, "Only the three shared visual-QA pages are supported.");
+    }
+
+    var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+    if (!string.IsNullOrWhiteSpace(outputDirectory)) Directory.CreateDirectory(outputDirectory);
+    var fixtureRoot = Path.Combine(
+        Path.GetTempPath(),
+        "ClipsToDiscordTests",
+        "shared-page-render-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(fixtureRoot);
+    try
+    {
+        static string CreateClip(
+            string clipsRoot,
+            string archive,
+            string game,
+            string fileName,
+            int megabytes,
+            DateTime timestampUtc)
+        {
+            var directory = Directory.CreateDirectory(Path.Combine(clipsRoot, archive, game)).FullName;
+            var path = Path.Combine(directory, fileName);
+            using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+            {
+                stream.SetLength(megabytes * 1024L * 1024L);
+            }
+            File.SetLastWriteTimeUtc(path, timestampUtc);
+            return path;
+        }
+
+        var now = new DateTime(2026, 8, 20, 16, 0, 0, DateTimeKind.Utc);
+        var battlefieldUploaded = CreateClip(
+            fixtureRoot, "uploaded", "Battlefield™-6", "Battlefield breakthrough.mp4", 74, now.AddMinutes(-4));
+        var battlefieldLocal = CreateClip(
+            fixtureRoot, "local-only", "Battlefield™-6", "Battlefield flank.mp4", 39, now.AddMinutes(-18));
+        var haloUploaded = CreateClip(
+            fixtureRoot, "uploaded", "Halo Infinite", "Halo ranked win.mp4", 52, now.AddHours(-2));
+        var valorantLocal = CreateClip(
+            fixtureRoot, "local-only", "Valorant", "Valorant clutch.mp4", 28, now.AddHours(-5));
+        var retryingClip = Path.Combine(fixtureRoot, "Counter-Strike retry.mp4");
+        File.WriteAllBytes(retryingClip, [1, 3, 3, 7]);
+        File.SetLastWriteTimeUtc(retryingClip, now.AddMinutes(-9));
+
+        using var history = new ActivityHistoryStore(string.Empty);
+        history.Transition(new ClipActivityUpdate(
+            battlefieldUploaded,
+            ClipActivityState.Archived,
+            GameName: "Battlefield™-6",
+            OriginalBytes: 112L * 1024 * 1024,
+            CompressedBytes: 74L * 1024 * 1024,
+            CurrentPath: battlefieldUploaded,
+            Route: ClipActivityRoute.Uploaded));
+        history.Transition(new ClipActivityUpdate(
+            battlefieldLocal,
+            ClipActivityState.Archived,
+            GameName: "Battlefield™-6",
+            OriginalBytes: 39L * 1024 * 1024,
+            CurrentPath: battlefieldLocal,
+            Route: ClipActivityRoute.LocalOnly));
+        history.Transition(new ClipActivityUpdate(
+            haloUploaded,
+            ClipActivityState.Archived,
+            GameName: "Halo Infinite",
+            OriginalBytes: 86L * 1024 * 1024,
+            CompressedBytes: 52L * 1024 * 1024,
+            CurrentPath: haloUploaded,
+            Route: ClipActivityRoute.Uploaded));
+        history.Transition(new ClipActivityUpdate(
+            valorantLocal,
+            ClipActivityState.Failed,
+            GameName: "Valorant",
+            OriginalBytes: 28L * 1024 * 1024,
+            CurrentPath: valorantLocal,
+            Route: ClipActivityRoute.LocalOnly,
+            Error: "Upload failed; the local clip is safe."));
+        history.Transition(new ClipActivityUpdate(
+            retryingClip,
+            ClipActivityState.Retrying,
+            GameName: "Counter-Strike 2",
+            CurrentPath: retryingClip,
+            IncrementAttempt: true,
+            Detail: "Waiting before the next upload attempt."));
+
+        var settings = new AppSettings(
+            fixtureRoot,
+            "https://discord.com/api/webhooks/123456/preview-token",
+            true,
+            AppSettings.DefaultCompressionTargetMb,
+            "PlayerOne",
+            true);
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            watcherStatusProvider: () => "Discord open — watching for clips",
+            activityHistory: history,
+            initialPage: page,
+            launchMediaFile: _ => true,
+            thumbnailProvider: new PreviewGalleryThumbnailProvider());
+        form.Show();
+        Application.DoEvents();
+        form.Size = SettingsForm.GetDesignedOpeningSize(page, form.DeviceDpi);
+        form.PerformLayout();
+        Application.DoEvents();
+        if (page == SettingsPage.Home)
+        {
+            WaitForUiCondition(
+                () => EnumerateControls(form).OfType<Label>()
+                    .Single(label => label.Name == "HomeLocalArchiveCountLabel").Text == "2",
+                TimeSpan.FromSeconds(5),
+                "Home render fixture did not finish its local archive scan.");
+        }
+        else if (page == SettingsPage.Gallery)
+        {
+            WaitForUiCondition(
+                () => EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 4,
+                TimeSpan.FromSeconds(5),
+                "Gallery render fixture did not finish its archive scan.");
+            WaitForUiCondition(
+                () => EnumerateControls(form).OfType<GalleryThumbnailTile>()
+                    .Any(tile => tile.Visible && tile.HasThumbnail),
+                TimeSpan.FromSeconds(5),
+                "Gallery render fixture did not adopt a deterministic thumbnail for the visible row.");
+        }
+        form.PerformLayout();
+        Application.DoEvents();
+        using var bitmap = new Bitmap(form.Width, form.Height);
+        form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+        form.Close();
+    }
+    finally
+    {
+        try { Directory.Delete(fixtureRoot, recursive: true); }
+        catch { }
+    }
+}
+
+static void AssertActivityScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    using var history = new ActivityHistoryStore(string.Empty);
+    var clipPath = Path.Combine(settings.ClipsFolder, "Figma activity action.mp4");
+    history.Transition(new ClipActivityUpdate(
+        clipPath,
+        ClipActivityState.Archived,
+        GameName: "Figma fixture",
+        CurrentPath: clipPath,
+        Route: ClipActivityRoute.Uploaded));
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            activityHistory: history,
+            initialPage: SettingsPage.Activity);
+        var logicalDesignedOpeningSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.Activity, 96);
+        var scaledDesignedOpeningSize = new Size(
+            (int)Math.Round(logicalDesignedOpeningSize.Width * scale),
+            (int)Math.Round(logicalDesignedOpeningSize.Height * scale));
+        form.CreateControl();
+        var relativeScale = scale / GetDpiScale(form);
+        form.Scale(new SizeF(relativeScale, relativeScale));
+        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * relativeScale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+
+        form.AutoScroll = true;
+        var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = scaledDesignedOpeningSize;
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        EnumerateControls(form)
+            .Single(control => control.Name == "ActivityTimeline")
+            .PerformLayout();
+        Application.DoEvents();
+        var deviceScale = GetDpiScale(form);
+        var effectiveLayoutScale = Math.Max(deviceScale, deviceScale * relativeScale);
+        AssertActivityShowInFolderContentFits(form, effectiveLayoutScale);
+        AssertControlsFit(form);
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+    }
+}
+
+static void AssertActivityShowInFolderContentFits(Control root, float expectedScale)
+{
+    Assert(ActivityView.ShowInFolderLogicalWidth == 135 &&
+           ActivityView.ShowInFolderLogicalHeight == 31 &&
+           ActivityView.ScaleLogicalMetric(ActivityView.ShowInFolderLogicalWidth, 96) == 135 &&
+           ActivityView.ScaleLogicalMetric(ActivityView.ShowInFolderLogicalWidth, 144) == 202 &&
+           ActivityView.ScaleLogicalMetric(ActivityView.ShowInFolderLogicalWidth, 192) == 270 &&
+           ActivityView.ScaleLogicalMetric(ActivityView.ShowInFolderLogicalHeight, 192) == 62,
+        "Activity's Figma Show in folder CTA must retain its exact 135x31 logical DPI contract.");
+    var buttons = EnumerateControls(root).OfType<OutlineButton>()
+        .Where(button => button.Name == "OpenFileLocationButton")
+        .ToArray();
+    Assert(buttons.Length > 0,
+        "The Activity fixture must render at least one Show in folder action for content-fit verification.");
+    foreach (var button in buttons)
+    {
+        var measuredText = TextRenderer.MeasureText(
+            button.Text,
+            button.Font,
+            Size.Empty,
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        var glyphSize = Math.Max(16, button.Font.Height - 2);
+        var gap = Math.Max(5, (int)Math.Round(6 * button.DeviceDpi / 96d));
+        var combinedWidth = glyphSize + gap + measuredText.Width;
+        var left = Math.Max(6, (button.Width - combinedWidth) / 2);
+        var availableTextWidth = button.Width - left - glyphSize - gap;
+        var expectedWidth = ActivityView.ScaleLogicalMetric(
+            ActivityView.ShowInFolderLogicalWidth,
+            button.DeviceDpi);
+        var expectedHeight = ActivityView.ScaleLogicalMetric(
+            ActivityView.ShowInFolderLogicalHeight,
+            button.DeviceDpi);
+        Assert(button.Text == "Show in folder" &&
+               button.LeadingGlyph == BrandGlyph.FolderOpen &&
+               Math.Abs(button.Width - expectedWidth) <= 2 &&
+               Math.Abs(button.Height - expectedHeight) <= 2 &&
+               measuredText.Width <= availableTextWidth,
+            $"Activity's Figma Show in folder CTA is clipped or mis-scaled at {expectedScale:F2}x: " +
+            $"button={button.Size}, expected={expectedWidth}x{expectedHeight}, glyph={glyphSize}px, " +
+            $"gap={gap}px, text={measuredText.Width}px, availableText={availableTextWidth}px.");
+    }
 }
 
 static void AssertSettingsScaledLayout(AppSettings settings, float scale)
@@ -5287,24 +6658,24 @@ static void AssertSettingsScaledLayout(AppSettings settings, float scale)
         form.PerformLayout();
         Application.DoEvents();
         AssertControlsFit(form);
-        AssertSettingsFooterLayout(form, requireLogicalHeight: false);
-        if (scale <= 1.5f) AssertSettingsCardsOpenWithoutScrolling(form);
+        AssertConditionalSaveBarLayout(form, expectedVisible: false, requireLogicalHeight: false);
         AssertSettingsCardGrid(form);
         AssertSettingsTextFieldsAligned(form);
-        AssertSettingsFeatureIcons(form, (int)Math.Round(64 * scale));
         AssertCriticalTextFits(form);
 
         var hotkeyField = EnumerateControls(form)
             .OfType<TextBox>()
             .Single(control => control.AccessibleName == "Global upload-mode shortcut");
         var disable = EnumerateControls(form).OfType<Button>().Single(control => control.Text == "Disable");
-        var fieldBounds = new Rectangle(hotkeyField.PointToScreen(Point.Empty), hotkeyField.Size);
-        var actionBounds = new Rectangle(disable.PointToScreen(Point.Empty), disable.Size);
-        var minimumUsableFieldWidth = (int)Math.Round(140 * scale);
+        var fieldBounds = GetBoundsRelativeTo(hotkeyField, form);
+        var actionBounds = GetBoundsRelativeTo(disable, form);
+        var minimumUsableFieldWidth = (int)Math.Round(44 * scale);
         Assert(hotkeyField.Width >= minimumUsableFieldWidth &&
                disable.Width > 0 &&
                fieldBounds.Right <= actionBounds.Left,
-            $"The shortcut editor overlaps at {scale:F1}x: field={fieldBounds}, action={actionBounds}.");
+            $"The compact Figma shortcut editor must preserve its 44px field floor and avoid the action " +
+            $"at {scale:F1}x: field={fieldBounds}, action={actionBounds}.");
+
     }
     finally
     {
@@ -5383,7 +6754,7 @@ static void AssertAboutMinimumScroll(AppSettings settings)
         ShowInTaskbar = false,
         StartPosition = FormStartPosition.Manual,
         Location = new Point(-2000, -2000),
-        ClientSize = new Size(900, 476)
+        ClientSize = new Size(700, 476)
     };
     host.Controls.Add(view);
     host.Show();
@@ -5394,6 +6765,19 @@ static void AssertAboutMinimumScroll(AppSettings settings)
     Assert(view.HasOverflow && scrollHost.HasOverflow &&
            !EnumerateControls(view).OfType<ScrollableControl>().Any(control => control.AutoScroll),
         "A height-constrained About page must use the branded scrollbar instead of clipping or exposing native chrome.");
+    var content = EnumerateControls(view).OfType<AboutContentLayout>().Single();
+    var responsiveCards = new[]
+    {
+        "AboutStatusCard", "AboutDiagnosticsCard", "AboutPrivacyCard", "AboutCreditsCard"
+    }.Select(name => EnumerateControls(view).Single(control => control.Name == name))
+     .Select(control => new Rectangle(control.PointToScreen(Point.Empty), control.Size))
+     .ToArray();
+    Assert(responsiveCards.All(bounds => bounds.Left == responsiveCards[0].Left &&
+                                               bounds.Right == responsiveCards[0].Right) &&
+           responsiveCards.Skip(1).Select((bounds, index) => bounds.Top - responsiveCards[index].Bottom)
+               .All(gap => gap == content.ScaledGap),
+        $"A narrow About viewport must reflow the staggered grid into one full-width ordered stack: " +
+        string.Join(", ", responsiveCards));
     var lastAction = EnumerateControls(view).OfType<Button>()
         .Single(button => button.Name == "AboutLicensesButton");
     Assert(lastAction.Focus(),
@@ -5843,8 +7227,11 @@ static void AssertClipPlayerViewCore(string temporaryRoot)
 
     var play = (Control)player.Controls.Find("ClipPlayerPlayButton", searchAllChildren: true)[0];
     var seek = (Control)player.Controls.Find("ClipPlayerSeekBar", searchAllChildren: true)[0];
+    var title = (Label)player.Controls.Find("ClipPlayerTitle", searchAllChildren: true)[0];
     Assert(!play.Enabled && !seek.Enabled,
         "The transport must stay disabled until media has opened, so a click cannot reach a player with no source.");
+    Assert(!title.AutoSize && title.AutoEllipsis && title.Dock == DockStyle.Fill,
+        "The player title must remain a fixed one-line ellipsized field so long filenames cannot steal video height.");
 
     // The transport belongs below the video: ElementHost renders into its own window, so
     // controls overlapping it would be painted behind the picture.
@@ -5868,6 +7255,18 @@ static void AssertClipPlayerViewCore(string temporaryRoot)
     using var progressPlayer = new ClipPlayerView(entry, progressPreparer);
     progressForm.Controls.Add(progressPlayer);
     progressForm.Show();
+    var startupScaleApplied = typeof(ClipPlayerView).GetField(
+        "_startupDpiScaleApplied",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    Assert(startupScaleApplied?.GetValue(progressPlayer) is true,
+        "A dynamically created Gallery player must apply its one-shot startup-DPI geometry before playback begins.");
+    var playerScale = Math.Max(1f, progressPlayer.DeviceDpi / 96f);
+    var scaledPlay = progressPlayer.Controls.Find("ClipPlayerPlayButton", searchAllChildren: true)[0];
+    var scaledSeek = progressPlayer.Controls.Find("ClipPlayerSeekBar", searchAllChildren: true)[0];
+    Assert(Math.Abs(scaledPlay.Width - (int)Math.Round(92 * playerScale)) <= 1 &&
+           Math.Abs(scaledPlay.Height - (int)Math.Round(36 * playerScale)) <= 1 &&
+           Math.Abs(scaledSeek.Height - (int)Math.Round(26 * playerScale)) <= 1,
+        $"The dynamically created player must scale its transport at startup DPI: scale={playerScale:F2}, play={scaledPlay.Size}, seek={scaledSeek.Size}.");
     var status = (Label)progressPlayer.Controls.Find("ClipPlayerStatus", searchAllChildren: true)[0];
     WaitForUiCondition(
         () => progressPreparer.CallCount == 1 && status.Text == RecordingClipPlaybackPreparer.ProgressMessage,
@@ -6233,6 +7632,95 @@ internal sealed class FakeManualClipEditService : IManualClipEditService
         {
             _activeProgress = null;
         }
+    }
+}
+
+internal sealed class RecordingGalleryThumbnailProvider(bool blockUntilCancelled) : IGalleryThumbnailProvider
+{
+    private int _callCount;
+    private int _cancellationCount;
+
+    internal int CallCount => Volatile.Read(ref _callCount);
+    internal int CancellationCount => Volatile.Read(ref _cancellationCount);
+
+    public async Task<Bitmap?> GetThumbnailAsync(
+        string clipsFolder,
+        GalleryClipEntry clip,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _callCount);
+        try
+        {
+            if (blockUntilCancelled)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            var bitmap = new Bitmap(320, 180, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using var graphics = Graphics.FromImage(bitmap);
+            graphics.Clear(clip.Route == GalleryClipRoute.Uploaded
+                ? Color.FromArgb(76, 64, 145)
+                : Color.FromArgb(122, 62, 75));
+            return bitmap;
+        }
+        catch (OperationCanceledException)
+        {
+            Interlocked.Increment(ref _cancellationCount);
+            throw;
+        }
+    }
+}
+
+internal sealed class PreviewGalleryThumbnailProvider : IGalleryThumbnailProvider
+{
+    public Task<Bitmap?> GetThumbnailAsync(
+        string clipsFolder,
+        GalleryClipEntry clip,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var colors = GalleryCatalog.GetGradient(clip.GameName);
+        var bitmap = new Bitmap(640, 360, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using (var background = new System.Drawing.Drawing2D.LinearGradientBrush(
+                   new Rectangle(Point.Empty, bitmap.Size),
+                   colors.Start,
+                   colors.End,
+                   28f))
+        {
+            graphics.FillRectangle(background, new Rectangle(Point.Empty, bitmap.Size));
+        }
+        using (var glow = new SolidBrush(Color.FromArgb(62, 255, 255, 255)))
+        {
+            graphics.FillEllipse(glow, 390, -90, 330, 330);
+        }
+        using (var shade = new SolidBrush(Color.FromArgb(66, 3, 7, 18)))
+        {
+            graphics.FillPolygon(shade, new[]
+            {
+                new Point(0, 360), new Point(640, 145), new Point(640, 360)
+            });
+        }
+        using var titleFont = new Font("Segoe UI", 31, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var routeFont = new Font("Segoe UI", 18, FontStyle.Bold, GraphicsUnit.Pixel);
+        TextRenderer.DrawText(
+            graphics,
+            clip.GameName,
+            titleFont,
+            new Rectangle(30, 245, 580, 54),
+            Color.White,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
+            TextFormatFlags.NoPrefix);
+        TextRenderer.DrawText(
+            graphics,
+            clip.Route == GalleryClipRoute.Uploaded ? "UPLOADED" : "LOCAL ONLY",
+            routeFont,
+            new Rectangle(32, 300, 300, 34),
+            Color.FromArgb(226, 236, 248),
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<Bitmap?>(bitmap);
     }
 }
 
