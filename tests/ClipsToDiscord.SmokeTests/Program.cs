@@ -6223,6 +6223,11 @@ static void AssertSharedShellLayout(SettingsForm form)
                button.AccessibleRole == AccessibleRole.RadioButton &&
                button.AccessibleName is "Route new clips to Discord" or "Keep new clips local only") == 2,
         "The rail footer must keep the real route switch and watcher status instead of decorative sample data.");
+    var watcherDot = EnumerateControls(form).OfType<HomeRouteDot>()
+        .Single(control => control.Name == "RailWatcherStatusDot");
+    Assert(watcherDot.AccessibleRole == AccessibleRole.None && !watcherDot.TabStop &&
+           watcherDot.Bounds.Bottom <= watcherDot.Parent!.ClientSize.Height,
+        "The rail watcher state must use a silent painted dot that cannot inherit font-dependent clipping.");
     Assert(EnumerateControls(form).OfType<TitleBarButton>().Count() == 3 &&
            EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageTitleLabel").Visible &&
            EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageSubtitleLabel").Visible,

@@ -785,14 +785,13 @@ internal sealed class SettingsForm : Form
         };
         watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(16)));
         watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        watcherHeadline.Controls.Add(new Label
+        watcherHeadline.Controls.Add(new HomeRouteDot
         {
-            Text = "●",
+            Name = "RailWatcherStatusDot",
             Dock = DockStyle.Fill,
-            ForeColor = Color.FromArgb(49, 196, 130),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = ClipCordTheme.InterfaceFont(9f),
-            Margin = Padding.Empty
+            Accent = Color.FromArgb(49, 196, 130),
+            Margin = Padding.Empty,
+            AccessibleName = string.Empty
         }, 0, 0);
         _watcherStatusLabel.Font = ClipCordTheme.InterfaceFont(9f, FontStyle.Bold);
         _watcherStatusLabel.ForeColor = ClipCordTheme.TextPrimary;
