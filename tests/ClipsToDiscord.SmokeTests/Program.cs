@@ -1987,7 +1987,11 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertSettingsDirtySaveBar(form);
             form.ShowPage(SettingsPage.Gallery);
             Application.DoEvents();
-            AssertGalleryHeaderActionPlacement(form, expectedSharedHeader: true);
+            var gallerySharedHeaderThreshold = (int)Math.Round(
+                1050 * Math.Max(96, form.DeviceDpi) / 96d);
+            AssertGalleryHeaderActionPlacement(
+                form,
+                expectedSharedHeader: form.ClientSize.Width >= gallerySharedHeaderThreshold);
             form.ShowPage(SettingsPage.Settings);
             Application.DoEvents();
             var baselineSubscriptions = activityHistory.SubscriptionCount;
