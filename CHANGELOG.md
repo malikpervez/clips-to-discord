@@ -4,6 +4,9 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+- Add a Microsoft Store MSIX package using ClipCord's reserved Store identity so Microsoft can sign and deliver the app without the unsigned-download warning shown by direct GitHub builds.
+- Use the Windows packaged startup task and Microsoft Store update surface when running the Store build, while preserving the existing registry startup and verified GitHub update behavior for direct installs and portable copies.
+
 ## 1.14.0 — 2026-08-20
 
 - Redesign ClipCord around a persistent dark navigation rail and a shared page header, with a truthful live Home dashboard, searchable Activity timeline, responsive Gallery grid, grouped Settings, and a refreshed About page.

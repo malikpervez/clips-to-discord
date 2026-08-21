@@ -36,6 +36,21 @@ jobs:
             -FfmpegPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') `
             -FfmpegLicensePath (Join-Path $ffmpegDirectory 'FFMPEG-LICENSE.txt')
 
+      - name: Build and validate Microsoft Store package
+        shell: powershell
+        run: |
+          $ffmpegDirectory = .\scripts\get-ffmpeg.ps1
+          [xml]$project = Get-Content .\ClipsToDiscord.csproj
+          $storeVersion = "{0}.0" -f [string]$project.Project.PropertyGroup.Version
+          .\scripts\build-store-msix.ps1 `
+            -Version $storeVersion `
+            -FfmpegPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') `
+            -FfmpegLicensePath (Join-Path $ffmpegDirectory 'FFMPEG-LICENSE.txt')
+          .\scripts\test-store-msix.ps1 `
+            -PackagePath ".\artifacts\store\ClipCord_$($storeVersion)_x64.msix" `
+            -ExpectedVersion $storeVersion `
+            -RequireFfmpeg
+
       - name: Download verified previous installer
         shell: powershell
         run: |
@@ -178,5 +193,14 @@ jobs:
             artifacts/ClipsToDiscord-Setup.exe
             artifacts/ClipCord-win-x64.zip
             artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload verified Microsoft Store candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ClipCord-store-${{ github.sha }}
+          path: artifacts/store/*.msix
           if-no-files-found: error
           retention-days: 14

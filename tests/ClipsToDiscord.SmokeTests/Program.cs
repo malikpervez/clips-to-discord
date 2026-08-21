@@ -411,6 +411,38 @@ try
     Assert(AppSettings.Empty.UploadToDiscord, "New installations must default to Discord uploads enabled.");
     Assert(AppSettings.Empty.ModeToggleHotkey == GlobalHotkeyBinding.DefaultDisplayText,
         "New installations must default the global mode shortcut to Ctrl + Alt + L.");
+    Assert(!AppDistribution.HasPackageIdentityForResult(15700) &&
+           AppDistribution.HasPackageIdentityForResult(122) &&
+           AppDistribution.HasPackageIdentityForResult(0),
+        "Distribution detection must distinguish unpackaged, buffer-query, and packaged results.");
+    var storeUpdatesStartInfo = AppDistribution.CreateStoreUpdatesStartInfo();
+    Assert(storeUpdatesStartInfo.UseShellExecute &&
+           storeUpdatesStartInfo.FileName == "ms-windows-store://downloadsandupdates" &&
+           storeUpdatesStartInfo.ArgumentList.Count == 0 &&
+           string.IsNullOrEmpty(storeUpdatesStartInfo.Arguments),
+        "Store builds must open the trusted Microsoft Store updates surface without a shell command string.");
+    var unknownPackageIdentityResultRejected = false;
+    try
+    {
+        AppDistribution.HasPackageIdentityForResult(5);
+    }
+    catch (System.ComponentModel.Win32Exception)
+    {
+        unknownPackageIdentityResultRejected = true;
+    }
+    Assert(unknownPackageIdentityResultRejected,
+        "Unexpected package-identity errors must be surfaced instead of being treated as unpackaged.");
+    Assert(StartupManager.GetPackagedAction(true, Windows.ApplicationModel.StartupTaskState.Enabled) ==
+               PackagedStartupAction.None &&
+           StartupManager.GetPackagedAction(false, Windows.ApplicationModel.StartupTaskState.Enabled) ==
+               PackagedStartupAction.Disable &&
+           StartupManager.GetPackagedAction(true, Windows.ApplicationModel.StartupTaskState.Disabled) ==
+               PackagedStartupAction.RequestEnable &&
+           StartupManager.GetPackagedAction(true, Windows.ApplicationModel.StartupTaskState.DisabledByUser) ==
+               PackagedStartupAction.BlockedByUser &&
+           StartupManager.GetPackagedAction(true, Windows.ApplicationModel.StartupTaskState.DisabledByPolicy) ==
+               PackagedStartupAction.BlockedByPolicy,
+        "Packaged startup settings must respect enabled, disabled, user-blocked, and policy-blocked Windows states.");
     Assert(AppSettings.NormalizeModeToggleHotkey(null) == GlobalHotkeyBinding.DefaultDisplayText &&
            AppSettings.NormalizeModeToggleHotkey(string.Empty) == string.Empty &&
            AppSettings.NormalizeModeToggleHotkey("control+alt+l") == GlobalHotkeyBinding.DefaultDisplayText,
