@@ -50,7 +50,7 @@ Each release includes `SHA256SUMS.txt` so the installer or portable ZIP can be v
 
 The app then lives in the Windows notification area. Existing clips are treated as a baseline on first setup and are not uploaded. New clips are uploaded while Discord desktop is running, then organized beneath `uploaded` by game name. Turn off **Upload new clips to Discord** in Settings or the tray menu—or press the configured global shortcut, **Ctrl + Alt + L** by default—to keep future clips on this PC beneath `local-only` instead.
 
-The installer and executable are not code-signed, so Windows SmartScreen may show an unrecognized-app warning. Anyone distributing the app broadly should sign both with a trusted code-signing certificate.
+The direct GitHub installer and portable executable are not code-signed, so Windows SmartScreen may show an unrecognized-app warning. The Microsoft Store build is submitted as MSIX and signed by Microsoft before Store distribution.
 
 See the [complete setup guide](docs/SETUP.md) for folder-selection and webhook instructions.
 
@@ -112,6 +112,21 @@ $ffmpegDirectory = .\scripts\get-ffmpeg.ps1
 .\scripts\build-installer.ps1 -RequireFfmpeg
 ```
 
+Build and structurally validate the Microsoft Store MSIX with the reserved ClipCord identity:
+
+```powershell
+$ffmpegDirectory = .\scripts\get-ffmpeg.ps1
+.\scripts\build-store-msix.ps1 `
+  -FfmpegPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') `
+  -FfmpegLicensePath (Join-Path $ffmpegDirectory 'FFMPEG-LICENSE.txt')
+.\scripts\test-store-msix.ps1 `
+  -PackagePath .\artifacts\store\ClipCord_1.14.0.0_x64.msix `
+  -ExpectedVersion 1.14.0.0 `
+  -RequireFfmpeg
+```
+
+The generated MSIX is intentionally unsigned locally. Microsoft validates and signs the submitted package for Store delivery; do not publish that unsigned CI artifact as a direct download.
+
 FFmpeg binaries are intentionally not committed to this repository. The helper downloads the pinned Gyan.dev FFmpeg 8.1.2 essentials archive, rejects any archive or extracted file that does not match the recorded SHA-256 values, and keeps the matching GPLv3 license beside the executable. FFmpeg and its license must be supplied together, and release installer builds use `-RequireFfmpeg`.
 
 ## Local data
@@ -124,7 +139,7 @@ Settings, state, and logs are stored in:
 
 ClipCord intentionally retains this internal directory so upgrades preserve settings, encrypted webhooks, and duplicate-upload history. Version 1.1 automatically copies compatible settings and state from the older `%LOCALAPPDATA%\MomentsToDiscord` folder when needed.
 
-The Windows startup entry is stored under the current user's standard `Run` registry key.
+Unpackaged builds store the Windows startup entry under the current user's standard `Run` registry key. The Microsoft Store build uses its declared Windows StartupTask instead. Store builds also delegate application updates to Microsoft Store rather than downloading the GitHub installer.
 
 ## License
 

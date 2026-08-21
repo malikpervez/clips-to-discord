@@ -21,7 +21,7 @@ The installer copies the application to `%LOCALAPPDATA%\Programs\ClipsToDiscord`
 
 The portable `ClipCord-win-x64.zip` remains available. Portable users must extract every file together and keep the extracted folder in place while **Start with Windows** is enabled.
 
-The release is not code-signed. Windows SmartScreen may display an unrecognized-app warning. Verify that the download came from this repository's Releases page before choosing **More info → Run anyway**.
+The direct GitHub installer is not code-signed. Windows SmartScreen may display an unrecognized-app warning. Verify that the download came from this repository's Releases page before choosing **More info → Run anyway**. The Microsoft Store package is signed and delivered by Microsoft and does not use this unsigned installer path.
 
 ## 2. Choose the clips folder
 
@@ -76,6 +76,10 @@ Exit the old app from its notification-area menu, download the current `ClipCord
 
 ## Updating later releases
 
+Microsoft Store installations are updated by Microsoft Store. **Check for updates** opens the Store's downloads and updates page, and ClipCord does not contact GitHub's update API or download a GitHub installer in that distribution.
+
+If a direct GitHub installation is already present, the Store build reuses the same `%LOCALAPPDATA%\ClipsToDiscord` settings and history and removes the older registry startup entry when it first applies the saved preference. The two installations remain separately listed under Installed apps, so uninstall the older direct copy after confirming the Store build opens with the expected settings.
+
 Exit the app from its notification-area menu and run the newer `ClipCord-Setup.exe`. It upgrades the existing per-user installation in place, including installations previously named Clips to Discord. Saved settings and upload state remain under `%LOCALAPPDATA%\ClipsToDiscord`.
 
 The app checks the official `malikpervez/clips-to-discord` GitHub Releases API no more than once every 24 hours. Stable checks ignore drafts and prereleases and offer only a newer release containing the expected installer plus a verifiable SHA-256 digest or checksum entry. Use **Check for updates** in Settings to check immediately.
@@ -92,6 +96,6 @@ Portable users who choose **Install update** transition to the normal per-user i
 
 ## Uninstalling
 
-Open **Settings → Apps → Installed apps**, find **ClipCord**, and select **Uninstall**. The uninstaller removes the application, its shortcuts, and its **Start with Windows** entry.
+Open **Settings → Apps → Installed apps**, find **ClipCord**, and select **Uninstall**. Windows removes either distribution and its **Start with Windows** entry.
 
 Settings, logs, and upload history remain in `%LOCALAPPDATA%\ClipsToDiscord` for compatibility with previous versions, so reinstalling does not lose the duplicate-upload protections. Delete that data directory manually only if you also want to reset the app completely.

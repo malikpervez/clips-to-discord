@@ -102,6 +102,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     ToolTipIcon.Warning), null);
             }
             StartController(_settings);
+            _ = ApplyInitialStartupPreferenceAsync(_settings.StartWithWindows);
         }
         else
         {
@@ -245,7 +246,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         if (_shutdownScheduled) return;
+        await StartupManager.ApplyAsync(settings.StartWithWindows);
         StartController(settings);
+    }
+
+    private static async Task ApplyInitialStartupPreferenceAsync(bool enabled)
+    {
+        try
+        {
+            await StartupManager.ApplyAsync(enabled);
+        }
+        catch (Exception exception)
+        {
+            Log.Error("ClipCord could not apply the saved startup preference.", exception);
+        }
     }
 
     private async Task<ManualClipEditResult> UploadPreparedEditedClipExclusiveAsync(
@@ -364,7 +378,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void StartController(AppSettings settings)
     {
-        StartupManager.Apply(settings.StartWithWindows);
         if (settings.UploadToDiscord)
         {
             UploadedFolder.GetOrCreate(settings.ClipsFolder);
@@ -513,6 +526,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void StartUpdateChecks()
     {
+        if (AppDistribution.UsesStoreUpdates) return;
         _updateTimer.Start();
         if (_automaticUpdateCheckScheduled) return;
 
@@ -555,6 +569,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private async Task CheckForUpdatesManuallyAsync(IWin32Window owner)
     {
+        if (AppDistribution.UsesStoreUpdates)
+        {
+            OpenStoreUpdates(GetUsableOwner(owner));
+            return;
+        }
+
         var result = await _updateCoordinator.CheckAsync(
             manual: true,
             _lifetimeCancellation.Token);
@@ -596,6 +616,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
                 break;
+        }
+    }
+
+    private static void OpenStoreUpdates(IWin32Window? owner)
+    {
+        try
+        {
+            Process.Start(AppDistribution.CreateStoreUpdatesStartInfo());
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not open Microsoft Store updates.", exception);
+            MessageBox.Show(
+                owner,
+                "Open Microsoft Store, select Library, then choose Get updates.",
+                "Could not open Microsoft Store",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
     }
 
