@@ -19,6 +19,7 @@ internal sealed class ClipPlayerView : UserControl
 {
     private readonly GalleryClipEntry _clip;
     private readonly IClipPlaybackPreparer _preparer;
+    private readonly Func<bool, bool>? _setFavorite;
     private readonly ElementHost _mediaHost;
     private readonly MediaElement _mediaElement;
     private readonly Label _statusLabel;
@@ -28,6 +29,8 @@ internal sealed class ClipPlayerView : UserControl
     private readonly OutlineButton _muteButton;
     private readonly PlaybackSeekBar _seekBar;
     private readonly System.Windows.Forms.Timer _positionTimer;
+    private FavoriteButton? _favoriteButton;
+    private bool _isFavorite;
     private CancellationTokenSource? _lifetimeCancellation;
     private TimeSpan _duration;
     private bool _mediaReady;
@@ -37,11 +40,17 @@ internal sealed class ClipPlayerView : UserControl
     private bool _startupDpiScaleApplied;
     private bool _disposed;
 
-    internal ClipPlayerView(GalleryClipEntry clip, IClipPlaybackPreparer? preparer = null)
+    internal ClipPlayerView(
+        GalleryClipEntry clip,
+        IClipPlaybackPreparer? preparer = null,
+        bool isFavorite = false,
+        Func<bool, bool>? setFavorite = null)
     {
         ArgumentNullException.ThrowIfNull(clip);
         _clip = clip;
         _preparer = preparer ?? new ClipPlaybackPreparer();
+        _isFavorite = isFavorite;
+        _setFavorite = setFavorite;
         Name = "ClipPlayerView";
         AccessibleName = $"Play {clip.FileName}";
         Dock = DockStyle.Fill;
@@ -187,12 +196,13 @@ internal sealed class ClipPlayerView : UserControl
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 2,
             Margin = Padding.Empty,
             BackColor = ClipCordTheme.SurfaceRaised
         };
         heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var title = new Label
         {
@@ -210,12 +220,37 @@ internal sealed class ClipPlayerView : UserControl
         };
         heading.Controls.Add(title, 0, 0);
         heading.Controls.Add(CreateRouteChip(_clip.Route), 1, 0);
+        _favoriteButton = new FavoriteButton(
+            _isFavorite,
+            logicalSize: 36,
+            logicalIconSize: 17,
+            revealWhenOff: false)
+        {
+            Name = "ClipPlayerFavoriteButton",
+            Size = new Size(36, 36),
+            Margin = new Padding(10, 0, 0, 0),
+            AccessibleName = $"Toggle Favorites for {_clip.FileName}",
+            Enabled = _setFavorite is not null
+        };
+        _favoriteButton.Click += (_, _) =>
+        {
+            var next = !_isFavorite;
+            if (_setFavorite?.Invoke(next) != true) return;
+            SetFavoriteState(next);
+        };
+        heading.Controls.Add(_favoriteButton, 2, 0);
         var metadata = CreateMutedLabel($"{_clip.GameName} · {GalleryView.FormatBytes(_clip.Length)}");
         metadata.Name = "ClipPlayerMetadata";
         metadata.Margin = new Padding(0, 3, 0, 0);
         heading.Controls.Add(metadata, 0, 1);
-        heading.SetColumnSpan(metadata, 2);
+        heading.SetColumnSpan(metadata, 3);
         return heading;
+    }
+
+    internal void SetFavoriteState(bool favorite)
+    {
+        _isFavorite = favorite;
+        _favoriteButton?.SetFavorite(favorite);
     }
 
     private Control BuildTransport()

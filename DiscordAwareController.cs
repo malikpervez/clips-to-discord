@@ -13,7 +13,8 @@ internal sealed class DiscordAwareController : IDisposable
     public DiscordAwareController(
         AppSettings settings,
         Action<string> reportStatus,
-        ActivityHistoryStore? activityHistory = null)
+        ActivityHistoryStore? activityHistory = null,
+        IFavoritesService? favorites = null)
         : this(
             settings,
             reportStatus,
@@ -22,7 +23,8 @@ internal sealed class DiscordAwareController : IDisposable
                 new UploaderWorker(
                     workerSettings,
                     status,
-                    activityHistory: activityHistory).RunAsync(cancellationToken),
+                    activityHistory: activityHistory,
+                    favorites: favorites).RunAsync(cancellationToken),
             DiscordControllerOptions.Default)
     {
     }

@@ -546,6 +546,8 @@ try
     Assert(ReferenceEquals(ClipCordTheme.InterfaceFont(10f), ClipCordTheme.InterfaceFont(10f)),
         "ClipCord fonts must be cached instead of allocating GDI font handles for every control.");
     AssertFigmaIconAssets();
+    AssertFavoritesStoreAndSemantics(Path.Combine(temporaryRoot, "favorites-store"));
+    AssertFavoriteButtonRendering();
     AssertGalleryThumbnailContracts(Path.Combine(temporaryRoot, "gallery-thumbnail-contracts"));
     Assert(Enum.GetValues<SettingsPage>().All(page =>
                SettingsForm.GetDesignedOpeningSize(page, 96) == new Size(1200, 760)),
@@ -1615,6 +1617,8 @@ static void AssertFigmaIconAssets()
         [FigmaIconAsset.Film] = ("film.png", "5cdab9d22795aa1818a30095713e3a8b0c7b6d1c17fd4cb64dc7d72c3e348ddb"),
         [FigmaIconAsset.Folder] = ("folder.png", "fc9aa588cfadbdc8cc5531292a4a4facd930376941d32e6b9907a4fb2d7bde80"),
         [FigmaIconAsset.Gallery] = ("gallery.png", "ed6a0a7bc4a7a337178fb1415fe92039294e62b4c24d5021b9357a42927f1f42"),
+        [FigmaIconAsset.Heart] = ("heart.png", "2f76ae84b631bf9bab09283046c84f0b19e0f62ba8774bb3aba10eedf677dcd2"),
+        [FigmaIconAsset.HeartFill] = ("heartfill.png", "a7e0cbfb59afb577abbfb406d46ea3468dfe637602485795c2d3cd3e2ce1f19c"),
         [FigmaIconAsset.Home] = ("home.png", "6557993d604a612d4ae2c06a5d2b2de5454089bcaa3aa7fe97ca1356ae3d5c0f"),
         [FigmaIconAsset.More] = ("more.png", "7825ca39fd29e36d4884d7ca4924e0a27f4e82e473e6e650a5ae8813aa9f343c"),
         [FigmaIconAsset.Play] = ("play.png", "37709608177cda025a60f73093ca50dc2f1cd6a21a6c7227300a1c1d235e3227"),
@@ -1626,8 +1630,8 @@ static void AssertFigmaIconAssets()
         [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde")
     };
     var enumAssets = Enum.GetValues<FigmaIconAsset>();
-    Assert(enumAssets.Length == 20 && enumAssets.ToHashSet().SetEquals(expected.Keys),
-        $"The approved Figma icon catalog must contain exactly 20 pinned assets; got {string.Join(", ", enumAssets)}.");
+    Assert(enumAssets.Length == 22 && enumAssets.ToHashSet().SetEquals(expected.Keys),
+        $"The approved Figma icon catalog must contain exactly 22 pinned assets; got {string.Join(", ", enumAssets)}.");
 
     var assembly = typeof(FigmaIconRenderer).Assembly;
     var actualResources = assembly.GetManifestResourceNames()
@@ -1637,7 +1641,7 @@ static void AssertFigmaIconAssets()
         .Select(value => resourcePrefix + value.FileName)
         .ToHashSet(StringComparer.Ordinal);
     Assert(actualResources.SetEquals(expectedResources),
-        $"Embedded Figma icon resources diverged from the 20 approved exports: " +
+        $"Embedded Figma icon resources diverged from the 22 approved exports: " +
         $"expected={string.Join(", ", expectedResources.OrderBy(name => name, StringComparer.Ordinal))}; " +
         $"actual={string.Join(", ", actualResources.OrderBy(name => name, StringComparer.Ordinal))}.");
     foreach (var (asset, contract) in expected)
@@ -1655,6 +1659,32 @@ static void AssertFigmaIconAssets()
         using var image = Image.FromStream(imageStream);
         Assert(image.Size == new Size(96, 96),
             $"Figma icon {asset} must remain a square 96x96 alpha mask; got {image.Size}.");
+        if (asset is FigmaIconAsset.Heart or FigmaIconAsset.HeartFill)
+        {
+            using var bitmap = new Bitmap(image);
+            var maximumAlpha = 0;
+            var topMaximumAlpha = 0;
+            var bottomMaximumAlpha = 0;
+            var opaqueBlackPixels = 0;
+            for (var y = 0; y < bitmap.Height; y++)
+            {
+                for (var x = 0; x < bitmap.Width; x++)
+                {
+                    var pixel = bitmap.GetPixel(x, y);
+                    maximumAlpha = Math.Max(maximumAlpha, pixel.A);
+                    if (y == 0) topMaximumAlpha = Math.Max(topMaximumAlpha, pixel.A);
+                    if (y == bitmap.Height - 1) bottomMaximumAlpha = Math.Max(bottomMaximumAlpha, pixel.A);
+                    if (pixel.A == 255 && pixel.R == 0 && pixel.G == 0 && pixel.B == 0)
+                    {
+                        opaqueBlackPixels++;
+                    }
+                }
+            }
+            Assert(maximumAlpha == 255 && topMaximumAlpha == 0 && bottomMaximumAlpha == 0 &&
+                   opaqueBlackPixels == 0,
+                $"Figma icon {asset} must be a full-opacity alpha-only heart with clean horizontal boundaries; " +
+                $"max={maximumAlpha}, top={topMaximumAlpha}, bottom={bottomMaximumAlpha}, black={opaqueBlackPixels}.");
+        }
     }
 
     var expectedMappings = new Dictionary<BrandGlyph, FigmaIconAsset>
@@ -1692,6 +1722,213 @@ static void AssertFigmaIconAssets()
     }
     Assert(!FigmaIconRenderer.TryGetBrandAsset(BrandGlyph.Destination, out _),
         "The Discord destination brand mark must remain custom artwork instead of being aliased to a generic Figma upload icon.");
+}
+
+static void AssertFavoritesStoreAndSemantics(string testRoot)
+{
+    Directory.CreateDirectory(testRoot);
+    var storePath = Path.Combine(testRoot, "favorites.json");
+    var store = new FavoritesStore(storePath);
+    Assert(store.Load().Entries.Count == 0,
+        "A missing Favorites store must load as an empty collection.");
+
+    var uploadedGame = Directory.CreateDirectory(Path.Combine(testRoot, "uploaded", "Battlefield™-6")).FullName;
+    var clipPath = Path.Combine(uploadedGame, "favorite moment.mp4");
+    File.WriteAllBytes(clipPath, [1, 2, 3, 4]);
+    var file = new FileInfo(clipPath);
+    var originalLength = file.Length;
+    var originalLastWriteTimeUtc = file.LastWriteTimeUtc;
+    var clip = new GalleryClipEntry(
+        file.FullName,
+        file.Name,
+        "Battlefield™-6",
+        GalleryClipRoute.Uploaded,
+        file.Length,
+        file.LastWriteTimeUtc);
+    var game = new GalleryGameEntry(clip.GameName, [clip]);
+    var snapshot = new GallerySnapshot([game], []);
+    var favorites = new FavoritesService(store);
+    var changeCount = 0;
+    favorites.Changed += () => changeCount++;
+
+    var archiveBeforeFavorite = SnapshotArchiveFiles(testRoot);
+    Assert(favorites.SetFavorite(clip, favorite: true) && favorites.IsFavorite(clip),
+        "Adding a clip to Favorites must persist its current file identity.");
+    AssertArchiveFilesUnchanged(archiveBeforeFavorite, SnapshotArchiveFiles(testRoot),
+        "Favoriting a clip must not create, move, rename, or modify any archived clip.");
+    var favoriteView = snapshot.Games
+        .SelectMany(entry => entry.Clips)
+        .Where(favorites.IsFavorite)
+        .ToArray();
+    Assert(game.Clips.Count == 1 && favoriteView.SequenceEqual([clip]) && snapshot.TotalClips == 1,
+        "A clip in Favorites must remain in its game with the game's count unchanged.");
+    var roundTrip = store.Load();
+    Assert(roundTrip.Entries.Count == 1 &&
+           roundTrip.Entries[0].Path.Equals(file.FullName, StringComparison.OrdinalIgnoreCase) &&
+           roundTrip.Entries[0].Length == file.Length &&
+           roundTrip.Entries[0].LastWriteTimeUtc == file.LastWriteTimeUtc,
+        "Favorites must round-trip path, file size, and last-write time.");
+
+    File.WriteAllBytes(clipPath, [9, 8, 7, 6, 5, 4]);
+    File.SetLastWriteTimeUtc(clipPath, originalLastWriteTimeUtc);
+    var differentLength = new FileInfo(clipPath);
+    var differentLengthClip = clip with
+    {
+        Length = differentLength.Length,
+        LastWriteTimeUtc = differentLength.LastWriteTimeUtc
+    };
+    Assert(differentLength.Length != originalLength &&
+           differentLength.LastWriteTimeUtc == originalLastWriteTimeUtc &&
+           !favorites.IsFavorite(differentLengthClip),
+        "A Favorite path with the same timestamp but a different length must not inherit the heart.");
+
+    File.WriteAllBytes(clipPath, [9, 8, 7, 6]);
+    File.SetLastWriteTimeUtc(clipPath, originalLastWriteTimeUtc.AddMinutes(2));
+    var differentTimestamp = new FileInfo(clipPath);
+    var differentTimestampClip = clip with
+    {
+        Length = differentTimestamp.Length,
+        LastWriteTimeUtc = differentTimestamp.LastWriteTimeUtc
+    };
+    Assert(differentTimestamp.Length == originalLength &&
+           differentTimestamp.LastWriteTimeUtc != originalLastWriteTimeUtc &&
+           !favorites.IsFavorite(differentTimestampClip),
+        "A Favorite path with the same length but a different timestamp must not inherit the heart.");
+
+    File.Delete(clipPath);
+    Assert(store.Load().Entries.Count == 1,
+        "A missing Favorite path must remain stored so a disconnected drive cannot erase user state.");
+    Assert(favorites.SetFavorite(clip, favorite: false) &&
+           snapshot.Games[0].Clips.Count == 1 &&
+           favorites.CountFavorites(snapshot.Games.SelectMany(entry => entry.Clips)) == 0 &&
+           changeCount == 2,
+        "Removing a clip from Favorites must leave its game entry intact and notify observers once.");
+
+    File.WriteAllText(storePath, "{not-json");
+    Assert(store.Load().Entries.Count == 0,
+        "A corrupt Favorites store must fail closed to an empty collection.");
+    File.WriteAllText(storePath, JsonSerializer.Serialize(new
+    {
+        Version = 999,
+        Entries = new[]
+        {
+            new FavoriteClipIdentity(file.FullName, originalLength, originalLastWriteTimeUtc)
+        }
+    }));
+    Assert(store.Load().Entries.Count == 0,
+        "A wrong-version Favorites store containing a valid entry must fail closed to an empty collection.");
+
+    static Dictionary<string, (long Length, DateTime LastWriteTimeUtc)> SnapshotArchiveFiles(string root)
+    {
+        var snapshot = new Dictionary<string, (long, DateTime)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var archiveName in new[] { "uploaded", "local-only" })
+        {
+            var archive = Path.Combine(root, archiveName);
+            if (!Directory.Exists(archive)) continue;
+            foreach (var path in Directory.EnumerateFiles(archive, "*", SearchOption.AllDirectories))
+            {
+                var info = new FileInfo(path);
+                snapshot[info.FullName] = (info.Length, info.LastWriteTimeUtc);
+            }
+        }
+        return snapshot;
+    }
+
+    static void AssertArchiveFilesUnchanged(
+        IReadOnlyDictionary<string, (long Length, DateTime LastWriteTimeUtc)> before,
+        IReadOnlyDictionary<string, (long Length, DateTime LastWriteTimeUtc)> after,
+        string message)
+    {
+        Assert(before.Count == after.Count && before.All(entry =>
+                after.TryGetValue(entry.Key, out var current) && current == entry.Value),
+            message);
+    }
+}
+
+static void AssertFavoriteButtonRendering()
+{
+    RunPreviewOnStaThread(
+        AssertFavoriteButtonRenderingCore,
+        "Favorites heart rendering validation");
+}
+
+static void AssertFavoriteButtonRenderingCore()
+{
+    foreach (var (size, iconSize) in new[] { (26, 14), (52, 28) })
+    {
+        using var button = new FavoriteButton(
+            isFavorite: true,
+            logicalSize: size,
+            logicalIconSize: iconSize,
+            revealWhenOff: true)
+        {
+            Size = new Size(size, size)
+        };
+        using var bitmap = new Bitmap(size, size);
+        button.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        var coralPixels = 0;
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                var color = bitmap.GetPixel(x, y);
+                if (color.R >= 190 && color.G <= 100 && color.B <= 105) coralPixels++;
+            }
+        }
+        Assert(coralPixels >= Math.Max(12, size * size / 18),
+            $"The Favorites heart must retain its coral Figma silhouette at {size / 26f:F1}x; pixels={coralPixels}.");
+    }
+
+    using var hoverButton = new FavoriteButton(
+        isFavorite: false,
+        logicalSize: 26,
+        logicalIconSize: 14,
+        revealWhenOff: true);
+    Assert(hoverButton.AccessibilityObject.Role == AccessibleRole.CheckButton &&
+           !hoverButton.AccessibilityObject.State.HasFlag(AccessibleStates.Checked),
+        "An unfavorited heart must expose an unchecked CheckButton state to accessibility clients.");
+    hoverButton.SetFavorite(true);
+    Assert(hoverButton.AccessibilityObject.State.HasFlag(AccessibleStates.Checked),
+        "A favorited heart must expose AccessibleStates.Checked to accessibility clients.");
+    hoverButton.SetFavorite(false);
+    using var hidden = new Bitmap(26, 26);
+    hoverButton.DrawToBitmap(hidden, new Rectangle(Point.Empty, hidden.Size));
+    hoverButton.SetReveal(true);
+    using var revealed = new Bitmap(26, 26);
+    hoverButton.DrawToBitmap(revealed, new Rectangle(Point.Empty, revealed.Size));
+    Assert(CountDifferentPixels(hidden, revealed) > 40,
+        "An empty heart must appear on Gallery-thumbnail hover while remaining hidden at rest.");
+
+    using var keyboardButton = new FavoriteButton(
+        isFavorite: false,
+        logicalSize: 26,
+        logicalIconSize: 14,
+        revealWhenOff: true);
+    var keyboardClicks = 0;
+    keyboardButton.Click += (_, _) => keyboardClicks++;
+    var onKeyDown = typeof(FavoriteButton).GetMethod(
+        "OnKeyDown",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var enter = new KeyEventArgs(Keys.Enter);
+    var space = new KeyEventArgs(Keys.Space);
+    onKeyDown.Invoke(keyboardButton, [enter]);
+    onKeyDown.Invoke(keyboardButton, [space]);
+    Assert(keyboardClicks == 2 && enter.Handled && enter.SuppressKeyPress &&
+           space.Handled && space.SuppressKeyPress,
+        "Enter and Space must each activate the Favorites heart without leaking a keypress.");
+
+    static int CountDifferentPixels(Bitmap left, Bitmap right)
+    {
+        var count = 0;
+        for (var y = 0; y < left.Height; y++)
+        {
+            for (var x = 0; x < left.Width; x++)
+            {
+                if (left.GetPixel(x, y).ToArgb() != right.GetPixel(x, y).ToArgb()) count++;
+            }
+        }
+        return count;
+    }
 }
 
 static void AssertHomeViewLifecycle(AppSettings settings)
@@ -1912,6 +2149,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertGalleryPreHandleLifecycle(settings);
             TraceSmokeStep("Settings layout: visible Gallery thumbnails");
             AssertGalleryThumbnailLifecycle(settings);
+            TraceSmokeStep("Settings layout: Gallery Favorites propagation");
+            AssertGalleryFavoritesFlow(settings);
             TraceSmokeStep("Settings layout: Gallery playback prewarm");
             AssertGalleryPlaybackPrewarm(settings);
             TraceSmokeStep("Settings layout: Gallery Local-only editor flow");
@@ -2648,6 +2887,17 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
         Path.Combine(stateDirectory, ".safe-baseline-required"));
     var recycleRoot = Directory.CreateDirectory(Path.Combine(transactionRoot, "fake-recycle-bin")).FullName;
     var recycler = new RecordingOriginalClipRecycler(recycleRoot);
+    var favorites = new FavoritesService(new FavoritesStore(Path.Combine(stateDirectory, "favorites.json")));
+    var originalInfo = new FileInfo(originalPath);
+    var originalFavorite = new GalleryClipEntry(
+        originalInfo.FullName,
+        originalInfo.Name,
+        "Battlefield™-6",
+        GalleryClipRoute.LocalOnly,
+        originalInfo.Length,
+        originalInfo.LastWriteTimeUtc);
+    Assert(favorites.SetFavorite(originalFavorite, favorite: true),
+        "The edit-migration fixture must begin with a Favorite Local-only source.");
     var archiveSeenBeforeRecycle = false;
     var expectedArchivePath = Path.Combine(
         transactionRoot,
@@ -2670,7 +2920,7 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
     var service = new EditedClipUploadService(
         stateStore,
         () => uploader,
-        new EditedClipDispositionProcessor(recycler));
+        new EditedClipDispositionProcessor(recycler, favorites));
     var settings = new AppSettings(
         transactionRoot,
         "https://discord.com/api/v10/webhooks/123456/manual-edit-token",
@@ -2714,6 +2964,18 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
         "After Discord success, the edited copy must archive under the selected game before the original is recycled.");
     Assert(originalSeenWhenUploadReturned && archiveSeenBeforeRecycle,
         "The Local-only original must still exist when Discord returns, and the edited archive must exist before recycling begins.");
+    var archivedInfo = new FileInfo(result.ArchivedPath);
+    var archivedFavorite = new GalleryClipEntry(
+        archivedInfo.FullName,
+        archivedInfo.Name,
+        "Battlefield™-6",
+        GalleryClipRoute.Uploaded,
+        archivedInfo.Length,
+        archivedInfo.LastWriteTimeUtc);
+    Assert(!favorites.IsFavorite(originalFavorite) &&
+           favorites.IsFavorite(archivedFavorite) &&
+           favorites.CountFavorites([originalFavorite, archivedFavorite]) == 1,
+        "With Keep original off, the Favorite must migrate to the edited archive without changing the count.");
     Assert(progressUpdates.Select(update => update.Stage).SequenceEqual([
                ManualClipEditStage.Uploading,
                ManualClipEditStage.Compressing,
@@ -2749,11 +3011,21 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
         keepOperation.ToString("N"))).FullName;
     var keepEdited = Path.Combine(keepStageFolder, "keep-edit.mp4");
     await File.WriteAllBytesAsync(keepEdited, [15, 16, 17, 18, 19]);
+    var keepOriginalInfo = new FileInfo(keepOriginal);
+    var keepOriginalFavorite = new GalleryClipEntry(
+        keepOriginalInfo.FullName,
+        keepOriginalInfo.Name,
+        "Keep Game",
+        GalleryClipRoute.LocalOnly,
+        keepOriginalInfo.Length,
+        keepOriginalInfo.LastWriteTimeUtc);
+    Assert(favorites.SetFavorite(keepOriginalFavorite, favorite: true),
+        "The Keep original fixture must begin with a Favorite Local-only source.");
     var keepUploader = new RecordingManualDiscordUploader();
     var keepService = new EditedClipUploadService(
         stateStore,
         () => keepUploader,
-        new EditedClipDispositionProcessor(recycler));
+        new EditedClipDispositionProcessor(recycler, favorites));
     var keepResult = await keepService.UploadAsync(
         settings,
         new PreparedClipEdit(
@@ -2776,6 +3048,18 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
            File.Exists(keepOriginal) && keepResult.OriginalKept && !keepResult.OriginalCleanupFailed &&
            recycler.RecycledPaths.Count == 1,
         "Keep original must archive the edited copy without sending the Local-only source to the Recycle Bin.");
+    var keepArchivedInfo = new FileInfo(keepResult.ArchivedPath);
+    var keepArchivedFavorite = new GalleryClipEntry(
+        keepArchivedInfo.FullName,
+        keepArchivedInfo.Name,
+        "Keep Game",
+        GalleryClipRoute.Uploaded,
+        keepArchivedInfo.Length,
+        keepArchivedInfo.LastWriteTimeUtc);
+    Assert(favorites.IsFavorite(keepOriginalFavorite) &&
+           !favorites.IsFavorite(keepArchivedFavorite) &&
+           favorites.CountFavorites([keepOriginalFavorite, keepArchivedFavorite]) == 1,
+        "With Keep original on, the source must keep its Favorite and the edited copy must start outside Favorites.");
 
     var duplicateGame = Directory.CreateDirectory(Path.Combine(
         UploadedFolder.GetOrCreateLocalOnly(transactionRoot),
@@ -2927,6 +3211,86 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
            !File.Exists(crashOriginal) && crashRecycler.RecycledPaths.Count == 1 &&
            recoveredState.PendingEditedUploads.Count == 0,
         "Uploader-worker restart recovery must finish archive and Recycle Bin disposition without another webhook request.");
+
+    var favoriteRecoveryRoot = Directory.CreateDirectory(Path.Combine(
+        temporaryRoot,
+        "manual-edit-favorite-recovery-wiring")).FullName;
+    var favoriteRecoveryLocalGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreateLocalOnly(favoriteRecoveryRoot),
+        "Recovery Wiring Game")).FullName;
+    var favoriteRecoveryOriginal = Path.Combine(favoriteRecoveryLocalGame, "missing-original.mp4");
+    var favoriteRecoveryUploadedGame = Directory.CreateDirectory(Path.Combine(
+        UploadedFolder.GetOrCreate(favoriteRecoveryRoot),
+        "Recovery Wiring Game")).FullName;
+    var favoriteRecoveryDestination = Path.Combine(favoriteRecoveryUploadedGame, "recovered-edit.mp4");
+    await File.WriteAllBytesAsync(favoriteRecoveryDestination, [41, 42, 43, 44, 45]);
+    var favoriteRecoveryOperation = Guid.NewGuid();
+    var favoriteRecoveryStage = Path.Combine(
+        Directory.CreateDirectory(Path.Combine(
+            favoriteRecoveryRoot,
+            ".clipcord-editing",
+            favoriteRecoveryOperation.ToString("N"))).FullName,
+        "missing-stage.mp4");
+    var favoriteRecoveryData = Directory.CreateDirectory(Path.Combine(
+        favoriteRecoveryRoot,
+        "state-data")).FullName;
+    var favoriteRecoveryService = new FavoritesService(new FavoritesStore(Path.Combine(
+        favoriteRecoveryData,
+        "favorites.json")));
+    var missingFavorite = new GalleryClipEntry(
+        favoriteRecoveryOriginal,
+        Path.GetFileName(favoriteRecoveryOriginal),
+        "Recovery Wiring Game",
+        GalleryClipRoute.LocalOnly,
+        5,
+        new DateTime(2026, 8, 21, 12, 0, 0, DateTimeKind.Utc));
+    Assert(favoriteRecoveryService.SetFavorite(missingFavorite, favorite: true),
+        "The worker-wiring fixture must begin with a durable Favorite for the missing original.");
+    var favoriteRecoveryWorker = new UploaderWorker(
+        settings with
+        {
+            ClipsFolder = favoriteRecoveryRoot,
+            WebhookUrl = string.Empty,
+            UploadToDiscord = false
+        },
+        _ => { },
+        new WatchStateStore(
+            Path.Combine(favoriteRecoveryData, "state.json"),
+            Path.Combine(favoriteRecoveryData, ".safe-baseline-required")),
+        favorites: favoriteRecoveryService);
+    var dispositionField = typeof(UploaderWorker).GetField(
+        "_editedClipDispositionProcessor",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("UploaderWorker disposition wiring could not be inspected.");
+    var workerDisposition = (EditedClipDispositionProcessor)dispositionField.GetValue(favoriteRecoveryWorker)!;
+    var favoriteRecoveryHash = await ContentIdentity.ComputeSha256Async(
+        favoriteRecoveryDestination,
+        CancellationToken.None);
+    await workerDisposition.CompleteAsync(
+        new PendingEditedClipDisposition
+        {
+            Id = favoriteRecoveryOperation,
+            ClipsFolder = favoriteRecoveryRoot,
+            EditedPath = favoriteRecoveryStage,
+            DestinationPath = favoriteRecoveryDestination,
+            OriginalLocalOnlyPath = favoriteRecoveryOriginal,
+            EditedContentHash = favoriteRecoveryHash,
+            OriginalContentHash = "missing-original-hash",
+            KeepOriginal = false,
+            OutputBytes = new FileInfo(favoriteRecoveryDestination).Length
+        },
+        CancellationToken.None);
+    var recoveredFavoriteInfo = new FileInfo(favoriteRecoveryDestination);
+    var recoveredFavorite = new GalleryClipEntry(
+        recoveredFavoriteInfo.FullName,
+        recoveredFavoriteInfo.Name,
+        "Recovery Wiring Game",
+        GalleryClipRoute.Uploaded,
+        recoveredFavoriteInfo.Length,
+        recoveredFavoriteInfo.LastWriteTimeUtc);
+    Assert(!favoriteRecoveryService.IsFavorite(missingFavorite) &&
+           favoriteRecoveryService.IsFavorite(recoveredFavorite),
+        "UploaderWorker must pass its Favorites service into crash-recovery disposition so the heart migrates without reposting.");
 
     var invalidRoot = Directory.CreateDirectory(Path.Combine(temporaryRoot, "manual-edit-invalid-webhook")).FullName;
     var invalidLocalGame = Directory.CreateDirectory(Path.Combine(
@@ -4293,6 +4657,145 @@ static void AssertGalleryThumbnailLifecycle(AppSettings settings)
     }
 }
 
+static void AssertGalleryFavoritesFlow(AppSettings settings)
+{
+    var root = Path.Combine(settings.ClipsFolder, "favorites-flow-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var uploadedGame = Directory.CreateDirectory(Path.Combine(root, "uploaded", "Game Alpha")).FullName;
+        var localGame = Directory.CreateDirectory(Path.Combine(root, "local-only", "Game Beta")).FullName;
+        var uploadedPath = Path.Combine(uploadedGame, "alpha favorite.mp4");
+        var localPath = Path.Combine(localGame, "beta favorite.mp4");
+        File.WriteAllBytes(uploadedPath, [1, 2, 3, 4]);
+        File.WriteAllBytes(localPath, [5, 6, 7, 8, 9]);
+        var favorites = new FavoritesService(new FavoritesStore(Path.Combine(root, "data", "favorites.json")));
+
+        using var host = new Form
+        {
+            ClientSize = new Size(984, 696),
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-20000, -20000)
+        };
+        using var gallery = new GalleryView(
+            root,
+            playbackPreparer: new StubClipPlaybackPreparer(uploadedPath, 1),
+            favorites: favorites);
+        host.Controls.Add(gallery);
+        host.Show();
+        gallery.Activate(root);
+        WaitForUiCondition(
+            () => EnumerateControls(gallery).Count(control => control.Name == "GalleryClipCard") == 2,
+            TimeSpan.FromSeconds(5),
+            "Gallery did not populate the cross-game Favorites fixture.");
+
+        ClickFavorite("alpha favorite.mp4");
+        WaitForFavoritesCount(1);
+        ClickFavorite("beta favorite.mp4");
+        WaitForFavoritesCount(2);
+        Assert(EnumerateControls(gallery).OfType<GalleryGameFilterButton>().Any(button =>
+                   button.AccessibleName == "Show Game Alpha, 1 clips") &&
+               EnumerateControls(gallery).OfType<GalleryGameFilterButton>().Any(button =>
+                   button.AccessibleName == "Show Game Beta, 1 clips"),
+            "Adding clips to Favorites must not change either game's clip count.");
+
+        InvokeControlClick(EnumerateControls(gallery)
+            .OfType<GalleryGameFilterButton>()
+            .Single(button => button.Name == "GalleryFavoritesFilterButton"));
+        WaitForUiCondition(
+            () => EnumerateControls(gallery).OfType<Label>().Any(label =>
+                      label.Name == "GalleryHeading" && label.Text == "Favorites") &&
+                  EnumerateControls(gallery).Count(control => control.Name == "GalleryClipCard") == 2,
+            TimeSpan.FromSeconds(5),
+            "Favorites must open as one flat list across games and routes.");
+
+        EnumerateControls(gallery).OfType<Button>()
+            .Single(button => button.Name == "GalleryUploadedFilterButton")
+            .PerformClick();
+        WaitForUiCondition(
+            () => EnumerateControls(gallery).Count(control => control.Name == "GalleryClipCard") == 1 &&
+                  FindClipCard("alpha favorite.mp4") is not null,
+            TimeSpan.FromSeconds(5),
+            "The Uploaded route filter must remain active inside Favorites.");
+        EnumerateControls(gallery).OfType<Button>()
+            .Single(button => button.Name == "GalleryAllFilterButton")
+            .PerformClick();
+        WaitForUiCondition(
+            () => EnumerateControls(gallery).Count(control => control.Name == "GalleryClipCard") == 2,
+            TimeSpan.FromSeconds(5),
+            "The All route filter must restore both Favorites routes.");
+
+        ClickFavorite("alpha favorite.mp4");
+        WaitForFavoritesCount(1);
+        Assert(FindClipCard("alpha favorite.mp4") is null &&
+               EnumerateControls(gallery).OfType<GalleryGameFilterButton>().Any(button =>
+                   button.AccessibleName == "Show Game Alpha, 1 clips"),
+            "Removing a clip from Favorites must remove only the saved view entry, not its game clip.");
+
+        var localCard = FindClipCard("beta favorite.mp4")
+            ?? throw new InvalidOperationException("The remaining Favorite clip card was not found.");
+        EnumerateControls(localCard).OfType<Button>()
+            .Single(button => button.Name == "PlayGalleryClipButton")
+            .PerformClick();
+        WaitForUiCondition(
+            () => EnumerateControls(gallery).OfType<ClipPlayerView>().Any() &&
+                  EnumerateControls(gallery).OfType<FavoriteButton>().Any(button =>
+                      button.Name == "ClipPlayerFavoriteButton" && button.IsFavorite),
+            TimeSpan.FromSeconds(5),
+            "The player header must show the Favorite state from the Gallery card.");
+        var playerFavorite = EnumerateControls(gallery).OfType<FavoriteButton>()
+            .Single(button => button.Name == "ClipPlayerFavoriteButton");
+        InvokeControlClick(playerFavorite);
+        WaitForUiCondition(
+            () => !playerFavorite.IsFavorite,
+            TimeSpan.FromSeconds(5),
+            "Removing a clip from Favorites in the player must update the player immediately.");
+        EnumerateControls(gallery).OfType<Button>()
+            .Single(button => button.Name == "GalleryBackButton")
+            .PerformClick();
+        WaitForUiCondition(
+            () => EnumerateControls(gallery).OfType<Label>().Any(label =>
+                      label.Name == "GalleryHeading" && label.Text == "Favorites") &&
+                  EnumerateControls(gallery).Any(control =>
+                      control.Name == "GalleryEmptyState"),
+            TimeSpan.FromSeconds(5),
+            "Returning from the player must preserve the Favorites scope and show its empty state.");
+        WaitForFavoritesCount(0);
+        host.Close();
+
+        RoundedPanel? FindClipCard(string fileName) => EnumerateControls(gallery)
+            .OfType<RoundedPanel>()
+            .SingleOrDefault(control => control.Name == "GalleryClipCard" &&
+                (control.AccessibleName ?? string.Empty).StartsWith(fileName, StringComparison.Ordinal));
+
+        void ClickFavorite(string fileName)
+        {
+            var card = FindClipCard(fileName)
+                ?? throw new InvalidOperationException($"Favorite fixture card '{fileName}' was not found.");
+            var button = EnumerateControls(card).OfType<FavoriteButton>()
+                .Single(control => control.Name == "GalleryClipFavoriteButton");
+            InvokeControlClick(button);
+        }
+
+        void WaitForFavoritesCount(int count) => WaitForUiCondition(
+            () => EnumerateControls(gallery).OfType<GalleryGameFilterButton>().Any(button =>
+                button.Name == "GalleryFavoritesFilterButton" &&
+                button.AccessibleName == $"Show Favorites, {count} clips"),
+            TimeSpan.FromSeconds(5),
+            $"The Gallery Favorites count did not update to {count}.");
+
+        static void InvokeControlClick(Control control) => typeof(Control)
+            .GetMethod(
+                "OnClick",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(control, [EventArgs.Empty]);
+    }
+    finally
+    {
+        try { Directory.Delete(root, recursive: true); } catch { }
+    }
+}
+
 static void AssertGalleryScaledLayout(AppSettings settings, float scale)
 {
     var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
@@ -4309,6 +4812,18 @@ static void AssertGalleryScaledLayout(AppSettings settings, float scale)
             $"Gallery did not populate before the {scale:F1}x layout check.");
         TraceSmokeStep($"Gallery {scale:F1}x: archive populated");
         var gallery = EnumerateControls(form).OfType<GalleryView>().Single();
+        Assert(GalleryView.GetFavoriteButtonSide(144) == 39 &&
+               GalleryView.GetFavoriteButtonSide(192) == 52,
+            "Gallery thumbnail hearts must scale from 26 px to 39 px at 150% and 52 px at 200% DPI.");
+        var startupFavoriteSide = GalleryView.GetFavoriteButtonSide(form.DeviceDpi);
+        var startupFavoriteButtons = EnumerateControls(gallery)
+            .OfType<FavoriteButton>()
+            .Where(button => button.Name == "GalleryClipFavoriteButton")
+            .ToArray();
+        Assert(startupFavoriteButtons.Length > 0 && startupFavoriteButtons.All(button =>
+                   button.Width == startupFavoriteSide && button.Height == startupFavoriteSide),
+            $"Gallery thumbnail hearts must apply their startup DPI size {startupFavoriteSide}px; " +
+            $"got {string.Join(", ", startupFavoriteButtons.Select(button => button.Size))}.");
         var navigationRail = EnumerateControls(form)
             .Single(control => control.Name == "NavigationRail");
         var sharedHeader = EnumerateControls(form)
@@ -4338,6 +4853,14 @@ static void AssertGalleryScaledLayout(AppSettings settings, float scale)
         form.PerformLayout();
         Application.DoEvents();
         TraceSmokeStep($"Gallery {scale:F1}x: layout completed");
+        var favoriteButtons = EnumerateControls(gallery)
+            .OfType<FavoriteButton>()
+            .Where(button => button.Name == "GalleryClipFavoriteButton")
+            .ToArray();
+        Assert(favoriteButtons.Length > 0 && favoriteButtons.All(button =>
+                   button.Width == button.Height && button.Width >= startupFavoriteSide),
+            $"Gallery thumbnail hearts must remain square and scale with the {scale:F1}x layout; " +
+            $"got {string.Join(", ", favoriteButtons.Select(button => button.Size))}.");
         AssertControlsFit(form);
         AssertCriticalTextFits(form);
         TraceSmokeStep($"Gallery {scale:F1}x: assertions passed");
@@ -7262,13 +7785,23 @@ static void AssertClipPlayerViewCore(string temporaryRoot)
         175_400_000,
         DateTime.UtcNow);
 
-    using var player = new ClipPlayerView(entry, new StubClipPlaybackPreparer(clipPath, 2));
+    bool? requestedFavorite = null;
+    using var player = new ClipPlayerView(
+        entry,
+        new StubClipPlaybackPreparer(clipPath, 2),
+        isFavorite: true,
+        setFavorite: favorite =>
+        {
+            requestedFavorite = favorite;
+            return true;
+        });
     var named = player.Controls.Find("ClipPlayerCard", searchAllChildren: true);
     Assert(named.Length == 1, "The player must build its card.");
     foreach (var name in new[]
              {
                  "ClipPlayerPlayButton", "ClipPlayerMuteButton", "ClipPlayerSeekBar",
-                 "ClipPlayerStatus", "ClipPlayerAudioLabel", "ClipPlayerHost"
+                 "ClipPlayerStatus", "ClipPlayerAudioLabel", "ClipPlayerHost",
+                 "ClipPlayerFavoriteButton"
              })
     {
         Assert(player.Controls.Find(name, searchAllChildren: true).Length == 1,
@@ -7282,6 +7815,13 @@ static void AssertClipPlayerViewCore(string temporaryRoot)
         "The transport must stay disabled until media has opened, so a click cannot reach a player with no source.");
     Assert(!title.AutoSize && title.AutoEllipsis && title.Dock == DockStyle.Fill,
         "The player title must remain a fixed one-line ellipsized field so long filenames cannot steal video height.");
+    var favorite = (FavoriteButton)player.Controls.Find("ClipPlayerFavoriteButton", searchAllChildren: true)[0];
+    typeof(Control).GetMethod(
+            "OnClick",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(favorite, [EventArgs.Empty]);
+    Assert(requestedFavorite is false && !favorite.IsFavorite,
+        "The player-header heart must send its new state through the shared Favorites callback.");
 
     // The transport belongs below the video: ElementHost renders into its own window, so
     // controls overlapping it would be painted behind the picture.

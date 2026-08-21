@@ -30,7 +30,9 @@ internal enum FigmaIconAsset
     Play,
     Trim,
     Bolt,
-    Check
+    Check,
+    Heart,
+    HeartFill
 }
 
 internal static class FigmaIconRenderer
