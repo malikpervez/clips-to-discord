@@ -45,8 +45,7 @@ internal static class CaptureProfileCatalog
             [(CaptureResolution.UltraHd4K, 60)] = 65_000
         };
 
-    internal const int PerAudioTrackBitrateKbps = 192;
-    internal const int MaximumAudioTracks = 3;
+    internal const int MixedAudioBitrateKbps = 192;
     internal const int ReactionCameraBitrateKbps = 6_000;
 
     internal static (int Width, int Height) GetDimensions(CaptureResolution resolution) =>
@@ -67,17 +66,15 @@ internal static class CaptureProfileCatalog
             _ => throw new ArgumentOutOfRangeException(nameof(resolution))
         };
 
-    internal static CaptureSizeEstimate Estimate(CaptureProfile profile, int audioTrackCount = MaximumAudioTracks)
+    internal static CaptureSizeEstimate Estimate(CaptureProfile profile, bool includeAudio = true)
     {
         ArgumentNullException.ThrowIfNull(profile);
         if (!profile.IsValid) throw new ArgumentException("The capture profile is invalid.", nameof(profile));
-        if (audioTrackCount is < 1 or > MaximumAudioTracks)
-        {
-            throw new ArgumentOutOfRangeException(nameof(audioTrackCount));
-        }
 
         var videoBitrate = VideoBitratesKbps[(profile.Resolution, profile.FramesPerSecond)];
-        var audioBitrate = audioTrackCount * PerAudioTrackBitrateKbps;
+        // Game, microphone, and voice-chat inputs are mixed before encoding. The resulting
+        // clip has one audio stream regardless of how many inputs the user enables.
+        var audioBitrate = includeAudio ? MixedAudioBitrateKbps : 0;
         var cameraBitrate = profile.IncludeReactionCamera ? ReactionCameraBitrateKbps : 0;
         var totalBitrate = videoBitrate + audioBitrate + cameraBitrate;
         var expectedBytes = EstimateBytes(totalBitrate, profile.ReplayDuration);

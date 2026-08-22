@@ -14,6 +14,7 @@ internal enum FigmaIconAsset
     Home,
     Settings,
     Activity,
+    Capture,
     Gallery,
     About,
     Folder,
@@ -32,7 +33,12 @@ internal enum FigmaIconAsset
     Bolt,
     Check,
     Heart,
-    HeartFill
+    HeartFill,
+    Speaker,
+    Mic,
+    Headset,
+    Camera,
+    Disk
 }
 
 internal static class FigmaIconRenderer
@@ -48,6 +54,7 @@ internal static class FigmaIconRenderer
             BrandGlyph.Home => FigmaIconAsset.Home,
             BrandGlyph.Settings => FigmaIconAsset.Settings,
             BrandGlyph.Activity => FigmaIconAsset.Activity,
+            BrandGlyph.Capture => FigmaIconAsset.Capture,
             BrandGlyph.Gallery => FigmaIconAsset.Gallery,
             BrandGlyph.About => FigmaIconAsset.About,
             BrandGlyph.Folder or BrandGlyph.FolderOpen => FigmaIconAsset.Folder,
@@ -70,7 +77,7 @@ internal static class FigmaIconRenderer
             BrandGlyph.Check => FigmaIconAsset.Check,
             _ => default
         };
-        return glyph is BrandGlyph.Home or BrandGlyph.Settings or BrandGlyph.Activity or
+        return glyph is BrandGlyph.Home or BrandGlyph.Settings or BrandGlyph.Activity or BrandGlyph.Capture or
             BrandGlyph.Gallery or BrandGlyph.About or BrandGlyph.Folder or BrandGlyph.FolderOpen or
             BrandGlyph.Shield or BrandGlyph.AppStatus or
             BrandGlyph.Diagnostics or BrandGlyph.Credits or BrandGlyph.FileText or
@@ -194,7 +201,12 @@ internal sealed class FigmaIconControl : Control
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         base.OnPaint(eventArgs);
-        if (Width <= 0 || Height <= 0) return;
-        FigmaIconRenderer.Draw(eventArgs.Graphics, ClientRectangle, Asset, IconColor);
+        var bounds = new Rectangle(
+            Padding.Left,
+            Padding.Top,
+            Math.Max(0, ClientSize.Width - Padding.Horizontal),
+            Math.Max(0, ClientSize.Height - Padding.Vertical));
+        if (bounds.Width <= 0 || bounds.Height <= 0) return;
+        FigmaIconRenderer.Draw(eventArgs.Graphics, bounds, Asset, IconColor);
     }
 }

@@ -8,13 +8,29 @@ internal enum GalleryClipRoute
     LocalOnly
 }
 
+internal enum GalleryClipSource
+{
+    SteelSeriesGg,
+    Nvidia,
+    ClipCord
+}
+
 internal sealed record GalleryClipEntry(
     string Path,
     string FileName,
     string GameName,
     GalleryClipRoute Route,
     long Length,
-    DateTime LastWriteTimeUtc);
+    DateTime LastWriteTimeUtc,
+    GalleryClipSource Source = GalleryClipSource.SteelSeriesGg)
+{
+    internal string SourceLabel => Source switch
+    {
+        GalleryClipSource.Nvidia => "NVIDIA",
+        GalleryClipSource.ClipCord => "ClipCord",
+        _ => "SteelSeries GG"
+    };
+}
 
 internal sealed record GalleryGameEntry(
     string Name,
@@ -53,32 +69,39 @@ internal static class GalleryCatalog
     internal static GallerySnapshot Scan(
         string clipsFolder,
         CancellationToken cancellationToken,
-        Action<string>? beforeGameDirectoryScan = null)
+        Action<string>? beforeGameDirectoryScan = null,
+        string? captureLibraryRoot = null,
+        GalleryClipSource externalSource = GalleryClipSource.SteelSeriesGg)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clipsFolder);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (!Directory.Exists(clipsFolder))
-        {
-            return new GallerySnapshot([], ["The clips folder is not available."]);
-        }
-
         var clips = new List<GalleryClipEntry>();
         var warnings = new List<string>();
-        ScanArchive(
-            ResolveArchive(clipsFolder, GalleryClipRoute.Uploaded, warnings),
-            GalleryClipRoute.Uploaded,
-            clips,
-            warnings,
-            cancellationToken,
-            beforeGameDirectoryScan);
-        ScanArchive(
-            ResolveArchive(clipsFolder, GalleryClipRoute.LocalOnly, warnings),
-            GalleryClipRoute.LocalOnly,
-            clips,
-            warnings,
-            cancellationToken,
-            beforeGameDirectoryScan);
+        if (Directory.Exists(clipsFolder))
+        {
+            ScanArchive(
+                ResolveArchive(clipsFolder, GalleryClipRoute.Uploaded, warnings),
+                GalleryClipRoute.Uploaded,
+                externalSource,
+                clips,
+                warnings,
+                cancellationToken,
+                beforeGameDirectoryScan);
+            ScanArchive(
+                ResolveArchive(clipsFolder, GalleryClipRoute.LocalOnly, warnings),
+                GalleryClipRoute.LocalOnly,
+                externalSource,
+                clips,
+                warnings,
+                cancellationToken,
+                beforeGameDirectoryScan);
+        }
+        else
+        {
+            warnings.Add("The external clips folder is not available.");
+        }
+        ScanClipCordLibrary(captureLibraryRoot, clips, warnings, cancellationToken);
 
         var games = clips
             .GroupBy(clip => clip.GameName.Normalize(NormalizationForm.FormC), StringComparer.OrdinalIgnoreCase)
@@ -131,6 +154,7 @@ internal static class GalleryCatalog
     private static void ScanArchive(
         string? archiveFolder,
         GalleryClipRoute route,
+        GalleryClipSource source,
         ICollection<GalleryClipEntry> clips,
         ICollection<string> warnings,
         CancellationToken cancellationToken,
@@ -142,7 +166,7 @@ internal static class GalleryCatalog
             foreach (var path in Directory.EnumerateFiles(archiveFolder, "*", SearchOption.TopDirectoryOnly))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                AddClip(path, UploadedFolder.GetGameFolderName(Path.GetFileName(path)), route, clips);
+                AddClip(path, UploadedFolder.GetGameFolderName(Path.GetFileName(path)), route, source, clips);
             }
 
         }
@@ -180,7 +204,7 @@ internal static class GalleryCatalog
                 foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    AddClip(path, gameName, route, clips);
+                    AddClip(path, gameName, route, source, clips);
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -222,6 +246,7 @@ internal static class GalleryCatalog
         string path,
         string gameName,
         GalleryClipRoute route,
+        GalleryClipSource source,
         ICollection<GalleryClipEntry> clips)
     {
         if (!Path.GetExtension(path).Equals(".mp4", StringComparison.OrdinalIgnoreCase)) return;
@@ -235,11 +260,58 @@ internal static class GalleryCatalog
                 string.IsNullOrWhiteSpace(gameName) ? "Uncategorized" : gameName,
                 route,
                 Math.Max(0, file.Length),
-                file.LastWriteTimeUtc));
+                file.LastWriteTimeUtc,
+                source));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             Log.Error($"Could not inspect Gallery clip {Path.GetFileName(path)}.", exception);
+        }
+    }
+
+    private static void ScanClipCordLibrary(
+        string? captureLibraryRoot,
+        ICollection<GalleryClipEntry> clips,
+        ICollection<string> warnings,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(captureLibraryRoot)) return;
+        string library;
+        try
+        {
+            library = Path.Combine(
+                Path.GetFullPath(captureLibraryRoot),
+                CaptureLibraryLayout.LibraryFolderName,
+                CaptureLibraryLayout.GameFolderName);
+        }
+        catch
+        {
+            warnings.Add("The ClipCord Capture library path is invalid.");
+            return;
+        }
+        if (!Directory.Exists(library)) return;
+        try
+        {
+            foreach (var gameDirectory in Directory.EnumerateDirectories(library, "*", SearchOption.TopDirectoryOnly))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var directory = new DirectoryInfo(gameDirectory);
+                if (directory.LinkTarget is not null) continue;
+                var gameName = string.IsNullOrWhiteSpace(directory.Name) ? "Uncategorized" : directory.Name;
+                foreach (var path in Directory.EnumerateFiles(directory.FullName, "*.mp4", SearchOption.TopDirectoryOnly))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    AddClip(path, gameName, GalleryClipRoute.LocalOnly, GalleryClipSource.ClipCord, clips);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            if (!warnings.Contains("Some ClipCord recordings could not be read."))
+            {
+                warnings.Add("Some ClipCord recordings could not be read.");
+            }
+            Log.Error("Could not scan the ClipCord Capture library.", exception);
         }
     }
 }

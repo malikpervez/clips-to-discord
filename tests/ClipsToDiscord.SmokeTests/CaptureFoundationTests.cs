@@ -6,8 +6,10 @@ internal static class CaptureFoundationTests
     {
         AssertCapabilityProbeShape();
         AssertCaptureProfiles();
+        AssertCaptureSettings();
         AssertLibraryLayout(testRoot);
         AssertOutputPolicy(testRoot);
+        AssertGallerySourceProvenance(testRoot);
     }
 
     private static void AssertCapabilityProbeShape()
@@ -126,10 +128,17 @@ internal static class CaptureFoundationTests
             TimeSpan.FromSeconds(60));
         var withoutCamera = CaptureProfileCatalog.Estimate(baseProfile);
         var withCamera = CaptureProfileCatalog.Estimate(baseProfile with { IncludeReactionCamera = true });
+        var withoutAudio = CaptureProfileCatalog.Estimate(baseProfile, includeAudio: false);
         Assert(
             withCamera.ExpectedBytes > withoutCamera.ExpectedBytes &&
             withCamera.ReactionCameraBitrateKbps == CaptureProfileCatalog.ReactionCameraBitrateKbps,
             "The size estimate must account for the separate reaction-camera layer.");
+        Assert(
+            withoutCamera.AudioBitrateKbps == CaptureProfileCatalog.MixedAudioBitrateKbps &&
+            withoutAudio.AudioBitrateKbps == 0 &&
+            withoutCamera.ExpectedBytes - withoutAudio.ExpectedBytes ==
+                (long)Math.Ceiling(CaptureProfileCatalog.MixedAudioBitrateKbps * 1000d / 8d * 60d),
+            "All enabled audio inputs must compile into exactly one optional 192 kbps stream.");
 
         var invalidRejected = false;
         try
@@ -172,6 +181,79 @@ internal static class CaptureFoundationTests
             CaptureLibraryLayout.GetStagingDirectory(root).Contains(Path.Combine(".clipcord", "Staging"), StringComparison.Ordinal) &&
             CaptureLibraryLayout.GetThumbnailsDirectory(root).Contains(Path.Combine(".clipcord", "Thumbnails"), StringComparison.Ordinal),
             "Projects, staging files, and thumbnails must stay out of the user-facing original library.");
+    }
+
+    private static void AssertCaptureSettings()
+    {
+        var defaults = CaptureSettings.Default;
+        Assert(
+            !defaults.InstantReplayEnabled &&
+            defaults.Resolution == CaptureResolution.FullHd1080p &&
+            defaults.FramesPerSecond == 60 &&
+            defaults.ReplaySeconds == 60 &&
+            defaults.RecordGameAudio &&
+            !defaults.IncludeMicrophone &&
+            !defaults.IncludeVoiceChat &&
+            defaults.HasAudio,
+            "ClipCord Capture must remain opt-in with the approved 1080p60/60-second defaults.");
+        Assert(
+            !string.Equals(defaults.SaveHotkey, GlobalHotkeyBinding.DefaultDisplayText, StringComparison.OrdinalIgnoreCase),
+            "ClipCord Capture must use a shortcut distinct from the existing upload-mode shortcut.");
+
+        var external = AppSettings.Empty with { ModeToggleHotkey = defaults.SaveHotkey };
+        Assert(defaults.HasHotkeyConflict(external),
+            "Capture must detect a collision with ClipCord's existing global shortcut.");
+        Assert(
+            CapturePathPolicy.PathsOverlap(@"C:\Clips", @"C:\Clips\Library") &&
+            CapturePathPolicy.PathsOverlap(@"C:\Clips\Library", @"C:\Clips") &&
+            !CapturePathPolicy.PathsOverlap(@"C:\External", @"C:\ClipCord"),
+            "Built-in and external capture roots must reject either direction of path overlap.");
+
+        var normalized = CaptureSettings.Normalize(defaults with
+        {
+            Resolution = (CaptureResolution)999,
+            FramesPerSecond = 144,
+            ReplaySeconds = 1,
+            SaveHotkey = "unsafe",
+            GameAudioDevice = " ",
+            VoiceChatDevice = " "
+        });
+        Assert(
+            normalized.Resolution == defaults.Resolution &&
+            normalized.FramesPerSecond == defaults.FramesPerSecond &&
+            normalized.ReplaySeconds == defaults.ReplaySeconds &&
+            normalized.SaveHotkey == CaptureSettings.DefaultSaveHotkey &&
+            normalized.GameAudioDevice == CaptureSettings.DefaultOutputDevice &&
+            normalized.VoiceChatDevice == CaptureSettings.DefaultVoiceChatDevice,
+            "Capture settings migration must normalize corrupt profile, shortcut, and device values.");
+    }
+
+    private static void AssertGallerySourceProvenance(string testRoot)
+    {
+        var externalRoot = Directory.CreateDirectory(Path.Combine(testRoot, "external-gallery")).FullName;
+        var externalGame = Directory.CreateDirectory(Path.Combine(externalRoot, "local-only", "Valorant")).FullName;
+        File.WriteAllBytes(Path.Combine(externalGame, "external.mp4"), [1]);
+
+        var captureRoot = Directory.CreateDirectory(Path.Combine(testRoot, "capture-gallery")).FullName;
+        var captureGame = Directory.CreateDirectory(Path.Combine(
+            captureRoot,
+            CaptureLibraryLayout.LibraryFolderName,
+            CaptureLibraryLayout.GameFolderName,
+            "Valorant")).FullName;
+        File.WriteAllBytes(Path.Combine(captureGame, "Valorant__2026-08-22__14-35-41.mp4"), [2]);
+
+        var snapshot = GalleryCatalog.Scan(
+            externalRoot,
+            CancellationToken.None,
+            captureLibraryRoot: captureRoot,
+            externalSource: GalleryClipSource.Nvidia);
+        var clips = snapshot.Games.Single(game => game.Name == "Valorant").Clips;
+        Assert(
+            clips.Count == 2 &&
+            clips.Any(clip => clip.Source == GalleryClipSource.Nvidia && clip.SourceLabel == "NVIDIA") &&
+            clips.Any(clip => clip.Source == GalleryClipSource.ClipCord && clip.SourceLabel == "ClipCord") &&
+            clips.All(clip => clip.Route == GalleryClipRoute.LocalOnly),
+            "Gallery must unify external and ClipCord recordings while preserving their source provenance.");
     }
 
     private static void Assert(bool condition, string message)

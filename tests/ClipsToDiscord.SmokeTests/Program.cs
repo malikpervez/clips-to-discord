@@ -52,6 +52,14 @@ try
         return;
     }
 
+    if (args.Length == 2 && args[0].Equals("--render-capture", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(args[1], SettingsPage.Capture),
+            "Capture preview");
+        return;
+    }
+
     if (args.Length == 2 && args[0].Equals("--render-gallery-editor", StringComparison.Ordinal))
     {
         RunPreviewOnStaThread(
@@ -1615,25 +1623,31 @@ static void AssertFigmaIconAssets()
         [FigmaIconAsset.Check] = ("check.png", "8c84455f48add96786b59c2f1d71ec07f4663e0d937b14a4d6e2ebcf9c964a2c"),
         [FigmaIconAsset.ChevronRight] = ("chevron-right.png", "3a46b243c84b607d12f2e22c7c1bcb6b615a583288e492e4cff9df9e92766e15"),
         [FigmaIconAsset.Clock] = ("clock.png", "da18e4f5e86c4cf840f12d0b94175988b5a19d41263251e64d2b3ea40d02e8a6"),
+        [FigmaIconAsset.Capture] = ("capture.png", "912e1d9bf4283f2efcb93fa5ecfc22d6ecad05bac1a814acdf978278a00208d0"),
+        [FigmaIconAsset.Camera] = ("camera.png", "83ecc66bb79810e011393706955c9150f605e232e779df4cf771e397258bd4c8"),
+        [FigmaIconAsset.Disk] = ("disk.png", "0f3e02645b64cf7d500096d2366fa5fefbce876a116bf157b019526cacfda0b0"),
         [FigmaIconAsset.External] = ("external.png", "48d0435ca376de91be57f9d57fd6918a532b0689b96a187b93acda3de48ec696"),
         [FigmaIconAsset.Film] = ("film.png", "5cdab9d22795aa1818a30095713e3a8b0c7b6d1c17fd4cb64dc7d72c3e348ddb"),
         [FigmaIconAsset.Folder] = ("folder.png", "fc9aa588cfadbdc8cc5531292a4a4facd930376941d32e6b9907a4fb2d7bde80"),
         [FigmaIconAsset.Gallery] = ("gallery.png", "ed6a0a7bc4a7a337178fb1415fe92039294e62b4c24d5021b9357a42927f1f42"),
         [FigmaIconAsset.Heart] = ("heart.png", "2f76ae84b631bf9bab09283046c84f0b19e0f62ba8774bb3aba10eedf677dcd2"),
         [FigmaIconAsset.HeartFill] = ("heartfill.png", "a7e0cbfb59afb577abbfb406d46ea3468dfe637602485795c2d3cd3e2ce1f19c"),
+        [FigmaIconAsset.Headset] = ("headset.png", "7c61f5a6d7d4bc288573306335d7060c7adc3dd8a7c881bea96cb3dc19abec58"),
         [FigmaIconAsset.Home] = ("home.png", "6557993d604a612d4ae2c06a5d2b2de5454089bcaa3aa7fe97ca1356ae3d5c0f"),
         [FigmaIconAsset.More] = ("more.png", "7825ca39fd29e36d4884d7ca4924e0a27f4e82e473e6e650a5ae8813aa9f343c"),
+        [FigmaIconAsset.Mic] = ("mic.png", "ee66476e921d9795bf35140f98076aac80db17313142c4d3ec3fba36a61bf1c0"),
         [FigmaIconAsset.Play] = ("play.png", "37709608177cda025a60f73093ca50dc2f1cd6a21a6c7227300a1c1d235e3227"),
         [FigmaIconAsset.Refresh] = ("refresh.png", "76de4b8515f3a30b10a22aef9aea7bedcefebea1ddd3ea7d6526fe2cab537ff8"),
         [FigmaIconAsset.Search] = ("search.png", "5864d203d75f638db750af490cc957f15d16e08e65c2a7c0c03c6705a3779fd1"),
         [FigmaIconAsset.Settings] = ("settings.png", "c66fbb264e0b2493606b50618665b035c6551a3d9b4fce8e44462b58212d9e65"),
         [FigmaIconAsset.Shield] = ("shield.png", "80a16c83d41e6ba022f60011e88707ad5af6a429fa93b93d951aa9fa39b35921"),
+        [FigmaIconAsset.Speaker] = ("speaker.png", "81bf0beced762c85dc15b8b0b00b1aa62ad8b0641b65cceab98be6122d26da96"),
         [FigmaIconAsset.Trim] = ("trim.png", "e231336c071756e0bb62f946bdece590f614f8aa0334665d75a244a1e01d967d"),
         [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde")
     };
     var enumAssets = Enum.GetValues<FigmaIconAsset>();
-    Assert(enumAssets.Length == 22 && enumAssets.ToHashSet().SetEquals(expected.Keys),
-        $"The approved Figma icon catalog must contain exactly 22 pinned assets; got {string.Join(", ", enumAssets)}.");
+    Assert(enumAssets.Length == 28 && enumAssets.ToHashSet().SetEquals(expected.Keys),
+        $"The approved Figma icon catalog must contain exactly 28 pinned assets; got {string.Join(", ", enumAssets)}.");
 
     var assembly = typeof(FigmaIconRenderer).Assembly;
     var actualResources = assembly.GetManifestResourceNames()
@@ -1643,7 +1657,7 @@ static void AssertFigmaIconAssets()
         .Select(value => resourcePrefix + value.FileName)
         .ToHashSet(StringComparer.Ordinal);
     Assert(actualResources.SetEquals(expectedResources),
-        $"Embedded Figma icon resources diverged from the 22 approved exports: " +
+        $"Embedded Figma icon resources diverged from the 28 approved exports: " +
         $"expected={string.Join(", ", expectedResources.OrderBy(name => name, StringComparer.Ordinal))}; " +
         $"actual={string.Join(", ", actualResources.OrderBy(name => name, StringComparer.Ordinal))}.");
     foreach (var (asset, contract) in expected)
@@ -1661,6 +1675,29 @@ static void AssertFigmaIconAssets()
         using var image = Image.FromStream(imageStream);
         Assert(image.Size == new Size(96, 96),
             $"Figma icon {asset} must remain a square 96x96 alpha mask; got {image.Size}.");
+        if (asset is FigmaIconAsset.Capture or FigmaIconAsset.Camera or FigmaIconAsset.Disk or
+            FigmaIconAsset.Headset or FigmaIconAsset.Mic or FigmaIconAsset.Speaker)
+        {
+            using var bitmap = new Bitmap(image);
+            var cornerAlpha = new[]
+            {
+                bitmap.GetPixel(0, 0).A,
+                bitmap.GetPixel(bitmap.Width - 1, 0).A,
+                bitmap.GetPixel(0, bitmap.Height - 1).A,
+                bitmap.GetPixel(bitmap.Width - 1, bitmap.Height - 1).A
+            };
+            var maximumAlpha = 0;
+            for (var y = 0; y < bitmap.Height; y++)
+            {
+                for (var x = 0; x < bitmap.Width; x++)
+                {
+                    maximumAlpha = Math.Max(maximumAlpha, bitmap.GetPixel(x, y).A);
+                }
+            }
+            Assert(maximumAlpha == 255 && cornerAlpha.All(alpha => alpha == 0),
+                $"Figma icon {asset} must remain a full-opacity silhouette on a transparent canvas; " +
+                $"max={maximumAlpha}, corners={string.Join(',', cornerAlpha)}.");
+        }
         if (asset is FigmaIconAsset.Heart or FigmaIconAsset.HeartFill)
         {
             using var bitmap = new Bitmap(image);
@@ -1694,6 +1731,7 @@ static void AssertFigmaIconAssets()
         [BrandGlyph.Home] = FigmaIconAsset.Home,
         [BrandGlyph.Settings] = FigmaIconAsset.Settings,
         [BrandGlyph.Activity] = FigmaIconAsset.Activity,
+        [BrandGlyph.Capture] = FigmaIconAsset.Capture,
         [BrandGlyph.Gallery] = FigmaIconAsset.Gallery,
         [BrandGlyph.About] = FigmaIconAsset.About,
         [BrandGlyph.Folder] = FigmaIconAsset.Folder,
@@ -2163,6 +2201,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertActivityEditorHandoff(settings);
             TraceSmokeStep("Settings layout: About actions and privacy seams");
             AssertAboutViewActions(settings);
+            TraceSmokeStep("Settings layout: Capture source separation and controls");
+            AssertCaptureViewContract(settings);
             TraceSmokeStep("Settings layout: Activity navigation lifecycle");
             using (var activityOnly = new SettingsForm(
                        settings,
@@ -3905,6 +3945,78 @@ static void AssertAboutPageSupport(string testRoot)
            selectExistingLog.ArgumentList.Count == 0 &&
            selectExistingLog.Arguments == $"/select,\"{expectedLogPath}\"",
         "About must select an existing log with Explorer's exact safe /select quoting shape.");
+}
+
+static void AssertCaptureViewContract(AppSettings settings)
+{
+    var saved = new List<CaptureSettings>();
+    var captureSettings = CaptureSettings.Default with
+    {
+        LibraryRoot = Path.Combine(settings.ClipsFolder, "..", "ClipCord-capture-library")
+    };
+    using var form = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Capture,
+        captureSettings: captureSettings,
+        captureEngineAvailable: true,
+        saveCaptureSettings: value => saved.Add(value));
+    form.Show();
+    Application.DoEvents();
+
+    var controls = EnumerateControls(form).ToArray();
+    var capture = controls.OfType<CaptureView>().Single();
+    Assert(capture.Visible && form.Text == "ClipCord — Capture",
+        "The dedicated Capture navigation item must open the ClipCord recorder without replacing Settings.");
+    Assert(controls.Single(control => control.Name == "CaptureNavItem").Visible,
+        "Capture must have its own visible navigation entry between Activity and Gallery.");
+
+    var game = controls.OfType<ToggleSwitch>().Single(control => control.Name == "RecordGameAudioToggle");
+    var microphone = controls.OfType<ToggleSwitch>().Single(control => control.Name == "IncludeMicrophoneToggle");
+    var voiceChat = controls.OfType<ToggleSwitch>().Single(control => control.Name == "IncludeVoiceChatToggle");
+    var gameDevice = controls.OfType<ComboBox>().Single(control => control.Name == "GameAudioDeviceSelector");
+    var microphoneDevice = controls.OfType<ComboBox>().Single(control => control.Name == "MicrophoneDeviceSelector");
+    var voiceChatDevice = controls.OfType<ComboBox>().Single(control => control.Name == "VoiceChatDeviceSelector");
+    Assert(game.Checked && !microphone.Checked && !voiceChat.Checked &&
+           gameDevice.Enabled && !microphoneDevice.Enabled && !voiceChatDevice.Enabled &&
+           !microphoneDevice.TabStop && !voiceChatDevice.TabStop,
+        "The three audio inputs must remain explicit while disabled selectors stay visible and leave the tab order.");
+    Assert(controls.OfType<Label>().Single(label => label.Name == "CaptureEstimatedSizeValue").Text == "about 144 MB" &&
+           controls.OfType<Label>().Single(label => label.Name == "CaptureEstimatedSizeRange").Text.Contains("116–181 MB", StringComparison.Ordinal),
+        "The default 1080p60 estimate must use one mixed 192 kbps audio stream.");
+
+    microphone.Checked = true;
+    Application.DoEvents();
+    Assert(microphoneDevice.Enabled && microphoneDevice.TabStop && saved.Last().IncludeMicrophone,
+        "Enabling a capture input must activate its device selector and persist the independent input preference.");
+
+    var replay = controls.OfType<ToggleSwitch>().Single(control => control.Name == "InstantReplayToggle");
+    replay.Checked = true;
+    Application.DoEvents();
+    Assert(capture.State == CaptureViewState.Buffering &&
+           !game.Enabled && !microphone.Enabled && !voiceChat.Enabled &&
+           controls.OfType<Button>().Single(button => button.Name == "ChangeCaptureShortcutButton").Enabled,
+        "Buffering must lock capture-pipeline inputs while leaving harmless shortcut rebinding available.");
+    Assert(!capture.CurrentSettings.HasHotkeyConflict(settings) &&
+           !capture.CurrentSettings.OverlapsExternalFolder(settings.ClipsFolder),
+        "ClipCord Capture must default to a separate shortcut and storage root from the external watcher.");
+
+    form.Close();
+
+    using var unavailable = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Capture,
+        captureSettings: captureSettings,
+        captureEngineAvailable: false);
+    unavailable.Show();
+    Application.DoEvents();
+    var unavailableCapture = EnumerateControls(unavailable).OfType<CaptureView>().Single();
+    var unavailableToggle = EnumerateControls(unavailable).OfType<ToggleSwitch>()
+        .Single(control => control.Name == "InstantReplayToggle");
+    Assert(unavailableCapture.State == CaptureViewState.Unavailable && !unavailableToggle.Enabled,
+        "Production must not pretend Instant Replay works before the encoded recorder engine is connected.");
+    unavailable.Close();
 }
 
 static void AssertAboutViewActions(AppSettings settings)
@@ -6782,12 +6894,12 @@ static void AssertSharedShellLayout(SettingsForm form)
         "The legacy top navigation and always-on footer must not survive inside the redesigned left-rail shell.");
 
     var navigation = EnumerateControls(form).Single(control => control.Name == "SideNavigation");
-    var expectedItems = new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "GalleryNavItem", "AboutNavItem" };
+    var expectedItems = new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "CaptureNavItem", "GalleryNavItem", "AboutNavItem" };
     var actualItems = navigation.Controls.Cast<Control>().Select(control => control.Name).ToArray();
     Assert(actualItems.SequenceEqual(expectedItems) &&
            navigation.Controls.Cast<Control>().All(control =>
                control.TabStop && control.AccessibleRole == AccessibleRole.MenuItem),
-        $"The left rail must expose five ordered keyboard menu items; got {string.Join(", ", actualItems)}.");
+        $"The left rail must expose six ordered keyboard menu items; got {string.Join(", ", actualItems)}.");
     Assert(EnumerateControls(form).Single(control => control.Name == "RailStatusCard").Visible &&
            EnumerateControls(form).OfType<Button>().Count(button =>
                button.AccessibleRole == AccessibleRole.RadioButton &&
@@ -6807,10 +6919,10 @@ static void AssertSharedShellLayout(SettingsForm form)
     var navigationGlyphs = EnumerateControls(navigation).OfType<BrandGlyphControl>()
         .Where(control => control.Name == "NavigationGlyph")
         .ToArray();
-    Assert(navigationGlyphs.Length == 5 && navigationGlyphs.All(control =>
+    Assert(navigationGlyphs.Length == 6 && navigationGlyphs.All(control =>
                Math.Abs(Math.Min(control.Width, control.Height) - expectedNavigationGlyphSide) <= 1 &&
                Math.Abs(control.Width - control.Height) <= 1),
-        $"The five shared-rail Figma glyphs must retain their compact 16px logical width; " +
+        $"The six shared-rail Figma glyphs must retain their compact 16px logical width; " +
         $"expected={expectedNavigationGlyphSide}, actual={string.Join(", ", navigationGlyphs.Select(control => control.Size))}.");
 }
 
@@ -6958,9 +7070,9 @@ static void RenderAboutPreview(string outputPath)
 
 static void RenderSharedPagePreview(string outputPath, SettingsPage page)
 {
-    if (page is not (SettingsPage.Home or SettingsPage.Activity or SettingsPage.Gallery))
+    if (page is not (SettingsPage.Home or SettingsPage.Activity or SettingsPage.Capture or SettingsPage.Gallery))
     {
-        throw new ArgumentOutOfRangeException(nameof(page), page, "Only the three shared visual-QA pages are supported.");
+        throw new ArgumentOutOfRangeException(nameof(page), page, "Only shared visual-QA pages are supported.");
     }
 
     var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
@@ -7057,9 +7169,24 @@ static void RenderSharedPagePreview(string outputPath, SettingsPage page)
             activityHistory: history,
             initialPage: page,
             launchMediaFile: _ => true,
-            thumbnailProvider: new PreviewGalleryThumbnailProvider());
+            thumbnailProvider: new PreviewGalleryThumbnailProvider(),
+            captureSettings: CaptureSettings.Default with
+            {
+                InstantReplayEnabled = true,
+                IncludeMicrophone = true,
+                IncludeVoiceChat = true,
+                GameAudioDevice = "Speakers — Realtek(R) Audio",
+                MicrophoneDevice = "HyperX QuadCast S",
+                VoiceChatDevice = "Headset Earphone — SteelSeries Sonar Chat",
+                LibraryRoot = Path.Combine(Path.GetTempPath(), "ClipCordPreviewLibrary")
+            },
+            captureEngineAvailable: true);
         form.Show();
         Application.DoEvents();
+        if (page == SettingsPage.Capture)
+        {
+            EnumerateControls(form).OfType<CaptureView>().Single().SetState(CaptureViewState.Ready);
+        }
         form.Size = SettingsForm.GetDesignedOpeningSize(page, form.DeviceDpi);
         form.PerformLayout();
         Application.DoEvents();

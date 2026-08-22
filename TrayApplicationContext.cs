@@ -149,7 +149,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 new ManualClipEditCoordinator(
                     _settings,
                     UploadPreparedEditedClipExclusiveAsync),
-                favorites: _favorites);
+                favorites: _favorites,
+                captureSettings: CaptureSettingsStore.Load(),
+                captureEngineAvailable: false,
+                saveCaptureSettings: CaptureSettingsStore.Save);
             _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
                 form.SavedSettings is not null &&

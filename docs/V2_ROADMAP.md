@@ -3,7 +3,7 @@
 ClipCord 2.0 changes the product promise from watching another recorder's folder to a local-first
 creator pipeline:
 
-> One action captures the moment, the player's reaction, and independently editable audio, then
+> One action captures the moment, the player's reaction, and the chosen audio inputs, then
 > prepares the clip for each destination without uploading anything the user has not approved.
 
 The existing watched-folder, Gallery, editor, and Discord paths remain supported. ClipCord-owned
@@ -28,7 +28,8 @@ PresentMon comparison. Neither spike ships as an end-user recorder.
 ### 1. Manual recording
 
 - Explicit start and stop controls with an unmistakable recording indicator.
-- Hardware H.264 encoding with game/system audio and microphone on separate tracks.
+- Hardware H.264 encoding with enabled game, microphone, and voice-chat inputs mixed into one
+  compatible clip-audio stream.
 - A shared monotonic clock for video and audio timestamps.
 - Atomic completion into the selected clip folder using the existing Gallery/uploader pipeline.
 - Recovery that never presents a partial MP4 as a completed recording.
@@ -54,12 +55,14 @@ duplicating that original. `Exports` contains only user-requested destination re
 - A keyframe index and bounded memory/storage accounting.
 - Audio drift correction over long sessions.
 
-### 3. Independent game, microphone, and chat audio
+### 3. Independent game, microphone, and chat inputs
 
 - Default-device loopback remains the compatibility fallback.
-- Per-process capture separates the game and voice-chat process when Windows supports it.
+- A separate communications-device input includes voice chat when it is routed away from the game
+  output. Chat on the game output is already included by loopback capture.
 - Every recording remains usable if chat isolation is unavailable.
-- The editor exposes each track without rewriting the original.
+- Enabled inputs are mixed into one encoded audio stream; the editor does not promise separate
+  source tracks.
 
 ### 4. Consent-based reaction camera
 

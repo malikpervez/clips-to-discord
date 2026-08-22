@@ -13,6 +13,8 @@ private repository and the existing connected ClipCord Figma file.
   `C:\Users\mip12\Documents\Codex\2026-07-31\i-w\work\moments-to-discord`
 - Product roadmap and privacy invariants: `docs/V2_ROADMAP.md`
 - Exact supported profiles and size formula: `Capture/CaptureProfiles.cs`
+- The approved experience mixes enabled game, microphone, and voice-chat inputs into one
+  clip-audio stream. Inputs are independently controllable; output tracks are not.
 - Existing visual system: use the approved ClipCord Figma components, variables, icons, rail,
   header, cards, typography, spacing, focus states, and Save changes behavior already present in
   the file. Do not redesign ClipCord's visual language.
@@ -64,43 +66,47 @@ It must also have credible 150% and 200% DPI behavior and a constrained-height s
 
 ### Dynamic size estimate
 
-The estimate must respond immediately to resolution, FPS, duration, number of audio tracks, and the
-reaction-camera toggle. It is a variable-bitrate range, never a guaranteed exact size.
+The estimate must respond immediately to resolution, FPS, duration, whether clip audio is enabled,
+and the reaction-camera toggle. It is a variable-bitrate range, never a guaranteed exact size.
 
-Initial H.264 targets, including three 192 kbps audio tracks, for a 60-second clip:
+Initial H.264 targets, including one 192 kbps mixed audio stream, for a 60-second clip:
 
 | Profile | Expected | Honest range |
 |---|---:|---:|
-| 1080p30 | about 90 MB | 72–112 MB |
-| 1080p60 | about 147 MB | 118–184 MB |
-| 1440p30 | about 176 MB | 141–220 MB |
-| 1440p60 | about 255 MB | 204–318 MB |
-| 4K30 | about 326 MB | 261–408 MB |
-| 4K60 | about 469 MB | 375–586 MB |
+| 1080p30 | about 87 MB | 70–109 MB |
+| 1080p60 | about 144 MB | 116–181 MB |
+| 1440p30 | about 173 MB | 138–216 MB |
+| 1440p60 | about 252 MB | 201–315 MB |
+| 4K30 | about 323 MB | 259–404 MB |
+| 4K60 | about 466 MB | 373–583 MB |
 
 Use the selected duration to scale these values. Enabling the separate reaction-camera layer adds
 approximately **43 MB per minute**, before variable-bitrate range. Suggested primary copy for the
 default profile:
 
-> Estimated clip size: about 147 MB
+> Estimated clip size: about 144 MB
 >
-> Usually 118–184 MB for a 60-second clip. Motion and detail affect the final size.
+> Usually 116–181 MB for a 60-second clip. Motion and detail affect the final size.
 
 Also show the approximate live replay-buffer memory for the selected duration. Avoid a frightening
 technical dashboard; the estimate should help users make a decision at a glance.
 
-### Audio tracks
+### Audio recording
 
-Design independent rows for:
+Design one concise audio section with these three inputs:
 
-- Game audio
-- Microphone
-- Voice chat
+- **Record game audio** — captures the selected Windows/game output, including voice chat when it
+  is already part of that output. Include an output-device selector.
+- **Include microphone** — mixes the selected microphone into the same clip-audio stream.
+- **Include voice chat** — mixes a separately routed communications device into the same stream.
+  Include a communications-device selector and default it to the Windows default communications
+  device.
 
-The result is up to three separately editable tracks. Voice chat may fall back to the mixed game
-audio track when Windows or the selected app cannot isolate it. Communicate that fallback plainly.
-Include device selectors for microphone and output device, but keep their treatment consistent with
-current ClipCord fields.
+All enabled inputs are compiled into one final audio stream, matching ClipCord's existing behavior.
+Do not show or promise separate game, microphone, or voice-chat tracks in the editor. Explain that
+voice chat is already included when it uses the game output, and that the separate communications
+selector is for chat routed elsewhere. Keep selectors consistent with current ClipCord fields.
+When every audio input is disabled, the estimate should remove the one 192 kbps audio stream.
 
 ### Reaction camera
 
@@ -164,7 +170,10 @@ Verify before reporting completion:
 
 - Exact 1080p/1440p/4K and 30/60 FPS options exist.
 - The estimate changes visibly and never claims exact output size.
-- 1080p60/60 sec shows about 147 MB with the 118–184 MB range.
+- 1080p60/60 sec with audio shows about 144 MB with the 116–181 MB range.
+- Audio inputs are mixed into one stream; no separately editable audio tracks are shown or promised.
+- Game audio, microphone, and voice chat each have an explicit input control and relevant device
+  selector.
 - Folder organization visibly preserves one original across multiple destinations.
 - Camera is never presented as silently active.
 - Every control has a readable label, keyboard-focus treatment, disabled treatment, and sufficient

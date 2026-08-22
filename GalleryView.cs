@@ -35,6 +35,8 @@ internal sealed class GalleryView : UserControl
     private readonly IClipPlaybackPreparer _playbackPreparer;
     private readonly IGalleryThumbnailProvider _thumbnailProvider;
     private readonly IFavoritesService _favorites;
+    private string? _captureLibraryRoot;
+    private readonly GalleryClipSource _externalClipSource;
     private readonly Dictionary<GalleryThumbnailTile, GalleryClipEntry> _thumbnailClips = [];
     private readonly HashSet<GalleryThumbnailTile> _requestedThumbnailTiles = [];
     private CancellationTokenSource? _scanCancellation;
@@ -60,13 +62,21 @@ internal sealed class GalleryView : UserControl
     internal event Action<string, string>? HeaderChanged;
     internal Control HeaderActions => _headerActions;
 
+    internal void SetCaptureLibraryRoot(string? root)
+    {
+        _captureLibraryRoot = root;
+        if (_active) RefreshCatalog(_clipsFolder);
+    }
+
     internal GalleryView(
         string clipsFolder,
         IManualClipEditService? manualClipEditService = null,
         Func<string, bool>? launchMediaFile = null,
         IClipPlaybackPreparer? playbackPreparer = null,
         IGalleryThumbnailProvider? thumbnailProvider = null,
-        IFavoritesService? favorites = null)
+        IFavoritesService? favorites = null,
+        string? captureLibraryRoot = null,
+        ClipCaptureSource externalCaptureSource = ClipCaptureSource.SteelSeriesGg)
     {
         _clipsFolder = clipsFolder;
         _manualClipEditService = manualClipEditService;
@@ -74,6 +84,10 @@ internal sealed class GalleryView : UserControl
         _playbackPreparer = playbackPreparer ?? new ClipPlaybackPreparer();
         _thumbnailProvider = thumbnailProvider ?? new GalleryThumbnailProvider();
         _favorites = favorites ?? new FavoritesService();
+        _captureLibraryRoot = captureLibraryRoot;
+        _externalClipSource = externalCaptureSource == ClipCaptureSource.Nvidia
+            ? GalleryClipSource.Nvidia
+            : GalleryClipSource.SteelSeriesGg;
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _favorites.Changed += FavoritesChanged;
         Name = "GalleryView";
@@ -475,16 +489,13 @@ internal sealed class GalleryView : UserControl
         Exception? failure = null;
         try
         {
-            if (string.IsNullOrWhiteSpace(clipsFolder) || !Directory.Exists(clipsFolder))
-            {
-                snapshot = new GallerySnapshot([], ["The clips folder is not available."]);
-            }
-            else
-            {
-                snapshot = await Task.Run(
-                    () => GalleryCatalog.Scan(clipsFolder, cancellation.Token),
-                    cancellation.Token).ConfigureAwait(false);
-            }
+            snapshot = await Task.Run(
+                () => GalleryCatalog.Scan(
+                    clipsFolder,
+                    cancellation.Token,
+                    captureLibraryRoot: _captureLibraryRoot,
+                    externalSource: _externalClipSource),
+                cancellation.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
@@ -1344,7 +1355,7 @@ internal sealed class GalleryView : UserControl
         details.Controls.Add(fileName, 0, 0);
         details.Controls.Add(new Label
         {
-            Text = $"{clip.GameName} · {FormatBytes(clip.Length)} · {clip.LastWriteTimeUtc.ToLocalTime():t}",
+            Text = $"{clip.GameName} · {clip.SourceLabel} · {FormatBytes(clip.Length)} · {clip.LastWriteTimeUtc.ToLocalTime():t}",
             Dock = DockStyle.Fill,
             AutoEllipsis = true,
             ForeColor = ClipCordTheme.TextTertiary,
