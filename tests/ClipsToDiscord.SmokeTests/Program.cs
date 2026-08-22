@@ -577,6 +577,8 @@ try
 
     TraceSmokeStep("Capture source discovery");
     await AssertCaptureSourceDiscoveryAsync(Path.Combine(temporaryRoot, "capture-sources"));
+    TraceSmokeStep("ClipCord 2.0 capture foundation");
+    CaptureFoundationTests.Run(Path.Combine(temporaryRoot, "capture-foundation"));
 
     TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
