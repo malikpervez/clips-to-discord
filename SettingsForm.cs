@@ -946,7 +946,7 @@ internal sealed class SettingsForm : Form
             SettingsPage.Home => ("Home", "Everything ClipCord is doing right now"),
             SettingsPage.Settings => ("Settings", "Where clips come from, and where they go"),
             SettingsPage.Activity => ("Activity", "Recent clip activity stored on this PC"),
-            SettingsPage.Capture => ("Capture", "Save recent gameplay locally with ClipCord's optional recorder"),
+            SettingsPage.Capture => ("Capture", "Save the last minutes of gameplay locally, encoded on your GPU"),
             SettingsPage.Gallery => ("Gallery", "Uploaded and local-only archives, organised by game"),
             SettingsPage.About => ("About", "What ClipCord is, what it keeps, and who made it"),
             _ => ("ClipCord", string.Empty)

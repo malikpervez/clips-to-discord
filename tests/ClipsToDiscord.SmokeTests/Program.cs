@@ -60,6 +60,14 @@ try
         return;
     }
 
+    if (args.Length == 2 && args[0].Equals("--render-camera-consent", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderCameraConsentPreview(args[1]),
+            "Camera consent preview");
+        return;
+    }
+
     if (args.Length == 2 && args[0].Equals("--render-gallery-editor", StringComparison.Ordinal))
     {
         RunPreviewOnStaThread(
@@ -2763,6 +2771,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertActivityScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Activity action 200% scaling");
             AssertActivityScaledLayout(settings, 2f);
+            TraceSmokeStep("Settings layout: Capture 150% scaling");
+            AssertCaptureScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Capture 200% scaling");
+            AssertCaptureScaledLayout(settings, 2f);
             TraceSmokeStep("Settings layout: Gallery 150% scaling");
             AssertGalleryScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Gallery 200% scaling");
@@ -3970,13 +3982,14 @@ static void AssertCaptureViewContract(AppSettings settings)
         "The dedicated Capture navigation item must open the ClipCord recorder without replacing Settings.");
     Assert(controls.Single(control => control.Name == "CaptureNavItem").Visible,
         "Capture must have its own visible navigation entry between Activity and Gallery.");
+    AssertCaptureLayout(form);
 
     var game = controls.OfType<ToggleSwitch>().Single(control => control.Name == "RecordGameAudioToggle");
     var microphone = controls.OfType<ToggleSwitch>().Single(control => control.Name == "IncludeMicrophoneToggle");
     var voiceChat = controls.OfType<ToggleSwitch>().Single(control => control.Name == "IncludeVoiceChatToggle");
-    var gameDevice = controls.OfType<ComboBox>().Single(control => control.Name == "GameAudioDeviceSelector");
-    var microphoneDevice = controls.OfType<ComboBox>().Single(control => control.Name == "MicrophoneDeviceSelector");
-    var voiceChatDevice = controls.OfType<ComboBox>().Single(control => control.Name == "VoiceChatDeviceSelector");
+    var gameDevice = controls.OfType<CaptureDeviceSelector>().Single(control => control.Name == "GameAudioDeviceSelector");
+    var microphoneDevice = controls.OfType<CaptureDeviceSelector>().Single(control => control.Name == "MicrophoneDeviceSelector");
+    var voiceChatDevice = controls.OfType<CaptureDeviceSelector>().Single(control => control.Name == "VoiceChatDeviceSelector");
     Assert(game.Checked && !microphone.Checked && !voiceChat.Checked &&
            gameDevice.Enabled && !microphoneDevice.Enabled && !voiceChatDevice.Enabled &&
            !microphoneDevice.TabStop && !voiceChatDevice.TabStop,
@@ -3993,9 +4006,12 @@ static void AssertCaptureViewContract(AppSettings settings)
     var replay = controls.OfType<ToggleSwitch>().Single(control => control.Name == "InstantReplayToggle");
     replay.Checked = true;
     Application.DoEvents();
+    var captureStatus = controls.OfType<Label>().Single(label => label.Name == "CaptureStatusText");
     Assert(capture.State == CaptureViewState.Buffering &&
            !game.Enabled && !microphone.Enabled && !voiceChat.Enabled &&
-           controls.OfType<Button>().Single(button => button.Name == "ChangeCaptureShortcutButton").Enabled,
+           controls.OfType<Button>().Single(button => button.Name == "ChangeCaptureShortcutButton").Enabled &&
+           captureStatus.Text.Contains("BUFFERING", StringComparison.Ordinal) &&
+           captureStatus.ForeColor == ClipCordTheme.Coral,
         "Buffering must lock capture-pipeline inputs while leaving harmless shortcut rebinding available.");
     Assert(!capture.CurrentSettings.HasHotkeyConflict(settings) &&
            !capture.CurrentSettings.OverlapsExternalFolder(settings.ClipsFolder),
@@ -4017,6 +4033,145 @@ static void AssertCaptureViewContract(AppSettings settings)
     Assert(unavailableCapture.State == CaptureViewState.Unavailable && !unavailableToggle.Enabled,
         "Production must not pretend Instant Replay works before the encoded recorder engine is connected.");
     unavailable.Close();
+
+    using var cameraConsent = new CaptureCameraConsentDialog(CaptureSettings.DefaultCameraDevice);
+    cameraConsent.CreateControl();
+    cameraConsent.PerformLayout();
+    var consentControls = EnumerateControls(cameraConsent).ToArray();
+    Assert(consentControls.Any(control => control.Name == "CaptureCameraConsentPreview") &&
+           consentControls.OfType<CaptureDeviceSelector>().Single().LeadingIcon == FigmaIconAsset.Camera &&
+           consentControls.OfType<Label>().Count(control => control.Name.StartsWith("CaptureCameraConsentFact", StringComparison.Ordinal)) == 4 &&
+           consentControls.OfType<Button>().Any(button => button.Name == "CaptureAllowCameraButton" && button.DialogResult == DialogResult.OK) &&
+           consentControls.OfType<Button>().Any(button => button.Name == "CaptureDeclineCameraButton" && button.DialogResult == DialogResult.Cancel),
+        "Reaction-camera consent must use the approved ClipCord dialog with preview, device selection, four facts, and explicit allow/decline actions.");
+}
+
+static void AssertCaptureLayout(SettingsForm form)
+{
+    var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+    capture.RefreshViewport();
+    form.PerformLayout();
+    Application.DoEvents();
+    AssertControlsFit(form);
+
+    var cardNames = new[]
+    {
+        "CaptureInstantReplayCard",
+        "CaptureVideoQualityCard",
+        "CaptureAudioCard",
+        "CaptureReactionCameraCard",
+        "CaptureRecordingLocationCard"
+    };
+    foreach (var cardName in cardNames)
+    {
+        var card = EnumerateControls(capture).Single(control => control.Name == cardName);
+        var descendants = EnumerateControls(card).ToArray();
+        var header = descendants.Single(control => control.Name == "CaptureCardHeader");
+        var badge = descendants.Single(control => control.Name == "CaptureCardBadge");
+        var title = descendants.Single(control => control.Name == "CaptureCardHeaderTitle");
+        var subtitle = descendants.Single(control =>
+            control is Label && ReferenceEquals(control.Parent?.Parent, header) &&
+            control.Name != "CaptureCardHeaderTitle");
+        var headerBounds = GetBoundsRelativeTo(header, card);
+        var badgeBounds = GetBoundsRelativeTo(badge, card);
+        var titleBounds = GetBoundsRelativeTo(title, card);
+        var subtitleBounds = GetBoundsRelativeTo(subtitle, card);
+        Assert(headerBounds.Contains(badgeBounds) &&
+               headerBounds.Contains(titleBounds) &&
+               headerBounds.Contains(subtitleBounds) &&
+               badgeBounds.Top <= titleBounds.Top + 2 &&
+               titleBounds.Bottom <= subtitleBounds.Top + 2,
+            $"Capture card '{cardName}' must keep its top-aligned badge and two-line copy inside the header: " +
+            $"header={headerBounds}, badge={badgeBounds}, title={titleBounds}, subtitle={subtitleBounds}.");
+        var measuredSubtitle = TextRenderer.MeasureText(
+            subtitle.Text,
+            subtitle.Font,
+            new Size(Math.Max(1, subtitle.Width), int.MaxValue),
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+        Assert(subtitle.Height >= measuredSubtitle.Height,
+            $"Capture card '{cardName}' must visibly expose its Figma subtitle: " +
+            $"text='{subtitle.Text}', bounds={subtitle.Bounds}, measured={measuredSubtitle}.");
+    }
+
+    var instantCard = EnumerateControls(capture).Single(control => control.Name == "CaptureInstantReplayCard");
+    var instantToggle = EnumerateControls(capture).OfType<ToggleSwitch>()
+        .Single(control => control.Name == "InstantReplayToggle");
+    Assert(GetBoundsRelativeTo(instantCard, capture).Contains(GetBoundsRelativeTo(instantToggle, capture)),
+        "The Instant Replay toggle must remain fully inside its card at every supported DPI.");
+
+    var selectors = EnumerateControls(capture).OfType<CaptureDeviceSelector>().ToArray();
+    Assert(selectors.Length == 3 &&
+           selectors.Select(selector => selector.LeadingIcon).ToHashSet().SetEquals([
+               FigmaIconAsset.Speaker, FigmaIconAsset.Mic, FigmaIconAsset.Headset
+           ]) &&
+           !EnumerateControls(capture).OfType<ComboBox>().Any(),
+        "Capture audio must use three branded selectors with distinct Figma source icons and no native ComboBox chrome.");
+    var hotkey = EnumerateControls(capture).OfType<CaptureFieldDisplay>()
+        .Single(control => control.Name == "CaptureSaveHotkey");
+    Assert(hotkey.KeycapMode && hotkey.SupportingText.Contains("buffered clip", StringComparison.Ordinal) &&
+           hotkey.Text == CaptureSettings.DefaultSaveHotkey,
+        "The Capture shortcut must render as keycaps with the Figma save-to-library explanation.");
+    var recommended = EnumerateControls(capture).OfType<OutlineButton>()
+        .Single(button => button.Name == "CaptureResolutionFullHd1080pButton");
+    Assert(recommended.SecondaryText == "1920×1080" && recommended.SecondaryBadgeText == "Recommended",
+        "The approved 1080p option must retain its resolution and Recommended treatment.");
+    Assert(EnumerateControls(capture).Any(control => control.Name == "CaptureEstimateDetails"),
+        "The Capture estimate must use a real two-column details grid instead of proportional-font space padding.");
+}
+
+static void AssertCaptureScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            initialPage: SettingsPage.Capture,
+            captureSettings: CaptureSettings.Default with
+            {
+                InstantReplayEnabled = true,
+                IncludeMicrophone = true,
+                IncludeVoiceChat = true,
+                VoiceChatDevice = "Headset Earphone — SteelSeries Sonar Chat"
+            },
+            captureEngineAvailable: true);
+        var logicalDesignedOpeningSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.Capture, 96);
+        var scaledDesignedOpeningSize = new Size(
+            (int)Math.Round(logicalDesignedOpeningSize.Width * scale),
+            (int)Math.Round(logicalDesignedOpeningSize.Height * scale));
+        form.CreateControl();
+        var relativeScale = scale / GetDpiScale(form);
+        form.Scale(new SizeF(relativeScale, relativeScale));
+        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * relativeScale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+        form.AutoScroll = true;
+        var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = scaledDesignedOpeningSize;
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+        capture.SetState(CaptureViewState.Ready);
+        capture.RefreshViewport();
+        Application.DoEvents();
+        AssertCaptureLayout(form);
+        Assert(!capture.HasOverflow,
+            $"Capture must not scroll at its designed {scale:F1}x opening size.");
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+    }
 }
 
 static void AssertAboutViewActions(AppSettings settings)
@@ -7222,6 +7377,20 @@ static void RenderSharedPagePreview(string outputPath, SettingsPage page)
         try { Directory.Delete(fixtureRoot, recursive: true); }
         catch { }
     }
+}
+
+static void RenderCameraConsentPreview(string outputPath)
+{
+    var directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+    if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+    using var dialog = new CaptureCameraConsentDialog("Logitech StreamCam");
+    dialog.Show();
+    dialog.PerformLayout();
+    Application.DoEvents();
+    using var bitmap = new Bitmap(dialog.Width, dialog.Height);
+    dialog.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+    bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+    dialog.Close();
 }
 
 static void AssertActivityScaledLayout(AppSettings settings, float scale)

@@ -254,6 +254,18 @@ internal static class CaptureFoundationTests
             clips.Any(clip => clip.Source == GalleryClipSource.ClipCord && clip.SourceLabel == "ClipCord") &&
             clips.All(clip => clip.Route == GalleryClipRoute.LocalOnly),
             "Gallery must unify external and ClipCord recordings while preserving their source provenance.");
+
+        var withoutExternalFolder = GalleryCatalog.Scan(
+            Path.Combine(testRoot, "missing-external-gallery"),
+            CancellationToken.None,
+            captureLibraryRoot: captureRoot,
+            externalSource: GalleryClipSource.Nvidia);
+        var clipCordOnly = withoutExternalFolder.Games.Single(game => game.Name == "Valorant").Clips.Single();
+        Assert(
+            clipCordOnly.Source == GalleryClipSource.ClipCord &&
+            clipCordOnly.SourceLabel == "ClipCord" &&
+            withoutExternalFolder.Warnings.Contains("The external clips folder is not available."),
+            "Gallery must retain ClipCord recordings and provenance when the external watcher folder is unavailable.");
     }
 
     private static void Assert(bool condition, string message)

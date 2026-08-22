@@ -732,6 +732,8 @@ internal sealed class OutlineButton : Button
     private bool _accessibilitySelected;
     public BrandGlyph? LeadingGlyph { get; set; }
     public FigmaIconAsset? TrailingIcon { get; set; }
+    public string SecondaryText { get; set; } = string.Empty;
+    public string SecondaryBadgeText { get; set; } = string.Empty;
     public bool AlignContentLeft { get; set; }
     public Color SurfaceColor { get; set; } = ClipCordTheme.SurfaceControl;
     public Color OutlineColor { get; set; } = ClipCordTheme.BorderDefault;
@@ -819,6 +821,60 @@ internal sealed class OutlineButton : Button
                 textColor,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
                 TextFormatFlags.NoPrefix);
+        }
+        else if (!string.IsNullOrWhiteSpace(SecondaryText))
+        {
+            var inset = Math.Max(7, (int)Math.Round(11 * DeviceDpi / 96d));
+            var primaryBounds = new Rectangle(inset, 2, Math.Max(0, Width - inset * 2), Math.Max(1, Height / 2));
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                Text,
+                Font,
+                primaryBounds,
+                textColor,
+                TextFormatFlags.Left | TextFormatFlags.Bottom | TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            var secondaryFont = ClipCordTheme.InterfaceFont(Math.Max(7f, Font.Size - 1.5f));
+            var secondaryBounds = new Rectangle(inset, Height / 2, Math.Max(0, Width - inset * 2), Math.Max(1, Height / 2 - 2));
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                SecondaryText,
+                secondaryFont,
+                secondaryBounds,
+                Enabled ? ClipCordTheme.TextTertiary : DisabledTextColor,
+                TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            if (!string.IsNullOrWhiteSpace(SecondaryBadgeText))
+            {
+                var badgeSize = TextRenderer.MeasureText(
+                    SecondaryBadgeText,
+                    secondaryFont,
+                    Size.Empty,
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                var dotSide = Math.Max(4, (int)Math.Round(5 * DeviceDpi / 96d));
+                var badgeRight = Width - inset;
+                var badgeTextBounds = new Rectangle(
+                    Math.Max(inset, badgeRight - badgeSize.Width),
+                    Height / 2,
+                    badgeSize.Width,
+                    Math.Max(1, Height / 2 - 2));
+                var badgeColor = Enabled ? Color.FromArgb(49, 177, 113) : DisabledTextColor;
+                TextRenderer.DrawText(
+                    eventArgs.Graphics,
+                    SecondaryBadgeText,
+                    secondaryFont,
+                    badgeTextBounds,
+                    badgeColor,
+                    TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine |
+                    TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                using var dotBrush = new SolidBrush(badgeColor);
+                eventArgs.Graphics.FillEllipse(
+                    dotBrush,
+                    badgeTextBounds.Left - dotSide - Math.Max(3, dotSide / 2),
+                    badgeTextBounds.Top + Math.Max(2, (secondaryBounds.Height - dotSide) / 2),
+                    dotSide,
+                    dotSide);
+            }
         }
         else
         {
