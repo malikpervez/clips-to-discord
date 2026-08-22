@@ -22,6 +22,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly UpdateCoordinator _updateCoordinator;
     private readonly IUpdateDownloadService _updateDownloadService;
     private readonly ActivityHistoryStore _activityHistory;
+    private readonly IFavoritesService _favorites;
     private readonly GlobalHotkeyManager _globalHotkey;
     private readonly ModeFeedbackOverlay _modeFeedbackOverlay;
     private AppSettings _settings;
@@ -43,6 +44,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _applicationIcon = LoadApplicationIcon();
         _settings = SettingsStore.Load();
         _activityHistory = new ActivityHistoryStore();
+        _favorites = new FavoritesService();
         _globalHotkey = new GlobalHotkeyManager();
         _globalHotkey.Pressed += ModeToggleHotkeyPressed;
         _modeFeedbackOverlay = new ModeFeedbackOverlay();
@@ -146,7 +148,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 initialPage,
                 new ManualClipEditCoordinator(
                     _settings,
-                    UploadPreparedEditedClipExclusiveAsync));
+                    UploadPreparedEditedClipExclusiveAsync),
+                favorites: _favorites);
             _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
                 form.SavedSettings is not null &&
@@ -298,7 +301,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
             operationCancellation.Token.ThrowIfCancellationRequested();
             SetStatus("Uploading edited Local-only clip");
-            var service = new EditedClipUploadService();
+            var service = new EditedClipUploadService(
+                dispositionProcessor: new EditedClipDispositionProcessor(favorites: _favorites));
             return await service.UploadAsync(
                 _settings,
                 prepared,
@@ -388,7 +392,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         _uploadToDiscordItem.Checked = settings.UploadToDiscord;
         _uploadToDiscordItem.Enabled = settings.IsValid;
-        _controller = new DiscordAwareController(settings, SetStatus, _activityHistory);
+        _controller = new DiscordAwareController(settings, SetStatus, _activityHistory, _favorites);
         StartUpdateChecks();
     }
 

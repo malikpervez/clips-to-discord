@@ -9,7 +9,8 @@ internal sealed class UploaderWorker(
     WatchStateStore? stateStore = null,
     Func<DiscordWebhookClient>? discordClientFactory = null,
     ActivityHistoryStore? activityHistory = null,
-    EditedClipDispositionProcessor? editedClipDispositionProcessor = null)
+    EditedClipDispositionProcessor? editedClipDispositionProcessor = null,
+    IFavoritesService? favorites = null)
 {
     private const int UploadWorkerCount = 2;
     private readonly WatchStateStore _stateStore = stateStore ?? new WatchStateStore();
@@ -23,7 +24,7 @@ internal sealed class UploaderWorker(
     private readonly ConcurrentDictionary<string, string> _hashCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTime> _lastReadinessLog = new(StringComparer.OrdinalIgnoreCase);
     private readonly EditedClipDispositionProcessor _editedClipDispositionProcessor =
-        editedClipDispositionProcessor ?? new EditedClipDispositionProcessor();
+        editedClipDispositionProcessor ?? new EditedClipDispositionProcessor(favorites: favorites);
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {

@@ -62,9 +62,11 @@ internal sealed record EditedClipDispositionResult(
     bool OriginalCleanupFailed);
 
 internal sealed class EditedClipDispositionProcessor(
-    IOriginalClipRecycler? recycler = null)
+    IOriginalClipRecycler? recycler = null,
+    IFavoritesService? favorites = null)
 {
     private readonly IOriginalClipRecycler _recycler = recycler ?? new WindowsOriginalClipRecycler();
+    private readonly IFavoritesService? _favorites = favorites;
 
     internal async Task<EditedClipDispositionResult> CompleteAsync(
         PendingEditedClipDisposition pending,
@@ -154,6 +156,16 @@ internal sealed class EditedClipDispositionProcessor(
             // The original itself was already moved into uploaded, or cleanup completed
             // before a restart resumed the durable disposition.
             originalKept = false;
+        }
+
+        if (_favorites is not null && !_favorites.MigrateFavorite(
+                pending.OriginalLocalOnlyPath,
+                pending.DestinationPath,
+                originalKept))
+        {
+            // The upload and archive are already authoritative. A preference write failure
+            // must not make a confirmed Discord post look incomplete or trigger recovery.
+            Log.Error("The edited clip was archived, but its Favorite could not be migrated.");
         }
 
         TryDeleteOperationDirectory(pending.EditedPath);

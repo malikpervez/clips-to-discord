@@ -34,6 +34,7 @@ internal sealed class GalleryView : UserControl
     private readonly Func<string, bool>? _launchMediaFile;
     private readonly IClipPlaybackPreparer _playbackPreparer;
     private readonly IGalleryThumbnailProvider _thumbnailProvider;
+    private readonly IFavoritesService _favorites;
     private readonly Dictionary<GalleryThumbnailTile, GalleryClipEntry> _thumbnailClips = [];
     private readonly HashSet<GalleryThumbnailTile> _requestedThumbnailTiles = [];
     private CancellationTokenSource? _scanCancellation;
@@ -43,10 +44,12 @@ internal sealed class GalleryView : UserControl
     private string _clipsFolder;
     private GallerySnapshot _snapshot = new([], []);
     private GalleryGameEntry? _selectedGame;
+    private bool _showFavorites;
     private GalleryClipRoute? _routeFilter;
     private bool _sortNewestFirst = true;
     private LocalClipEditorView? _editor;
     private ClipPlayerView? _player;
+    private GalleryClipEntry? _playerClip;
     private CancellationTokenSource? _playbackPrewarmCancellation;
     private string? _playbackPrewarmPath;
     private GalleryScreen _screen;
@@ -62,14 +65,17 @@ internal sealed class GalleryView : UserControl
         IManualClipEditService? manualClipEditService = null,
         Func<string, bool>? launchMediaFile = null,
         IClipPlaybackPreparer? playbackPreparer = null,
-        IGalleryThumbnailProvider? thumbnailProvider = null)
+        IGalleryThumbnailProvider? thumbnailProvider = null,
+        IFavoritesService? favorites = null)
     {
         _clipsFolder = clipsFolder;
         _manualClipEditService = manualClipEditService;
         _launchMediaFile = launchMediaFile;
         _playbackPreparer = playbackPreparer ?? new ClipPlaybackPreparer();
         _thumbnailProvider = thumbnailProvider ?? new GalleryThumbnailProvider();
+        _favorites = favorites ?? new FavoritesService();
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        _favorites.Changed += FavoritesChanged;
         Name = "GalleryView";
         Dock = DockStyle.Fill;
         BackColor = ClipCordTheme.Shell;
@@ -452,6 +458,9 @@ internal sealed class GalleryView : UserControl
     private int ScaleUi(int value) =>
         Math.Max(1, (int)Math.Round(value * Math.Max(1f, DeviceDpi / 96f)));
 
+    internal static int GetFavoriteButtonSide(int dpi) =>
+        Math.Max(1, (int)Math.Round(26 * Math.Max(1f, dpi / 96f)));
+
     internal async void RefreshCatalog(string clipsFolder)
     {
         if (_disposed || IsDisposed || Disposing || !_active) return;
@@ -518,7 +527,11 @@ internal sealed class GalleryView : UserControl
             _selectedGame = _snapshot.Games.FirstOrDefault(game =>
                 game.Name.Equals(_selectedGame.Name, StringComparison.OrdinalIgnoreCase));
         }
-        if (_selectedGame is null) ShowLibrary();
+        if (_selectedGame is null)
+        {
+            if (_showFavorites) ShowFavorites();
+            else ShowLibrary();
+        }
         else ShowGame(_selectedGame);
     }
 
@@ -546,6 +559,11 @@ internal sealed class GalleryView : UserControl
             // whose content has already been torn down.
             ShowGame(_selectedGame);
         }
+        else if (_screen is GalleryScreen.Editor or GalleryScreen.Player)
+        {
+            if (_showFavorites) ShowFavorites();
+            else ShowLibrary();
+        }
         if (!_disposed && !IsDisposed && !Disposing) _refreshButton.Enabled = true;
     }
 
@@ -559,6 +577,7 @@ internal sealed class GalleryView : UserControl
         if (_manualClipEditService is null || string.IsNullOrWhiteSpace(clipPath)) return false;
         if (!TryResolveLocalOnlyClip(clipPath, out var clip)) return false;
         // Align the surrounding view state so leaving the editor lands on the clip's game.
+        _showFavorites = false;
         _routeFilter = GalleryClipRoute.LocalOnly;
         _selectedGame = _snapshot.Games.FirstOrDefault(game =>
             game.Name.Equals(clip.GameName, StringComparison.OrdinalIgnoreCase));
@@ -668,6 +687,21 @@ internal sealed class GalleryView : UserControl
         DisposePlayer();
         _screen = GalleryScreen.Library;
         _selectedGame = null;
+        _showFavorites = false;
+        _backButton.Visible = false;
+        SetLibraryLayoutVisible(true);
+        _refreshButton.Enabled = true;
+        RenderLibrary();
+    }
+
+    private void ShowFavorites()
+    {
+        CancelPlaybackPrewarm();
+        DisposeEditor();
+        DisposePlayer();
+        _screen = GalleryScreen.Library;
+        _selectedGame = null;
+        _showFavorites = true;
         _backButton.Visible = false;
         SetLibraryLayoutVisible(true);
         _refreshButton.Enabled = true;
@@ -681,6 +715,7 @@ internal sealed class GalleryView : UserControl
         DisposePlayer();
         _screen = GalleryScreen.Game;
         _selectedGame = game;
+        _showFavorites = false;
         _backButton.Visible = false;
         SetLibraryLayoutVisible(true);
         _refreshButton.Enabled = true;
@@ -718,10 +753,12 @@ internal sealed class GalleryView : UserControl
             _clipGrid.ResumeLayout(true);
         }
 
-        var summary = _selectedGame is null
-            ? BuildLibrarySummary(_snapshot)
+        var summary = _showFavorites
+            ? BuildFavoritesSummary(visibleClips.Length)
+            : _selectedGame is null
+                ? BuildLibrarySummary(_snapshot)
             : BuildGameSummary(_selectedGame, visibleClips.Length);
-        SetHeader(_selectedGame?.Name ?? "Gallery", summary);
+        SetHeader(_showFavorites ? "Favorites" : _selectedGame?.Name ?? "Gallery", summary);
         _scrollHost.Content = _clipGrid;
         _scrollHost.RefreshContentLayout(preservePosition: false);
         _gameScrollHost.RefreshContentLayout(preservePosition: true);
@@ -877,9 +914,7 @@ internal sealed class GalleryView : UserControl
 
     private IEnumerable<GalleryClipEntry> GetVisibleClips()
     {
-        var clips = _selectedGame is null
-            ? _snapshot.Games.SelectMany(game => game.Clips)
-            : _selectedGame.Clips;
+        var clips = GetScopedClips();
         if (_routeFilter is not null)
         {
             clips = clips.Where(clip => clip.Route == _routeFilter.Value);
@@ -896,11 +931,30 @@ internal sealed class GalleryView : UserControl
             : clips.OrderBy(clip => clip.LastWriteTimeUtc);
     }
 
+    private IEnumerable<GalleryClipEntry> GetScopedClips()
+    {
+        var clips = _selectedGame is null
+            ? _snapshot.Games.SelectMany(game => game.Clips)
+            : _selectedGame.Clips;
+        return _showFavorites ? clips.Where(_favorites.IsFavorite) : clips;
+    }
+
     private string BuildEmptyLibraryMessage()
     {
         if (_searchText.TextLength > 0)
         {
-            return "No clips match this search.";
+            return _showFavorites
+                ? "No Favorite clips match this search."
+                : "No clips match this search.";
+        }
+        if (_showFavorites)
+        {
+            return _routeFilter switch
+            {
+                GalleryClipRoute.LocalOnly => "No Local-only clips in Favorites.",
+                GalleryClipRoute.Uploaded => "No uploaded clips in Favorites.",
+                _ => "No Favorite clips yet. Select the heart on any clip to add it here."
+            };
         }
         if (_snapshot.Games.Count == 0)
         {
@@ -926,8 +980,15 @@ internal sealed class GalleryView : UserControl
             _gameFilterList.Controls.Add(CreateGameFilterButton(
                 "All clips",
                 _snapshot.TotalClips,
-                _selectedGame is null,
+                _selectedGame is null && !_showFavorites,
                 ShowLibrary));
+            _gameFilterList.Controls.Add(CreateGameFilterButton(
+                "Favorites",
+                _favorites.CountFavorites(_snapshot.Games.SelectMany(game => game.Clips)),
+                _showFavorites,
+                ShowFavorites,
+                FigmaIconAsset.HeartFill,
+                ClipCordTheme.Coral));
             foreach (var game in _snapshot.Games)
             {
                 var selected = _selectedGame is not null &&
@@ -949,9 +1010,17 @@ internal sealed class GalleryView : UserControl
         string label,
         int count,
         bool selected,
-        Action select)
+        Action select,
+        FigmaIconAsset? leadingIcon = null,
+        Color? leadingIconColor = null)
     {
-        var button = new GalleryGameFilterButton(label, count, selected, select)
+        var button = new GalleryGameFilterButton(
+            label,
+            count,
+            selected,
+            select,
+            leadingIcon,
+            leadingIconColor)
         {
             Height = ScaleUi(36),
             Margin = ScalePadding(0, 0, 0, 2)
@@ -972,8 +1041,8 @@ internal sealed class GalleryView : UserControl
 
     private void UpdateFilterButtons()
     {
-        var clips = _selectedGame?.Clips ?? _snapshot.Games.SelectMany(game => game.Clips).ToArray();
-        var total = clips.Count;
+        var clips = GetScopedClips().ToArray();
+        var total = clips.Length;
         var uploaded = clips.Count(clip => clip.Route == GalleryClipRoute.Uploaded);
         var localOnly = clips.Count(clip => clip.Route == GalleryClipRoute.LocalOnly);
         _allFilterButton.Text = $"All  {total}";
@@ -1002,6 +1071,7 @@ internal sealed class GalleryView : UserControl
         {
             DisposePlayer();
             if (_selectedGame is not null) ShowGame(_selectedGame);
+            else if (_showFavorites) ShowFavorites();
             else ShowLibrary();
             return;
         }
@@ -1059,6 +1129,7 @@ internal sealed class GalleryView : UserControl
             ShowGame(_selectedGame);
             BeginInvoke((Action)(() => GetSelectedFilterButton().Focus()));
         }
+        else if (_showFavorites) ShowFavorites();
         else ShowLibrary();
     }
 
@@ -1076,6 +1147,7 @@ internal sealed class GalleryView : UserControl
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Game;
+        _showFavorites = false;
         _selectedGame = selectedName is null
             ? null
             : _snapshot.Games.FirstOrDefault(game =>
@@ -1114,7 +1186,12 @@ internal sealed class GalleryView : UserControl
         _backButton.Text = "Back to clips";
         SetLibraryLayoutVisible(false);
         _refreshButton.Enabled = false;
-        _player = new ClipPlayerView(clip, _playbackPreparer);
+        _player = new ClipPlayerView(
+            clip,
+            _playbackPreparer,
+            _favorites.IsFavorite(clip),
+            favorite => _favorites.SetFavorite(clip, favorite));
+        _playerClip = clip;
         _scrollHost.Content = _player;
         _scrollHost.RefreshContentLayout(preservePosition: false);
         BeginInvoke((Action)(() =>
@@ -1130,6 +1207,7 @@ internal sealed class GalleryView : UserControl
         if (ReferenceEquals(_scrollHost.Content, _player)) _scrollHost.Content = null;
         _player.Dispose();
         _player = null;
+        _playerClip = null;
     }
 
     private void DisposeEditor()
@@ -1186,6 +1264,22 @@ internal sealed class GalleryView : UserControl
         _thumbnailClips.Add(art, clip);
         var routeBadge = CreateRouteBadge(clip.Route);
         routeBadge.Location = new Point(ScaleUi(10), ScaleUi(9));
+        var favorite = new FavoriteButton(
+            _favorites.IsFavorite(clip),
+            logicalSize: 26,
+            logicalIconSize: 14,
+            revealWhenOff: true)
+        {
+            Name = "GalleryClipFavoriteButton",
+            AccessibleName = $"Toggle Favorites for {clip.FileName}"
+        };
+        var favoriteSide = GetFavoriteButtonSide(DeviceDpi);
+        favorite.Size = new Size(favoriteSide, favoriteSide);
+        favorite.Click += (_, _) =>
+        {
+            var next = !favorite.IsFavorite;
+            if (_favorites.SetFavorite(clip, next)) favorite.SetFavorite(next);
+        };
         var play = CreateCardButton("Play", 62);
         play.Size = new Size(ScaleUi(62), ScaleUi(36));
         play.Name = "PlayGalleryClipButton";
@@ -1195,21 +1289,34 @@ internal sealed class GalleryView : UserControl
         play.Click += (_, _) => PlayClip(clip);
         play.MouseEnter += (_, _) => BeginPlaybackPrewarm(clip);
         play.GotFocus += (_, _) => BeginPlaybackPrewarm(clip);
-        void PlacePlayButton() => play.Location = new Point(
-            Math.Max(ScaleUi(8), (art.ClientSize.Width - play.Width) / 2),
-            Math.Max(ScaleUi(8), (art.ClientSize.Height - play.Height) / 2));
-        art.Resize += (_, _) => PlacePlayButton();
+        void PlaceThumbnailControls()
+        {
+            play.Location = new Point(
+                Math.Max(ScaleUi(8), (art.ClientSize.Width - play.Width) / 2),
+                Math.Max(ScaleUi(8), (art.ClientSize.Height - play.Height) / 2));
+            favorite.Location = new Point(
+                Math.Max(ScaleUi(8), art.ClientSize.Width - favorite.Width - ScaleUi(10)),
+                ScaleUi(9));
+        }
+        art.MouseEnter += (_, _) => favorite.SetReveal(true);
+        art.MouseLeave += (_, _) => favorite.SetReveal(false);
+        favorite.MouseEnter += (_, _) => favorite.SetReveal(true);
+        favorite.MouseLeave += (_, _) => favorite.SetReveal(false);
+        art.Resize += (_, _) => PlaceThumbnailControls();
         art.Controls.Add(routeBadge);
+        art.Controls.Add(favorite);
         art.Controls.Add(play);
         art.Layout += (_, _) =>
         {
             routeBadge.BringToFront();
+            favorite.BringToFront();
             play.BringToFront();
-            PlacePlayButton();
+            PlaceThumbnailControls();
         };
         routeBadge.BringToFront();
+        favorite.BringToFront();
         play.BringToFront();
-        PlacePlayButton();
+        PlaceThumbnailControls();
         layout.Controls.Add(art, 0, 0);
 
         var details = new BufferedTableLayoutPanel
@@ -1428,6 +1535,40 @@ internal sealed class GalleryView : UserControl
         return snapshot.Warnings.Count == 0 ? summary : summary + " · Some clips could not be read";
     }
 
+    private string BuildFavoritesSummary(int visibleCount)
+    {
+        var favorites = _snapshot.Games
+            .SelectMany(game => game.Clips)
+            .Where(_favorites.IsFavorite)
+            .ToArray();
+        if (favorites.Length == 0) return "Keep the moments you want to find again.";
+        var games = favorites
+            .Select(clip => clip.GameName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        var baseSummary = $"{FormatClipCount(favorites.Length)} across {games} game{(games == 1 ? string.Empty : "s")}";
+        return visibleCount == favorites.Length
+            ? baseSummary
+            : $"Showing {FormatClipCount(visibleCount)} · {baseSummary}";
+    }
+
+    private void FavoritesChanged()
+    {
+        _uiContext.Post(_ =>
+        {
+            if (_disposed || IsDisposed || Disposing) return;
+            if (_screen is GalleryScreen.Library or GalleryScreen.Game)
+            {
+                RenderLibrary();
+                return;
+            }
+            if (_screen == GalleryScreen.Player && _player is not null && _playerClip is not null)
+            {
+                _player.SetFavoriteState(_favorites.IsFavorite(_playerClip));
+            }
+        }, null);
+    }
+
     private string BuildGameSummary(GalleryGameEntry game, int visibleCount)
     {
         var baseSummary = $"{FormatClipCount(game.Clips.Count)} · {game.UploadedCount} uploaded · {game.LocalOnlyCount} local only · {FormatBytes(game.TotalBytes)}";
@@ -1531,6 +1672,7 @@ internal sealed class GalleryView : UserControl
             CancelPlaybackPrewarm();
             DisposeEditor();
             DisposePlayer();
+            _favorites.Changed -= FavoritesChanged;
             _toolTip.Dispose();
             _clipGrid.Dispose();
             _gameFilterList.Dispose();
@@ -1556,15 +1698,30 @@ internal sealed class GalleryGameFilterButton : Control
     private readonly string _label;
     private readonly int _count;
     private readonly Action _select;
+    private readonly FigmaIconAsset? _leadingIcon;
+    private readonly Color _leadingIconColor;
     private bool _hovered;
 
-    internal GalleryGameFilterButton(string label, int count, bool selected, Action select)
+    internal GalleryGameFilterButton(
+        string label,
+        int count,
+        bool selected,
+        Action select,
+        FigmaIconAsset? leadingIcon = null,
+        Color? leadingIconColor = null)
     {
         _label = label;
         _count = Math.Max(0, count);
         _select = select;
+        _leadingIcon = leadingIcon;
+        _leadingIconColor = leadingIconColor ?? ClipCordTheme.TextSecondary;
         Selected = selected;
-        Name = label == "All clips" ? "GalleryAllGamesFilterButton" : "GalleryGameFilterButton";
+        Name = label switch
+        {
+            "All clips" => "GalleryAllGamesFilterButton",
+            "Favorites" => "GalleryFavoritesFilterButton",
+            _ => "GalleryGameFilterButton"
+        };
         Height = 36;
         Margin = new Padding(0, 0, 0, 2);
         BackColor = ClipCordTheme.SurfaceRaised;
@@ -1623,6 +1780,8 @@ internal sealed class GalleryGameFilterButton : Control
 
         var scale = Math.Max(1f, Height / 36f);
         var inset = Math.Max(8, (int)Math.Round(10 * scale));
+        var iconSize = _leadingIcon is null ? 0 : Math.Max(12, (int)Math.Round(14 * scale));
+        var iconGap = _leadingIcon is null ? 0 : Math.Max(5, (int)Math.Round(7 * scale));
         var countText = _count.ToString(System.Globalization.CultureInfo.CurrentCulture);
         var countSize = TextRenderer.MeasureText(
             countText,
@@ -1633,7 +1792,11 @@ internal sealed class GalleryGameFilterButton : Control
             eventArgs.Graphics,
             _label,
             Font,
-            new Rectangle(inset, 0, Math.Max(1, Width - inset * 2 - countSize.Width - 8), Height),
+            new Rectangle(
+                inset + iconSize + iconGap,
+                0,
+                Math.Max(1, Width - inset * 2 - countSize.Width - 8 - iconSize - iconGap),
+                Height),
             Selected ? ClipCordTheme.TextPrimary : ClipCordTheme.TextSecondary,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
             TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
@@ -1644,10 +1807,153 @@ internal sealed class GalleryGameFilterButton : Control
             new Rectangle(Math.Max(inset, Width - inset - countSize.Width), 0, countSize.Width, Height),
             ClipCordTheme.TextTertiary,
             CountTextFlags);
+        if (_leadingIcon is not null)
+        {
+            FigmaIconRenderer.Draw(
+                eventArgs.Graphics,
+                new Rectangle(inset, (Height - iconSize) / 2, iconSize, iconSize),
+                _leadingIcon.Value,
+                _leadingIconColor);
+        }
         if (Focused && ShowFocusCues)
         {
             ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
         }
+    }
+}
+
+internal sealed class FavoriteButton : Control
+{
+    private readonly int _logicalSize;
+    private readonly int _logicalIconSize;
+    private readonly bool _revealWhenOff;
+    private bool _revealed;
+    private bool _hovered;
+
+    internal FavoriteButton(
+        bool isFavorite,
+        int logicalSize,
+        int logicalIconSize,
+        bool revealWhenOff)
+    {
+        _logicalSize = logicalSize;
+        _logicalIconSize = logicalIconSize;
+        _revealWhenOff = revealWhenOff;
+        SetStyle(
+            ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.OptimizedDoubleBuffer |
+            ControlStyles.ResizeRedraw |
+            ControlStyles.Selectable |
+            ControlStyles.SupportsTransparentBackColor,
+            true);
+        Size = new Size(logicalSize, logicalSize);
+        BackColor = Color.Transparent;
+        Cursor = Cursors.Hand;
+        TabStop = true;
+        AccessibleRole = AccessibleRole.CheckButton;
+        SetFavorite(isFavorite);
+        MouseEnter += (_, _) =>
+        {
+            _hovered = true;
+            _revealed = true;
+            Invalidate();
+        };
+        MouseLeave += (_, _) =>
+        {
+            _hovered = false;
+            Invalidate();
+        };
+        GotFocus += (_, _) => Invalidate();
+        LostFocus += (_, _) => Invalidate();
+    }
+
+    internal bool IsFavorite { get; private set; }
+
+    internal void SetFavorite(bool favorite)
+    {
+        IsFavorite = favorite;
+        AccessibleDescription = favorite ? "In Favorites" : "Not in Favorites";
+        if (IsHandleCreated)
+        {
+            AccessibilityNotifyClients(AccessibleEvents.StateChange, -1);
+        }
+        Invalidate();
+    }
+
+    internal void SetReveal(bool reveal)
+    {
+        if (!_revealWhenOff || _revealed == reveal) return;
+        _revealed = reveal;
+        Invalidate();
+    }
+
+    protected override void OnMouseDown(MouseEventArgs eventArgs)
+    {
+        if (eventArgs.Button == MouseButtons.Left) Focus();
+        base.OnMouseDown(eventArgs);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs eventArgs)
+    {
+        if (eventArgs.KeyCode is Keys.Enter or Keys.Space)
+        {
+            OnClick(EventArgs.Empty);
+            eventArgs.Handled = true;
+            eventArgs.SuppressKeyPress = true;
+        }
+        base.OnKeyDown(eventArgs);
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() =>
+        new FavoriteButtonAccessibleObject(this);
+
+    protected override void OnPaint(PaintEventArgs eventArgs)
+    {
+        base.OnPaint(eventArgs);
+        if (Width <= 1 || Height <= 1 ||
+            (!IsFavorite && _revealWhenOff && !_revealed && !Focused))
+        {
+            return;
+        }
+
+        eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        var scale = Math.Max(
+            0.1f,
+            Math.Min(Width / (float)_logicalSize, Height / (float)_logicalSize));
+        var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
+        var fillColor = IsFavorite
+            ? Color.FromArgb(58, 34, 48)
+            : _hovered ? ClipCordTheme.SurfaceControlHover : ClipCordTheme.SurfaceSunken;
+        var borderColor = IsFavorite ? ClipCordTheme.Coral : ClipCordTheme.BorderStrong;
+        using (var path = RoundedPanel.CreateRoundedPath(bounds, Math.Max(5, (int)Math.Round(9 * scale))))
+        using (var fill = new SolidBrush(fillColor))
+        using (var border = new Pen(borderColor, Math.Max(1f, scale)))
+        {
+            eventArgs.Graphics.FillPath(fill, path);
+            eventArgs.Graphics.DrawPath(border, path);
+        }
+
+        var iconSize = Math.Max(1, (int)Math.Round(_logicalIconSize * scale));
+        FigmaIconRenderer.Draw(
+            eventArgs.Graphics,
+            new Rectangle(
+                (Width - iconSize) / 2,
+                (Height - iconSize) / 2,
+                iconSize,
+                iconSize),
+            IsFavorite ? FigmaIconAsset.HeartFill : FigmaIconAsset.Heart,
+            IsFavorite ? ClipCordTheme.Coral : Color.FromArgb(135, 146, 168));
+        if (Focused && ShowFocusCues)
+        {
+            ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -3, -3));
+        }
+    }
+
+    private sealed class FavoriteButtonAccessibleObject(FavoriteButton owner)
+        : Control.ControlAccessibleObject(owner)
+    {
+        public override AccessibleStates State => base.State |
+            (owner.IsFavorite ? AccessibleStates.Checked : AccessibleStates.None);
     }
 }
 

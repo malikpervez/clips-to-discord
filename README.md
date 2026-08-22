@@ -25,7 +25,7 @@ A Windows tray app that can upload new MP4 clips from any chosen folder to Disco
 - Matches how you record: choose **SteelSeries GG** for clips saved straight into the watched folder, or **NVIDIA** for clips filed into per-game subfolders — point ClipCord at the folder holding them, such as `Videos\NVIDIA`.
 - Uses a configurable compression target and retries smaller targets when Discord rejects a file for size.
 - Shows bounded recent discovery, upload, compression, retry, and archive history in the local Activity Center.
-- Browses uploaded and local-only archives together in a game-organized Gallery with locally generated near-start thumbnails, route labels, in-app playback, search, ordering, and file-location actions.
+- Browses uploaded and local-only archives together in a game-organized Gallery with locally generated near-start thumbnails, Favorites, route labels, in-app playback, search, ordering, and file-location actions.
 - Lets you explicitly trim, mute, rename, annotate, and upload a Local-only Gallery clip; the edited result is archived only after confirmation and the original stays local until its safe disposition.
 - Keeps Gallery work on demand: it scans local archives and decodes only visible thumbnails while Gallery is open, never downloads game artwork, and performs no media work while Always Watching runs in the background.
 - Includes a persistent Home dashboard and refreshed About page with live app status, privacy-safe copied diagnostics, documentation links, and complete project credits.
@@ -120,8 +120,8 @@ $ffmpegDirectory = .\scripts\get-ffmpeg.ps1
   -FfmpegPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') `
   -FfmpegLicensePath (Join-Path $ffmpegDirectory 'FFMPEG-LICENSE.txt')
 .\scripts\test-store-msix.ps1 `
-  -PackagePath .\artifacts\store\ClipCord_1.14.0.0_x64.msix `
-  -ExpectedVersion 1.14.0.0 `
+  -PackagePath .\artifacts\store\ClipCord_1.15.0.0_x64.msix `
+  -ExpectedVersion 1.15.0.0 `
   -RequireFfmpeg
 ```
 

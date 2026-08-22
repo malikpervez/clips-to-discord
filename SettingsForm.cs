@@ -219,6 +219,7 @@ internal sealed class SettingsForm : Form
     private readonly IGalleryThumbnailProvider? _thumbnailProvider;
     private readonly SettingsPage _openingPage;
     private readonly bool _ownsActivityHistory;
+    private readonly IFavoritesService _favorites;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _homeNavigationItem;
     private RoundedPanel? _activityNavigationItem;
@@ -257,7 +258,8 @@ internal sealed class SettingsForm : Form
         IManualClipEditService? manualClipEditService = null,
         Func<string, bool>? launchMediaFile = null,
         IClipPlaybackPreparer? playbackPreparer = null,
-        IGalleryThumbnailProvider? thumbnailProvider = null)
+        IGalleryThumbnailProvider? thumbnailProvider = null,
+        IFavoritesService? favorites = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -269,6 +271,7 @@ internal sealed class SettingsForm : Form
         _launchMediaFile = launchMediaFile;
         _playbackPreparer = playbackPreparer;
         _thumbnailProvider = thumbnailProvider;
+        _favorites = favorites ?? new FavoritesService();
         _ownsActivityHistory = activityHistory is null;
         _openingPage = initialPage;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
@@ -503,7 +506,8 @@ internal sealed class SettingsForm : Form
             _manualClipEditService,
             _launchMediaFile,
             _playbackPreparer,
-            _thumbnailProvider);
+            _thumbnailProvider,
+            _favorites);
         _galleryPage.SetEmbeddedHeaderVisible(false);
         _galleryPage.HeaderChanged += (title, subtitle) =>
         {
