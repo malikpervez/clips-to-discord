@@ -27,6 +27,7 @@ ClipCord keeps completed gaming clips organized and ready to share.
 - Watch a folder used by SteelSeries GG, NVIDIA, or another recorder that saves MP4 files.
 - Send new clips to a configured Discord webhook or keep them Local only.
 - Browse locally generated thumbnails and play archived clips inside the app.
+- Mark clips as Favorites and browse them together without moving or duplicating the original files.
 - Trim, preview, mute, rename, and explicitly upload a Local-only clip.
 - Preserve upload history and prevent duplicate posting with local content hashes.
 - Keep settings, history, thumbnails, editing, playback preparation, and compression on the PC.

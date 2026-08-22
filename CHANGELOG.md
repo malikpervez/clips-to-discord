@@ -4,6 +4,10 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 1.15.0 — 2026-08-21
+
+- Mark any archived clip as a Favorite from its Gallery thumbnail or player, then browse a pinned Favorites collection without moving, copying, or removing the clip from its game.
+- Keep Favorite state attached to the same unchanged local file as clips move through the edit-and-upload or automatic-upload workflows, with keyboard and screen-reader support for every heart control.
 - Add a Microsoft Store MSIX package using ClipCord's reserved Store identity so Microsoft can sign and deliver the app without the unsigned-download warning shown by direct GitHub builds.
 - Use the Windows packaged startup task and Microsoft Store update surface when running the Store build, while preserving the existing registry startup and verified GitHub update behavior for direct installs and portable copies.
 
