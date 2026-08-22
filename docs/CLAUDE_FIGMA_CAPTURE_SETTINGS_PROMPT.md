@@ -117,16 +117,15 @@ current ClipCord fields.
 
 - Default location: `%USERPROFILE%\Videos\ClipCord`.
 - Controls: **Change folder** and **Open folder**.
-- Explain: “Originals are organized by game and date. Uploads never move or replace the original.”
+- Explain: “Originals are organized by game. Each filename includes its recording date and time. Uploads never move or replace the original.”
 - Show a compact, polished folder-structure preview or info popover using this exact model:
 
 ```text
 ClipCord\
 ├─ Library\
-│  └─ Valorant\
-│     └─ 2026\
-│        └─ 2026-08-22\
-│           └─ Valorant__2026-08-22__14-35-41.mp4
+│  └─ Game\
+│     └─ Valorant\
+│        └─ Valorant__2026-08-22__14-35-41.mp4
 ├─ Exports\
 │  ├─ Discord\Valorant\
 │  ├─ YouTube\Valorant\

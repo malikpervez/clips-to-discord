@@ -111,6 +111,7 @@ internal static class CaptureProfileCatalog
 internal static class CaptureLibraryLayout
 {
     internal const string LibraryFolderName = "Library";
+    internal const string GameFolderName = "Game";
     internal const string ExportsFolderName = "Exports";
     internal const string PrivateDataFolderName = ".clipcord";
     internal const string ProjectsFolderName = "Projects";
@@ -125,18 +126,15 @@ internal static class CaptureLibraryLayout
 
     internal static string GetRecordingDirectory(
         string root,
-        string? gameName,
-        DateTimeOffset capturedAt)
+        string? gameName)
     {
         var safeRoot = ValidateRoot(root);
         var safeGameName = UploadedFolder.SanitizeGameFolderName(gameName);
-        var localDate = capturedAt.ToLocalTime();
         return Path.Combine(
             safeRoot,
             LibraryFolderName,
-            safeGameName,
-            localDate.ToString("yyyy"),
-            localDate.ToString("yyyy-MM-dd"));
+            GameFolderName,
+            safeGameName);
     }
 
     internal static string GetExportDirectory(string root, string destination, string? gameName)

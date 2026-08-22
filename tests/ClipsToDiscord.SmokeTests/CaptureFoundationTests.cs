@@ -146,25 +146,20 @@ internal static class CaptureFoundationTests
     private static void AssertLibraryLayout(string testRoot)
     {
         var root = Path.Combine(testRoot, "library-root");
-        var localWallClock = new DateTime(2026, 8, 22, 14, 35, 41, DateTimeKind.Unspecified);
-        var capturedAt = new DateTimeOffset(localWallClock, TimeZoneInfo.Local.GetUtcOffset(localWallClock));
         var recordingDirectory = CaptureLibraryLayout.GetRecordingDirectory(
             root,
-            "Counter-Strike 2",
-            capturedAt);
+            "Counter-Strike 2");
         Assert(
             recordingDirectory == Path.Combine(
                 Path.GetFullPath(root),
                 "Library",
-                "Counter-Strike 2",
-                "2026",
-                "2026-08-22"),
-            "Original recordings must be organized by game, year, and local capture date.");
+                "Game",
+                "Counter-Strike 2"),
+            "Original recordings must use the simple Library/Game/<Game> hierarchy.");
 
         var hostileRecordingDirectory = CaptureLibraryLayout.GetRecordingDirectory(
             root,
-            "..\\..\\CON:/",
-            capturedAt);
+            "..\\..\\CON:/");
         Assert(
             hostileRecordingDirectory.StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase),
             "Game metadata must not escape the ClipCord library root.");

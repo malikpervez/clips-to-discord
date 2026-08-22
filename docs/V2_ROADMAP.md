@@ -37,10 +37,12 @@ ClipCord-owned media uses one storage model from the beginning:
 
 ```text
 ClipCord\
-├─ Library\<Game>\<Year>\<Date>\<original>.mp4
+├─ Library\Game\<Game>\<Game>__<yyyy-MM-dd>__<HH-mm-ss>.mp4
 ├─ Exports\<Destination>\<Game>\<rendition>.mp4
 └─ .clipcord\{Projects,Staging,Thumbnails}\
 ```
+
+The folder hierarchy stays shallow. Each original clip carries its local recording date and time in the filename instead of adding year and date folders.
 
 `Library` holds the one original; a route records status in ClipCord metadata rather than moving or
 duplicating that original. `Exports` contains only user-requested destination renditions.
