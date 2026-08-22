@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
+    <Compile Remove="tools\**\*.cs" />
     <Compile Remove="artifacts\**\*.cs" />
     <EmbeddedResource Include="assets\app-icon.png" LogicalName="ClipsToDiscord.Assets.AppIcon.png" />
     <EmbeddedResource Include="assets\figma-icons\masks\*.png">

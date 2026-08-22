@@ -21,8 +21,9 @@ recordings deliberately enter that same pipeline rather than creating a parallel
 - Test NVIDIA, AMD, and Intel hardware separately; CI validates contracts with fakes, not devices.
 
 The first committed foundation supplies the Windows capability seam and ClipCord output naming.
-The next spike owns frame acquisition, GPU conversion, encoder enumeration, and measurements only;
-it does not ship as an end-user recorder.
+Phase 0A owns frame acquisition, GPU copies, encoder enumeration, and callback measurements. Phase
+0B adds BGRA→NV12 conversion, actual hardware H.264 encoding to a discard sink, GOP control, and the
+PresentMon comparison. Neither spike ships as an end-user recorder.
 
 ### 1. Manual recording
 
@@ -31,6 +32,18 @@ it does not ship as an end-user recorder.
 - A shared monotonic clock for video and audio timestamps.
 - Atomic completion into the selected clip folder using the existing Gallery/uploader pipeline.
 - Recovery that never presents a partial MP4 as a completed recording.
+
+ClipCord-owned media uses one storage model from the beginning:
+
+```text
+ClipCord\
+├─ Library\<Game>\<Year>\<Date>\<original>.mp4
+├─ Exports\<Destination>\<Game>\<rendition>.mp4
+└─ .clipcord\{Projects,Staging,Thumbnails}\
+```
+
+`Library` holds the one original; a route records status in ClipCord metadata rather than moving or
+duplicating that original. `Exports` contains only user-requested destination renditions.
 
 ### 2. Replay buffer
 
