@@ -4143,6 +4143,8 @@ static void AssertCaptureViewContract(AppSettings settings)
     Assert(controls.OfType<Label>().Single(label => label.Name == "CaptureEstimatedSizeValue").Text == "about 144 MB" &&
            controls.OfType<Label>().Single(label => label.Name == "CaptureEstimatedSizeRange").Text.Contains("116–181 MB", StringComparison.Ordinal),
         "The default 1080p60 estimate must use one mixed 192 kbps audio stream.");
+    AssertCaptureMinimumWidthLayout(form, cameraSelected: false);
+    AssertCaptureDesignedWidthLayout(form);
 
     microphone.Checked = true;
     Application.DoEvents();
@@ -4166,6 +4168,26 @@ static void AssertCaptureViewContract(AppSettings settings)
         "ClipCord Capture must default to a separate shortcut and storage root from the external watcher.");
 
     form.Close();
+
+    using (var minimumCameraForm = new SettingsForm(
+               settings,
+               checkForUpdatesAsync: _ => Task.CompletedTask,
+               initialPage: SettingsPage.Capture,
+               captureSettings: captureSettings with
+               {
+                   Resolution = CaptureResolution.UltraHd4K,
+                   FramesPerSecond = 60,
+                   ReplaySeconds = 300,
+                   ReactionCameraConsentGranted = true,
+                   IncludeReactionCamera = true
+               },
+               captureEngineAvailable: true))
+    {
+        minimumCameraForm.Show();
+        Application.DoEvents();
+        AssertCaptureMinimumWidthLayout(minimumCameraForm, cameraSelected: true);
+        minimumCameraForm.Close();
+    }
 
     var silhouetteSaves = new List<CaptureSettings>();
     var silhouetteSettingsDirectory = Path.Combine(
@@ -4505,6 +4527,17 @@ static void AssertCaptureLayout(SettingsForm form, float? expectedScale = null)
         ["CaptureRecordingLocationCard"] = 111
     };
     var dpiScale = expectedScale ?? GetDpiScale(capture);
+    var singleColumnTables = EnumerateControls(capture)
+        .OfType<TableLayoutPanel>()
+        .Where(table => table.ColumnCount == 1)
+        .ToArray();
+    Assert(
+        singleColumnTables.Length > 0 &&
+        singleColumnTables.All(table =>
+            table.ColumnStyles.Count == 1 &&
+            table.ColumnStyles[0].SizeType == SizeType.Percent &&
+            Math.Abs(table.ColumnStyles[0].Width - 100) < 0.01f),
+        "Capture single-column layouts must use an explicit 100% column so content follows a contracting split-card viewport.");
     foreach (var (cardName, expectedHeight) in expectedCardHeights)
     {
         var card = EnumerateControls(capture).Single(control => control.Name == cardName);
@@ -4572,10 +4605,10 @@ static void AssertCaptureLayout(SettingsForm form, float? expectedScale = null)
         cameraPrivacyCopy.ForeColor == ClipCordTheme.TextSecondary &&
         cameraPrivacyShield.IconColor == Color.FromArgb(49, 177, 113),
         "Reaction Camera must retain the Figma 64px privacy note with secondary copy and the green shield asset.");
-    if (expectedScale is null)
+    var qualityAndEstimateRow = EnumerateControls(capture)
+        .Single(control => control.Name == "CaptureQualityAndEstimateRow");
+    if (Math.Abs(qualityAndEstimateRow.Width / dpiScale - 928) <= 3)
     {
-        // Synthetic Control.Scale probes deliberately retain the runner's DeviceDpi and can add
-        // horizontal autoscale slack. Pin exact design widths only in the real startup-DPI layout.
         Assert(
             Math.Abs(qualityCard.Width / dpiScale - 612) <= 3 &&
             Math.Abs(cameraCard.Width / dpiScale - 340) <= 3,
@@ -4649,13 +4682,206 @@ static void AssertCaptureLayout(SettingsForm form, float? expectedScale = null)
         .ToArray();
     var requiredResolutionWidth = resolutionButtons.Sum(button => button.Width + button.Margin.Horizontal);
     Assert(
-        requiredResolutionWidth / dpiScale <= 426 + 1 &&
+        requiredResolutionWidth / dpiScale <= 424 + 1 &&
         resolutionButtons.All(button => button.Left >= 0 && button.Right <= resolutionChoices.ClientSize.Width + 1),
-        $"Capture resolution choices must fit the supported 426px logical split-card viewport: " +
+        $"Capture resolution choices must retain the preferred 424px Figma span when room is available: " +
         $"required={requiredResolutionWidth / dpiScale:F1}, host={resolutionChoices.ClientSize.Width / dpiScale:F1}, " +
         $"buttons={string.Join(", ", resolutionButtons.Select(button => $"{button.Name}:{button.Bounds}"))}.");
     Assert(EnumerateControls(capture).Any(control => control.Name == "CaptureEstimateDetails"),
         "The Capture estimate must use a real two-column details grid instead of proportional-font space padding.");
+}
+
+static void AssertCaptureMinimumWidthLayout(SettingsForm form, bool cameraSelected)
+{
+    var originalSize = form.Size;
+    try
+    {
+        form.Size = SettingsForm.GetScaledMinimumSize(form.DeviceDpi);
+        form.PerformLayout();
+        Application.DoEvents();
+        var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+        capture.RefreshViewport();
+        form.PerformLayout();
+        Application.DoEvents();
+
+        var dpiScale = GetDpiScale(form);
+        Assert(Math.Abs(form.Width / dpiScale - 960) <= 2,
+            $"Capture minimum-width QA must exercise the declared 960px viewport; form={form.Size}, scale={dpiScale:F2}.");
+        AssertControlsFit(form);
+
+        var resolutionChoices = EnumerateControls(capture)
+            .OfType<FlowLayoutPanel>()
+            .Single(control => control.Name == "CaptureResolutionChoices");
+        var resolutionButtons = new[]
+        {
+            "CaptureResolutionFullHd1080pButton",
+            "CaptureResolutionQuadHd1440pButton",
+            "CaptureResolutionUltraHd4KButton"
+        }
+            .Select(name => EnumerateControls(resolutionChoices)
+                .OfType<OutlineButton>()
+                .Single(button => button.Name == name))
+            .ToArray();
+        var requiredResolutionWidth = resolutionButtons.Sum(button => button.Width + button.Margin.Horizontal);
+        Assert(
+            resolutionChoices.ClientSize.Width / dpiScale < 424 &&
+            requiredResolutionWidth <= resolutionChoices.ClientSize.Width + 1 &&
+            resolutionButtons.All(button => button.Left >= 0 && button.Right <= resolutionChoices.ClientSize.Width + 1) &&
+            resolutionButtons.Skip(1).All(button => button.Width / dpiScale < 128),
+            $"Capture resolution choices must compact inside the true minimum viewport: " +
+            $"required={requiredResolutionWidth / dpiScale:F1}, host={resolutionChoices.ClientSize.Width / dpiScale:F1}, " +
+            $"buttons={string.Join(", ", resolutionButtons.Select(button => $"{button.Name}:{button.Bounds}"))}.");
+
+        var estimateValue = EnumerateControls(capture).OfType<Label>()
+            .Single(label => label.Name == "CaptureEstimatedSizeValue");
+        var estimateRange = EnumerateControls(capture).OfType<Label>()
+            .Single(label => label.Name == "CaptureEstimatedSizeRange");
+        AssertSingleLineTextFits(estimateValue, "Capture's primary size estimate");
+        AssertWrappedTextFits(estimateRange, "Capture's estimate range");
+        var estimateDetails = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureEstimateDetails");
+        foreach (var detail in EnumerateControls(estimateDetails).OfType<Label>())
+        {
+            AssertSingleLineTextFits(detail, $"Capture estimate detail '{detail.Text}'");
+        }
+
+        var cameraCard = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureReactionCameraCard");
+        var cameraLabels = EnumerateControls(cameraCard).OfType<Label>().ToArray();
+        var cameraToggleHelper = cameraLabels.Single(label =>
+            label.Text == "Consent + preview · capture only");
+        AssertSingleLineTextFits(cameraToggleHelper, "Reaction Camera's consent summary");
+
+        if (!cameraSelected)
+        {
+            var privacyCopy = cameraLabels.Single(label => label.Name == "CaptureCameraPrivacyCopy");
+            AssertWrappedTextFits(privacyCopy, "Reaction Camera's privacy note");
+            var originalSettings = capture.CurrentSettings;
+            try
+            {
+                capture.ApplyExternalSettings(originalSettings with
+                {
+                    ReactionCameraConsentGranted = true,
+                    IncludeReactionCamera = true
+                });
+                capture.RefreshViewport();
+                form.PerformLayout();
+                Application.DoEvents();
+                AssertCompactCameraTextFits(capture);
+            }
+            finally
+            {
+                capture.ApplyExternalSettings(originalSettings);
+                capture.RefreshViewport();
+                Application.DoEvents();
+            }
+            return;
+        }
+        AssertCompactCameraTextFits(capture);
+    }
+    finally
+    {
+        form.Size = originalSize;
+        form.PerformLayout();
+        Application.DoEvents();
+        EnumerateControls(form).OfType<CaptureView>().Single().RefreshViewport();
+    }
+}
+
+static void AssertCompactCameraTextFits(CaptureView capture)
+{
+    var cameraCard = EnumerateControls(capture)
+        .Single(control => control.Name == "CaptureReactionCameraCard");
+    var cameraLabels = EnumerateControls(cameraCard).OfType<Label>().ToArray();
+    var outputs = EnumerateControls(cameraCard)
+        .Single(control => control.Name == "CaptureSilhouetteOutputControls");
+    var caption = cameraLabels.Single(label => label.Name == "SilhouetteOutputCaption");
+    var summary = cameraLabels.Single(label => label.Name == "SilhouetteOutputSummary");
+    var landscapeHelper = cameraLabels.Single(label => label.Text == "For Discord and YouTube");
+    var portraitHelper = cameraLabels.Single(label => label.Text == "For TikTok and Shorts");
+    Assert(outputs.Visible && summary.Text == "1 SELECTED · REQUIRED",
+        "The compact camera layout must become visible and preserve the exact one-required selection contract.");
+    AssertSingleLineTextFits(caption, "Reaction Camera's silhouette caption");
+    AssertSingleLineTextFits(summary, "Reaction Camera's silhouette selection summary");
+    AssertSingleLineTextFits(landscapeHelper, "Reaction Camera's Landscape destination helper");
+    AssertSingleLineTextFits(portraitHelper, "Reaction Camera's Portrait destination helper");
+}
+
+static void AssertCaptureDesignedWidthLayout(SettingsForm form)
+{
+    var originalSize = form.Size;
+    try
+    {
+        form.Size = SettingsForm.GetDesignedOpeningSize(SettingsPage.Capture, form.DeviceDpi);
+        form.PerformLayout();
+        Application.DoEvents();
+        var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+        capture.RefreshViewport();
+        form.PerformLayout();
+        Application.DoEvents();
+
+        var dpiScale = GetDpiScale(form);
+        var splitRow = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureQualityAndEstimateRow");
+        var qualityCard = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureVideoQualityCard");
+        var cameraCard = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureReactionCameraCard");
+        Assert(
+            Math.Abs(form.Width / dpiScale - 1200) <= 2 &&
+            Math.Abs(splitRow.Width / dpiScale - 928) <= 3 &&
+            Math.Abs(qualityCard.Width / dpiScale - 612) <= 3 &&
+            Math.Abs(cameraCard.Width / dpiScale - 340) <= 3,
+            $"Capture's unconstrained opening must retain the approved Figma geometry: " +
+            $"form={form.Size}, row={splitRow.Size}, quality={qualityCard.Size}, camera={cameraCard.Size}, scale={dpiScale:F2}.");
+
+        var labels = EnumerateControls(capture).OfType<Label>().ToArray();
+        var range = labels.Single(label => label.Name == "CaptureEstimatedSizeRange");
+        var caption = labels.Single(label => label.Name == "SilhouetteOutputCaption");
+        var summary = labels.Single(label => label.Name == "SilhouetteOutputSummary");
+        Assert(
+            range.Text.Contains("for a 60 sec clip. Motion and detail affect the final size.", StringComparison.Ordinal) &&
+            labels.Any(label => label.Text == "Consent required · opens only while capturing.") &&
+            labels.Any(label => label.Text == "Replay buffer memory") &&
+            labels.Any(label => label.Text == "Layout preference for Discord and YouTube") &&
+            labels.Any(label => label.Text == "Layout preference for TikTok and Shorts") &&
+            Math.Abs(caption.Font.Size - 7.25f) < 0.01f &&
+            Math.Abs(summary.Font.Size - 7.25f) < 0.01f,
+            $"Capture's full-width responsive state must preserve the approved Figma copy and caption typography: " +
+            $"range='{range.Text}', caption={caption.Font.Size:0.##}pt, summary={summary.Font.Size:0.##}pt, " +
+            $"cameraHelpers=[{string.Join(" | ", labels.Where(label => label.Text.Contains("Consent", StringComparison.Ordinal) || label.Text.Contains("preference", StringComparison.Ordinal)).Select(label => label.Text))}].");
+    }
+    finally
+    {
+        form.Size = originalSize;
+        form.PerformLayout();
+        Application.DoEvents();
+        EnumerateControls(form).OfType<CaptureView>().Single().RefreshViewport();
+    }
+}
+
+static void AssertSingleLineTextFits(Label label, string context)
+{
+    var measured = TextRenderer.MeasureText(
+        label.Text,
+        label.Font,
+        Size.Empty,
+        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+    Assert(
+        measured.Width <= label.ClientSize.Width + 1 && measured.Height <= label.ClientSize.Height + 1,
+        $"{context} must fit on one line: text='{label.Text}', measured={measured}, client={label.ClientSize}, font={label.Font.Size:0.##}pt.");
+}
+
+static void AssertWrappedTextFits(Label label, string context)
+{
+    var measured = TextRenderer.MeasureText(
+        label.Text,
+        label.Font,
+        new Size(Math.Max(1, label.ClientSize.Width), int.MaxValue),
+        TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+    Assert(
+        measured.Height <= label.ClientSize.Height + 1,
+        $"{context} must wrap without truncation: text='{label.Text}', measured={measured}, client={label.ClientSize}.");
 }
 
 static void AssertCaptureScaledLayout(AppSettings settings, float scale)

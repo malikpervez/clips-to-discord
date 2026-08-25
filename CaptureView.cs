@@ -24,6 +24,13 @@ internal sealed class CaptureView : UserControl
     private static readonly Color Green = Color.FromArgb(49, 177, 113);
     private static readonly Color Blue = Color.FromArgb(91, 147, 255);
     private static readonly Color Amber = Color.FromArgb(224, 151, 54);
+    private static readonly float[] EstimateValueFontSizes = [22f, 21f, 20f, 19.5f, 18f, 17f, 16f];
+    private const string CameraHelperFull = "Consent required · opens only while capturing.";
+    private const string CameraHelperCompact = "Consent + preview · capture only";
+    private const string LandscapeHelperFull = "Layout preference for Discord and YouTube";
+    private const string LandscapeHelperCompact = "For Discord and YouTube";
+    private const string PortraitHelperFull = "Layout preference for TikTok and Shorts";
+    private const string PortraitHelperCompact = "For TikTok and Shorts";
 
     private readonly AppSettings _externalSettings;
     private readonly bool _engineAvailable;
@@ -60,9 +67,15 @@ internal sealed class CaptureView : UserControl
     private readonly OutlineButton _editSilhouetteLayoutsButton;
     private RoundedPanel? _cameraPrivacyNote;
     private Control? _silhouetteOutputControls;
+    private TableLayoutPanel? _silhouetteOutputCaption;
+    private Label? _silhouetteOutputCaptionLabel;
+    private Label? _cameraToggleHelper;
+    private Label? _landscapeOutputHelper;
+    private Label? _portraitOutputHelper;
     private readonly CaptureFieldDisplay _libraryRootText;
     private readonly Label _estimateValue;
     private readonly Label _estimateRange;
+    private Label? _estimateMemoryLabel;
     private readonly Label _estimateMemoryValue;
     private readonly Label _estimateBitrateValue;
     private readonly Label _estimateAudioValue;
@@ -70,6 +83,7 @@ internal sealed class CaptureView : UserControl
     private bool _updating;
     private bool _cameraToggleBusy;
     private bool _silhouetteOutputGuardBusy;
+    private bool _responsiveTypographyQueued;
     private CaptureSettings _settings;
     private CaptureViewState _state;
 
@@ -207,6 +221,8 @@ internal sealed class CaptureView : UserControl
         _libraryRootText = CreateReadOnlyField("CaptureLibraryRootField", _settings.LibraryRoot, FigmaIconAsset.Folder);
         _libraryRootText.AccessibleName = "Capture library folder";
         _estimateValue = CreateLabel("CaptureEstimatedSizeValue", string.Empty, 22f, FontStyle.Bold, ClipCordTheme.TextPrimary);
+        SizeChanged += (_, _) => QueueResponsiveTypography();
+        _estimateValue.TextChanged += (_, _) => FitEstimateValueTypography();
         _estimateRange = CreateHelper(string.Empty);
         _estimateRange.Name = "CaptureEstimatedSizeRange";
         _estimateMemoryValue = CreateHelper(string.Empty);
@@ -463,6 +479,8 @@ internal sealed class CaptureView : UserControl
             _resolutionButtons.Add(resolution, button);
             resolutions.Controls.Add(button);
         }
+        resolutions.SizeChanged += (_, _) => FitResolutionButtons(resolutions);
+        FitResolutionButtons(resolutions);
         layout.Controls.Add(resolutions, 0, 1);
 
         var fps = new FlowLayoutPanel
@@ -500,8 +518,8 @@ internal sealed class CaptureView : UserControl
         var layout = CreateTable(1, 5, background);
         layout.Padding = ScaleUi(new Padding(2, 0, 2, 0));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(20)));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(35)));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(38)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(40)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(33)));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(1)));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var eyebrow = CreateLabel("CaptureEstimateEyebrow", "ESTIMATED CLIP SIZE", 7.5f, FontStyle.Bold, ClipCordTheme.TextTertiary);
@@ -514,7 +532,8 @@ internal sealed class CaptureView : UserControl
         details.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
         details.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
         for (var row = 0; row < 3; row++) details.RowStyles.Add(new RowStyle(SizeType.Percent, 33.333f));
-        details.Controls.Add(CreateHelper("Replay buffer memory"), 0, 0);
+        _estimateMemoryLabel = CreateHelper("Replay buffer memory");
+        details.Controls.Add(_estimateMemoryLabel, 0, 0);
         details.Controls.Add(CreateHelper("Video bitrate"), 0, 1);
         details.Controls.Add(CreateHelper("Clip audio"), 0, 2);
         foreach (var value in new[] { _estimateMemoryValue, _estimateBitrateValue, _estimateAudioValue })
@@ -594,9 +613,12 @@ internal sealed class CaptureView : UserControl
         cameraToggleRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         cameraToggleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         cameraToggleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleUi(50)));
-        cameraToggleRow.Controls.Add(CreateRowLabel(
+        var cameraToggleCopy = CreateRowLabel(
             "Include reaction camera",
-            "Consent required · opens only while capturing."), 0, 0);
+            CameraHelperFull,
+            out var cameraToggleHelper);
+        _cameraToggleHelper = cameraToggleHelper;
+        cameraToggleRow.Controls.Add(cameraToggleCopy, 0, 0);
         cameraToggleRow.Controls.Add(_cameraToggle, 1, 0);
         cameraLayout.Controls.Add(cameraToggleRow, 0, 1);
         var cameraDetailHost = new Panel
@@ -719,31 +741,33 @@ internal sealed class CaptureView : UserControl
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(32)));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(32)));
 
-        var caption = CreateTable(2, 1, background);
+        var caption = _silhouetteOutputCaption = CreateTable(2, 1, background);
         caption.Name = "CaptureSilhouetteOutputCaption";
         caption.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         caption.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
         caption.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
-        caption.Controls.Add(CreateLabel(
+        var captionLabel = _silhouetteOutputCaptionLabel = CreateLabel(
             "SilhouetteOutputCaption",
             "SILHOUETTE LAYOUTS",
             7.25f,
             FontStyle.Bold,
-            ClipCordTheme.TextTertiary), 0, 0);
+            ClipCordTheme.TextTertiary);
+        caption.Controls.Add(captionLabel, 0, 0);
         caption.Controls.Add(_silhouetteOutputSummary, 1, 0);
+        caption.SizeChanged += (_, _) => QueueResponsiveTypography();
         layout.Controls.Add(caption, 0, 0);
         layout.Controls.Add(BuildSilhouetteOutputRow(
             "CaptureLandscapeSilhouetteOutputRow",
             _landscapeSilhouetteToggle,
             FigmaIconAsset.Landscape,
             "Landscape · 16:9",
-            "Layout preference for Discord and YouTube"), 0, 1);
+            LandscapeHelperFull), 0, 1);
         layout.Controls.Add(BuildSilhouetteOutputRow(
             "CapturePortraitSilhouetteOutputRow",
             _portraitSilhouetteToggle,
             FigmaIconAsset.Portrait,
             "Portrait · 9:16",
-            "Layout preference for TikTok and Shorts"), 0, 2);
+            PortraitHelperFull), 0, 2);
         return layout;
     }
 
@@ -769,7 +793,10 @@ internal sealed class CaptureView : UserControl
             Anchor = AnchorStyles.Left,
             Margin = Padding.Empty
         }, 1, 0);
-        row.Controls.Add(CreateRowLabel(title, helper), 2, 0);
+        var copy = CreateRowLabel(title, helper, out var helperLabel);
+        if (name == "CaptureLandscapeSilhouetteOutputRow") _landscapeOutputHelper = helperLabel;
+        if (name == "CapturePortraitSilhouetteOutputRow") _portraitOutputHelper = helperLabel;
+        row.Controls.Add(copy, 2, 0);
         return row;
     }
 
@@ -1486,7 +1513,11 @@ internal sealed class CaptureView : UserControl
         if (_silhouetteOutputControls is not null)
         {
             _silhouetteOutputControls.Visible = cameraSelected;
-            if (_silhouetteOutputControls.Visible) _silhouetteOutputControls.BringToFront();
+            if (_silhouetteOutputControls.Visible)
+            {
+                _silhouetteOutputControls.BringToFront();
+                QueueResponsiveTypography();
+            }
         }
         _editSilhouetteLayoutsButton.Visible = cameraSelected;
         var silhouetteControlsEnabled = _engineAvailable &&
@@ -1633,12 +1664,131 @@ internal sealed class CaptureView : UserControl
         foreach (var (fps, button) in _fpsButtons) SetButtonSelected(button, fps == _settings.FramesPerSecond);
     }
 
+    private void FitResolutionButtons(FlowLayoutPanel choices)
+    {
+        if (choices.ClientSize.Width <= 0 ||
+            !_resolutionButtons.TryGetValue(CaptureResolution.FullHd1080p, out var recommended) ||
+            !_resolutionButtons.TryGetValue(CaptureResolution.QuadHd1440p, out var quadHd) ||
+            !_resolutionButtons.TryGetValue(CaptureResolution.UltraHd4K, out var ultraHd))
+        {
+            return;
+        }
+
+        var gap = ScaleUi(7);
+        var recommendedWidth = ScaleUi(154);
+        var unbadgedWidth = Math.Min(
+            ScaleUi(128),
+            Math.Max(1, (choices.ClientSize.Width - recommendedWidth - gap * 2) / 2));
+        recommended.Width = recommendedWidth;
+        recommended.Margin = new Padding(0, 0, gap, 0);
+        quadHd.Width = unbadgedWidth;
+        quadHd.Margin = new Padding(0, 0, gap, 0);
+        ultraHd.Width = unbadgedWidth;
+        ultraHd.Margin = Padding.Empty;
+    }
+
+    private void FitEstimateValueTypography()
+    {
+        if (_estimateValue.ClientSize.Width <= 0 ||
+            _estimateValue.ClientSize.Height <= 0 ||
+            string.IsNullOrWhiteSpace(_estimateValue.Text))
+        {
+            return;
+        }
+
+        const TextFormatFlags flags =
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+        Font? selectedFont = null;
+        foreach (var size in EstimateValueFontSizes)
+        {
+            var candidate = ClipCordTheme.InterfaceFont(size, FontStyle.Bold);
+            var measured = TextRenderer.MeasureText(_estimateValue.Text, candidate, Size.Empty, flags);
+            selectedFont = candidate;
+            if (measured.Width <= _estimateValue.ClientSize.Width &&
+                measured.Height <= _estimateValue.ClientSize.Height)
+            {
+                break;
+            }
+        }
+        if (selectedFont is not null && !ReferenceEquals(_estimateValue.Font, selectedFont))
+        {
+            _estimateValue.Font = selectedFont;
+        }
+    }
+
+    private void FitSilhouetteCaptionTypography()
+    {
+        var caption = _silhouetteOutputCaption;
+        var captionLabel = _silhouetteOutputCaptionLabel;
+        if (caption is null || caption.ClientSize.Width <= 0 || captionLabel is null) return;
+        var availableWidth = _silhouetteOutputControls?.Parent?.ClientSize.Width ?? caption.ClientSize.Width;
+        var compact = availableWidth > 0 && availableWidth < ScaleUi(240);
+        caption.ColumnStyles[0].Width = compact ? 48 : 55;
+        caption.ColumnStyles[1].Width = compact ? 52 : 45;
+        var font = ClipCordTheme.InterfaceFont(compact ? 6.75f : 7.25f, FontStyle.Bold);
+        if (!ReferenceEquals(captionLabel.Font, font)) captionLabel.Font = font;
+        if (!ReferenceEquals(_silhouetteOutputSummary.Font, font)) _silhouetteOutputSummary.Font = font;
+    }
+
+    private void UpdateResponsiveCopy(CaptureSizeEstimate? estimate = null)
+    {
+        var cameraWidth = _silhouetteOutputControls?.Parent?.ClientSize.Width ??
+                          _silhouetteOutputCaption?.ClientSize.Width ?? 0;
+        var compactCamera = cameraWidth > 0 && cameraWidth < ScaleUi(240);
+        if (_cameraToggleHelper is not null)
+        {
+            _cameraToggleHelper.Text = compactCamera ? CameraHelperCompact : CameraHelperFull;
+        }
+        if (_landscapeOutputHelper is not null)
+        {
+            _landscapeOutputHelper.Text = compactCamera ? LandscapeHelperCompact : LandscapeHelperFull;
+        }
+        if (_portraitOutputHelper is not null)
+        {
+            _portraitOutputHelper.Text = compactCamera ? PortraitHelperCompact : PortraitHelperFull;
+        }
+
+        estimate ??= CaptureProfileCatalog.Estimate(_settings.Profile, _settings.HasAudio);
+        var compactEstimate = _estimateRange.ClientSize.Width > 0 &&
+                              _estimateRange.ClientSize.Width < ScaleUi(220);
+        if (_estimateMemoryLabel is not null)
+        {
+            _estimateMemoryLabel.Text = compactEstimate ? "Replay memory" : "Replay buffer memory";
+        }
+        _estimateRange.Text = compactEstimate
+            ? $"Usually {FormatMegabytes(estimate.LowerBoundBytes)}–{FormatMegabytes(estimate.UpperBoundBytes)} MB · " +
+              $"{FormatDuration(_settings.ReplaySeconds)}. Motion/detail affect size."
+            : $"Usually {FormatMegabytes(estimate.LowerBoundBytes)}–{FormatMegabytes(estimate.UpperBoundBytes)} MB for a " +
+              $"{FormatDuration(_settings.ReplaySeconds)} clip. Motion and detail affect the final size.";
+    }
+
+    private void QueueResponsiveTypography()
+    {
+        if (_responsiveTypographyQueued || !IsHandleCreated || IsDisposed || Disposing) return;
+        _responsiveTypographyQueued = true;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                _responsiveTypographyQueued = false;
+                if (IsDisposed || Disposing) return;
+                FitEstimateValueTypography();
+                FitSilhouetteCaptionTypography();
+                UpdateResponsiveCopy();
+            }));
+        }
+        catch (InvalidOperationException)
+        {
+            _responsiveTypographyQueued = false;
+        }
+    }
+
     private void UpdateEstimate()
     {
         var estimate = CaptureProfileCatalog.Estimate(_settings.Profile, _settings.HasAudio);
         _estimateValue.Text = $"about {FormatMegabytes(estimate.ExpectedBytes)} MB";
-        _estimateRange.Text =
-            $"Usually {FormatMegabytes(estimate.LowerBoundBytes)}–{FormatMegabytes(estimate.UpperBoundBytes)} MB for a {FormatDuration(_settings.ReplaySeconds)} clip. Motion and detail affect the final size.";
+        UpdateResponsiveCopy(estimate);
+        FitEstimateValueTypography();
         _estimateMemoryValue.Text =
             $"about {FormatMegabytes(ReplayMemoryPolicy.GetEstimatedResidentBytes(_settings))} MB";
         _estimateBitrateValue.Text = $"{estimate.VideoBitrateKbps / 1000d:0.#} Mbps";
@@ -1692,15 +1842,25 @@ internal sealed class CaptureView : UserControl
         AccessibleRole = AccessibleRole.Grouping
     };
 
-    private static BufferedTableLayoutPanel CreateTable(int columns, int rows, Color background) => new()
+    private static BufferedTableLayoutPanel CreateTable(int columns, int rows, Color background)
     {
-        Dock = DockStyle.Fill,
-        ColumnCount = columns,
-        RowCount = rows,
-        Margin = Padding.Empty,
-        Padding = Padding.Empty,
-        BackColor = background
-    };
+        var table = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = columns,
+            RowCount = rows,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = background
+        };
+        if (columns == 1)
+        {
+            // An implicit TableLayoutPanel column can retain a wider pre-layout width when its
+            // parent contracts. Make single-column content follow the available card width.
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        }
+        return table;
+    }
 
     private ToggleSwitch CreateToggle(string name, string text) => new()
     {
@@ -1792,13 +1952,17 @@ internal sealed class CaptureView : UserControl
         UseMnemonic = false
     };
 
-    private static Control CreateRowLabel(string title, string helper)
+    private static Control CreateRowLabel(string title, string helper) =>
+        CreateRowLabel(title, helper, out _);
+
+    private static Control CreateRowLabel(string title, string helper, out Label helperLabel)
     {
         var layout = CreateTable(1, 2, ClipCordTheme.SettingsCard);
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 52));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 48));
         layout.Controls.Add(CreateLabel(string.Empty, title, 8.75f, FontStyle.Regular, ClipCordTheme.TextPrimary), 0, 0);
-        layout.Controls.Add(CreateLabel(string.Empty, helper, 7.5f, FontStyle.Regular, ClipCordTheme.TextTertiary), 0, 1);
+        helperLabel = CreateLabel(string.Empty, helper, 7.5f, FontStyle.Regular, ClipCordTheme.TextTertiary);
+        layout.Controls.Add(helperLabel, 0, 1);
         return layout;
     }
 
