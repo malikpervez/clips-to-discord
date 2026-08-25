@@ -4634,6 +4634,26 @@ static void AssertCaptureLayout(SettingsForm form, float? expectedScale = null)
         .Single(button => button.Name == "CaptureResolutionFullHd1080pButton");
     Assert(recommended.SecondaryText == "1920×1080" && recommended.SecondaryBadgeText == "Recommended",
         "The approved 1080p option must retain its resolution and Recommended treatment.");
+    var resolutionChoices = EnumerateControls(capture)
+        .OfType<FlowLayoutPanel>()
+        .Single(control => control.Name == "CaptureResolutionChoices");
+    var resolutionButtons = new[]
+    {
+        "CaptureResolutionFullHd1080pButton",
+        "CaptureResolutionQuadHd1440pButton",
+        "CaptureResolutionUltraHd4KButton"
+    }
+        .Select(name => EnumerateControls(resolutionChoices)
+            .OfType<OutlineButton>()
+            .Single(button => button.Name == name))
+        .ToArray();
+    var requiredResolutionWidth = resolutionButtons.Sum(button => button.Width + button.Margin.Horizontal);
+    Assert(
+        requiredResolutionWidth / dpiScale <= 426 + 1 &&
+        resolutionButtons.All(button => button.Left >= 0 && button.Right <= resolutionChoices.ClientSize.Width + 1),
+        $"Capture resolution choices must fit the supported 426px logical split-card viewport: " +
+        $"required={requiredResolutionWidth / dpiScale:F1}, host={resolutionChoices.ClientSize.Width / dpiScale:F1}, " +
+        $"buttons={string.Join(", ", resolutionButtons.Select(button => $"{button.Name}:{button.Bounds}"))}.");
     Assert(EnumerateControls(capture).Any(control => control.Name == "CaptureEstimateDetails"),
         "The Capture estimate must use a real two-column details grid instead of proportional-font space padding.");
 }

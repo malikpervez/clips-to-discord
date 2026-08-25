@@ -441,16 +441,24 @@ internal sealed class CaptureView : UserControl
         foreach (var resolution in Enum.GetValues<CaptureResolution>())
         {
             var dimensions = CaptureProfileCatalog.GetDimensions(resolution);
+            // Keep the Recommended option wide enough for its badge while the two
+            // unbadged options use the narrower Figma treatment. Together with the
+            // two inter-option gaps this is 424 logical pixels, so the complete row
+            // also fits when Windows constrains the 1200px window to its supported
+            // 960px minimum viewport.
+            var buttonWidth = resolution == CaptureResolution.FullHd1080p ? 154 : 128;
             var button = CreateButton(
                 CaptureProfileCatalog.GetDisplayName(resolution),
                 $"CaptureResolution{resolution}Button",
-                154);
+                buttonWidth);
             button.SecondaryText = $"{dimensions.Width}×{dimensions.Height}";
             button.SecondaryBadgeText = resolution == CaptureResolution.FullHd1080p ? "Recommended" : string.Empty;
             button.AccessibleName = $"{CaptureProfileCatalog.GetDisplayName(resolution)}, {dimensions.Width} by {dimensions.Height}" +
                                     (resolution == CaptureResolution.FullHd1080p ? ", recommended" : string.Empty);
             button.Height = ScaleUi(42);
-            button.Margin = ScaleUi(new Padding(0, 0, 7, 0));
+            button.Margin = resolution == CaptureResolution.UltraHd4K
+                ? Padding.Empty
+                : ScaleUi(new Padding(0, 0, 7, 0));
             button.Click += (_, _) => UpdateConfiguration(_settings with { Resolution = resolution });
             _resolutionButtons.Add(resolution, button);
             resolutions.Controls.Add(button);
