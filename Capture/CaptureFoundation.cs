@@ -133,4 +133,11 @@ internal static class CaptureOutputPolicy
 
         throw new IOException("ClipCord could not reserve a unique recording file name.");
     }
+
+    internal static void MoveCompletedFile(string completedPath, string finalPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(completedPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(finalPath);
+        File.Move(completedPath, finalPath, overwrite: false);
+    }
 }

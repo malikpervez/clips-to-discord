@@ -130,7 +130,35 @@ internal static partial class FfmpegCompressor
             throw new InvalidOperationException("The clip duration is invalid.");
         }
 
-        return new MediaProbe(duration, AudioStreamPattern().Matches(ffmpegOutput!).Count);
+        var video = VideoStreamPattern().Match(ffmpegOutput!);
+        var width = 0;
+        var height = 0;
+        var framesPerSecond = 0d;
+        if (video.Success)
+        {
+            _ = int.TryParse(
+                video.Groups[1].Value,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out width);
+            _ = int.TryParse(
+                video.Groups[2].Value,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out height);
+            _ = double.TryParse(
+                video.Groups[3].Value,
+                NumberStyles.AllowDecimalPoint,
+                CultureInfo.InvariantCulture,
+                out framesPerSecond);
+        }
+
+        return new MediaProbe(
+            duration,
+            AudioStreamPattern().Matches(ffmpegOutput!).Count,
+            width,
+            height,
+            framesPerSecond);
     }
 
     /// <summary>
@@ -351,15 +379,17 @@ internal static partial class FfmpegCompressor
             await standardError);
         if (!allowFailure && result.ExitCode != 0)
         {
+            Log.Error(
+                MediaToolDiagnosticSanitizer.BuildFfmpegFailureMessage(
+                    MediaToolOperation.General,
+                    result.ExitCode,
+                    result.StandardError));
             throw new InvalidOperationException(
-                $"FFmpeg exited with code {result.ExitCode}. {LastUsefulLine(result.StandardError)}");
+                "ClipCord's local media processor could not complete the requested operation.");
         }
 
         return result;
     }
-
-    private static string LastUsefulLine(string value) =>
-        value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? string.Empty;
 
     private static void TryDelete(string path)
     {
@@ -373,9 +403,19 @@ internal static partial class FfmpegCompressor
     [GeneratedRegex(@"Stream #0:\d+[^\r\n]*?:\s*Audio:", RegexOptions.CultureInvariant)]
     private static partial Regex AudioStreamPattern();
 
+    [GeneratedRegex(
+        @"Stream #0:\d+[^\r\n]*?:\s*Video:[^\r\n]*?,\s*(\d{2,5})x(\d{2,5})(?:\s|\[)[^\r\n]*?,\s*(\d+(?:\.\d+)?)\s+fps\b",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex VideoStreamPattern();
+
     internal sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 
-    internal sealed record MediaProbe(TimeSpan Duration, int AudioStreamCount);
+    internal sealed record MediaProbe(
+        TimeSpan Duration,
+        int AudioStreamCount,
+        int VideoWidth = 0,
+        int VideoHeight = 0,
+        double VideoFramesPerSecond = 0);
 }
 
 internal sealed class CompressionTargetUnachievableException(string message, Exception? innerException = null)

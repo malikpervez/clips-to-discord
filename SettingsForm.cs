@@ -11,17 +11,22 @@ internal enum SettingsPage
     Settings,
     Activity,
     Capture,
+    SilhouetteLayouts,
     Gallery,
     About
 }
 
 internal sealed class SettingsForm : Form
 {
+    internal event EventHandler<GalleryRenditionRetryRequestedEventArgs>?
+        GalleryRenditionRetryRequested;
+
     internal static readonly Size DesignedClientSize = new(1200, 760);
     internal static readonly Size SettingsDesignedClientSize = DesignedClientSize;
     internal static readonly Size ActivityDesignedClientSize = DesignedClientSize;
     internal static readonly Size GalleryDesignedClientSize = DesignedClientSize;
     internal static readonly Size CaptureDesignedClientSize = DesignedClientSize;
+    internal static readonly Size SilhouetteLayoutsDesignedClientSize = DesignedClientSize;
     internal static readonly Size AboutDesignedClientSize = DesignedClientSize;
     internal static readonly Size HomeDesignedClientSize = DesignedClientSize;
     internal static readonly Size MinimumDesignedClientSize = new(960, 620);
@@ -111,6 +116,7 @@ internal sealed class SettingsForm : Form
         ForeColor = ClipCordTheme.TextTertiary,
         Font = ClipCordTheme.InterfaceFont(9f),
         TextAlign = ContentAlignment.TopLeft,
+        AutoEllipsis = true,
         UseMnemonic = false,
         Margin = Padding.Empty
     };
@@ -225,6 +231,8 @@ internal sealed class SettingsForm : Form
     private readonly CaptureSettings _initialCaptureSettings;
     private readonly bool _captureEngineAvailable;
     private readonly Action<CaptureSettings>? _saveCaptureSettings;
+    private readonly IManualCaptureRecorder? _manualCaptureRecorder;
+    private readonly string _silhouetteSettingsDirectory;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _homeNavigationItem;
     private RoundedPanel? _activityNavigationItem;
@@ -241,6 +249,7 @@ internal sealed class SettingsForm : Form
     private BrandedScrollHost? _settingsScrollHost;
     private ActivityView? _activityPage;
     private CaptureView? _capturePage;
+    private SilhouetteLayoutEditorView? _silhouetteLayoutsPage;
     private GalleryView? _galleryPage;
     private AboutView? _aboutPage;
     private bool _busy;
@@ -269,7 +278,9 @@ internal sealed class SettingsForm : Form
         IFavoritesService? favorites = null,
         CaptureSettings? captureSettings = null,
         bool captureEngineAvailable = false,
-        Action<CaptureSettings>? saveCaptureSettings = null)
+        Action<CaptureSettings>? saveCaptureSettings = null,
+        IManualCaptureRecorder? manualCaptureRecorder = null,
+        string? silhouetteSettingsDirectory = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -285,6 +296,9 @@ internal sealed class SettingsForm : Form
         _initialCaptureSettings = CaptureSettings.Normalize(captureSettings);
         _captureEngineAvailable = captureEngineAvailable;
         _saveCaptureSettings = saveCaptureSettings;
+        _manualCaptureRecorder = manualCaptureRecorder;
+        _silhouetteSettingsDirectory = Path.GetFullPath(
+            silhouetteSettingsDirectory ?? SettingsStore.DataDirectory);
         _ownsActivityHistory = activityHistory is null;
         _openingPage = initialPage;
         if (_ownedApplicationIcon is not null) Icon = _ownedApplicationIcon;
@@ -518,7 +532,15 @@ internal sealed class SettingsForm : Form
             _appliedSettings,
             _initialCaptureSettings,
             _captureEngineAvailable,
-            _saveCaptureSettings);
+            _saveCaptureSettings,
+            _manualCaptureRecorder);
+        _silhouetteLayoutsPage = new SilhouetteLayoutEditorView(
+            _silhouetteSettingsDirectory,
+            mirrorCameraDefault: true);
+        _silhouetteLayoutsPage.SetEmbeddedHeaderVisible(false);
+        _silhouetteLayoutsPage.BackRequested += (_, _) => ShowPage(SettingsPage.Capture);
+        _capturePage.EditSilhouetteLayoutsRequested += (_, _) =>
+            ShowPage(SettingsPage.SilhouetteLayouts);
         _galleryPage = new GalleryView(
             _folderText.Text,
             _manualClipEditService,
@@ -537,6 +559,7 @@ internal sealed class SettingsForm : Form
             _pageSubtitleLabel.Text = subtitle;
         };
         _galleryPage.OperationBusyChanged += GalleryOperationBusyChanged;
+        _galleryPage.RenditionRetryRequested += GalleryRenditionRetryRequestedFromView;
         _aboutPage = new AboutView(_appliedSettings, _watcherStatusProvider);
         _aboutPage.CheckUpdatesRequested += CheckUpdatesClicked;
         _aboutPage.SetBusy(false, _checkForUpdatesAsync is not null);
@@ -545,6 +568,7 @@ internal sealed class SettingsForm : Form
         pageHost.Controls.Add(_settingsPage);
         pageHost.Controls.Add(_activityPage);
         pageHost.Controls.Add(_capturePage);
+        pageHost.Controls.Add(_silhouetteLayoutsPage);
         pageHost.Controls.Add(_galleryPage);
         pageHost.Controls.Add(_aboutPage);
         return pageHost;
@@ -862,9 +886,16 @@ internal sealed class SettingsForm : Form
         ShowPage(SettingsPage.Settings);
     }
 
+    internal void ApplyExternalCaptureSettings(CaptureSettings settings) =>
+        _capturePage?.ApplyExternalSettings(settings);
+
     internal void ShowPage(SettingsPage page)
     {
-        if (_settingsPage is null || _activityPage is null || _capturePage is null || _galleryPage is null || _aboutPage is null) return;
+        if (_settingsPage is null || _activityPage is null || _capturePage is null ||
+            _silhouetteLayoutsPage is null || _galleryPage is null || _aboutPage is null)
+        {
+            return;
+        }
         if (_galleryBusy && page != SettingsPage.Gallery) return;
 
         _currentPage = page;
@@ -872,12 +903,14 @@ internal sealed class SettingsForm : Form
         var showSettings = page == SettingsPage.Settings;
         var showActivity = page == SettingsPage.Activity;
         var showCapture = page == SettingsPage.Capture;
+        var showSilhouetteLayouts = page == SettingsPage.SilhouetteLayouts;
         var showGallery = page == SettingsPage.Gallery;
         var showAbout = page == SettingsPage.About;
         if (_homePage is not null) _homePage.Visible = showHome;
         _settingsPage.Visible = showSettings;
         _activityPage.Visible = showActivity;
         _capturePage.Visible = showCapture;
+        _silhouetteLayoutsPage.Visible = showSilhouetteLayouts;
         _galleryPage.Visible = showGallery;
         _aboutPage.Visible = showAbout;
         if (showHome)
@@ -909,6 +942,13 @@ internal sealed class SettingsForm : Form
             _capturePage.BringToFront();
             _capturePage.RefreshViewport();
         }
+        else if (showSilhouetteLayouts)
+        {
+            _homePage?.DeactivateView();
+            _galleryPage.Deactivate();
+            _silhouetteLayoutsPage.BringToFront();
+            _silhouetteLayoutsPage.RefreshViewport();
+        }
         else if (showGallery)
         {
             _homePage?.DeactivateView();
@@ -927,7 +967,7 @@ internal sealed class SettingsForm : Form
         UpdateNavigationSelection(_homeNavigationItem, showHome);
         UpdateNavigationSelection(_settingsNavigationItem, showSettings);
         UpdateNavigationSelection(_activityNavigationItem, showActivity);
-        UpdateNavigationSelection(_captureNavigationItem, showCapture);
+        UpdateNavigationSelection(_captureNavigationItem, showCapture || showSilhouetteLayouts);
         UpdateNavigationSelection(_galleryNavigationItem, showGallery);
         UpdateNavigationSelection(_aboutNavigationItem, showAbout);
         UpdatePageHeaderAction(page);
@@ -937,6 +977,7 @@ internal sealed class SettingsForm : Form
             SettingsPage.Home => "ClipCord — Home",
             SettingsPage.Activity => "ClipCord — Activity",
             SettingsPage.Capture => "ClipCord — Capture",
+            SettingsPage.SilhouetteLayouts => "ClipCord — Silhouette layouts",
             SettingsPage.Gallery => "ClipCord — Gallery",
             SettingsPage.About => "ClipCord — About",
             _ => "ClipCord — Settings"
@@ -947,6 +988,9 @@ internal sealed class SettingsForm : Form
             SettingsPage.Settings => ("Settings", "Where clips come from, and where they go"),
             SettingsPage.Activity => ("Activity", "Recent clip activity stored on this PC"),
             SettingsPage.Capture => ("Capture", "Save the last minutes of gameplay locally, encoded on your GPU"),
+            SettingsPage.SilhouetteLayouts => (
+                "Silhouette layouts",
+                "Reusable defaults · every capture with the reaction camera on uses these layouts"),
             SettingsPage.Gallery => ("Gallery", "Uploaded and local-only archives, organised by game"),
             SettingsPage.About => ("About", "What ClipCord is, what it keeps, and who made it"),
             _ => ("ClipCord", string.Empty)
@@ -960,6 +1004,7 @@ internal sealed class SettingsForm : Form
         var aboutAction = _aboutPage.UpdateActionButton;
         var galleryAction = _galleryPage?.HeaderActions;
         var captureAction = _capturePage?.HeaderStatusPill;
+        var silhouetteBackAction = _silhouetteLayoutsPage?.HeaderBackButton;
         var useSharedGalleryHeader = page == SettingsPage.Gallery &&
                                      ClientSize.Width >= ScaleLogical(1050);
         var action = page switch
@@ -967,10 +1012,18 @@ internal sealed class SettingsForm : Form
             SettingsPage.Home => homeAction,
             SettingsPage.About => aboutAction,
             SettingsPage.Capture => captureAction,
+            SettingsPage.SilhouetteLayouts => silhouetteBackAction,
             SettingsPage.Gallery when useSharedGalleryHeader => galleryAction,
             _ => null
         };
-        foreach (var candidate in new[] { homeAction, aboutAction, galleryAction, captureAction })
+        foreach (var candidate in new[]
+                 {
+                     homeAction,
+                     aboutAction,
+                     galleryAction,
+                     captureAction,
+                     silhouetteBackAction
+                 })
         {
             if (candidate is not null && ReferenceEquals(candidate.Parent, _pageActionHost) &&
                 !ReferenceEquals(candidate, action))
@@ -996,10 +1049,12 @@ internal sealed class SettingsForm : Form
             var logicalWidth = page switch
             {
                 SettingsPage.Home => 158,
-                SettingsPage.Capture => 118,
+                SettingsPage.Capture => 190,
+                SettingsPage.SilhouetteLayouts => 152,
                 _ => 164
             };
-            action.Size = new Size(ScaleLogical(logicalWidth), ScaleLogical(34));
+            var logicalHeight = page == SettingsPage.Capture ? 25 : 34;
+            action.Size = new Size(ScaleLogical(logicalWidth), ScaleLogical(logicalHeight));
         }
         action.Margin = Padding.Empty;
         if (!ReferenceEquals(action.Parent, _pageActionHost)) _pageActionHost.Controls.Add(action);
@@ -1911,7 +1966,21 @@ internal sealed class SettingsForm : Form
             SelectedPath = Directory.Exists(_folderText.Text) ? _folderText.Text : string.Empty,
             ShowNewFolderButton = false
         };
-        if (dialog.ShowDialog(this) == DialogResult.OK) _folderText.Text = dialog.SelectedPath;
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var candidate = Path.GetFullPath(dialog.SelectedPath);
+        var captureLibrary = _capturePage?.CurrentSettings.LibraryRoot ??
+            _initialCaptureSettings.LibraryRoot;
+        if (!CanUseWatchedFolder(candidate, captureLibrary))
+        {
+            MessageBox.Show(
+                this,
+                "Choose a watched folder outside the ClipCord Capture library. Keeping them separate prevents ClipCord from importing its own recordings.",
+                "Folders must stay separate",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+        _folderText.Text = candidate;
     }
 
     private async void TestClicked(object? sender, EventArgs eventArgs)
@@ -2092,6 +2161,19 @@ internal sealed class SettingsForm : Form
             return false;
         }
 
+        var captureLibrary = _capturePage?.CurrentSettings.LibraryRoot ??
+            _initialCaptureSettings.LibraryRoot;
+        if (!CanUseWatchedFolder(settings.ClipsFolder, captureLibrary))
+        {
+            MessageBox.Show(
+                this,
+                "Choose a watched folder outside the ClipCord Capture library. Keeping them separate prevents ClipCord from importing its own recordings.",
+                "Folders must stay separate",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return false;
+        }
+
         if (_uploadToDiscord.Checked && !WebhookValidation.IsDiscordWebhook(settings.WebhookUrl))
         {
             MessageBox.Show(this, "Enter a valid HTTPS Discord webhook URL.", "Invalid webhook", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -2100,6 +2182,9 @@ internal sealed class SettingsForm : Form
 
         return true;
     }
+
+    internal static bool CanUseWatchedFolder(string watchedFolder, string captureLibraryRoot) =>
+        !CapturePathPolicy.PathsOverlap(watchedFolder, captureLibraryRoot);
 
     private void UpdateUploadModeText()
     {
@@ -2304,6 +2389,11 @@ internal sealed class SettingsForm : Form
         UpdateSaveBarVisibility();
     }
 
+    private void GalleryRenditionRetryRequestedFromView(
+        object? sender,
+        GalleryRenditionRetryRequestedEventArgs eventArgs) =>
+        GalleryRenditionRetryRequested?.Invoke(this, eventArgs);
+
     private void FormClosingWhileBusy(object? sender, FormClosingEventArgs eventArgs)
     {
         if ((_busy || _galleryBusy) && eventArgs.CloseReason == CloseReason.UserClosing) eventArgs.Cancel = true;
@@ -2376,6 +2466,12 @@ internal sealed class SettingsForm : Form
 
     protected override bool ProcessDialogKey(Keys keyData)
     {
+        if (keyData == Keys.Escape && _currentPage == SettingsPage.SilhouetteLayouts &&
+            !_busy && !_galleryBusy)
+        {
+            ShowPage(SettingsPage.Capture);
+            return true;
+        }
         if (keyData == Keys.Escape && _galleryPage is { Visible: true } &&
             _galleryPage.HandleEscape())
         {
@@ -2412,6 +2508,7 @@ internal sealed class SettingsForm : Form
         SettingsPage.Home => HomeDesignedClientSize,
         SettingsPage.Activity => ActivityDesignedClientSize,
         SettingsPage.Capture => CaptureDesignedClientSize,
+        SettingsPage.SilhouetteLayouts => SilhouetteLayoutsDesignedClientSize,
         SettingsPage.Gallery => GalleryDesignedClientSize,
         SettingsPage.About => AboutDesignedClientSize,
         _ => SettingsDesignedClientSize
@@ -2547,6 +2644,11 @@ internal sealed class SettingsForm : Form
     {
         if (disposing)
         {
+            if (_galleryPage is not null)
+            {
+                _galleryPage.RenditionRetryRequested -= GalleryRenditionRetryRequestedFromView;
+            }
+            GalleryRenditionRetryRequested = null;
             _watcherStatusTimer.Stop();
             _watcherStatusTimer.Dispose();
             _compressionTargetMenu.Dispose();

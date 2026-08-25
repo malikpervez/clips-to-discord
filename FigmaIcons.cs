@@ -38,7 +38,19 @@ internal enum FigmaIconAsset
     Mic,
     Headset,
     Camera,
-    Disk
+    Disk,
+    Landscape,
+    Portrait,
+    Silhouette,
+    Mirror,
+    Move,
+    Crop,
+    Layers,
+    Mute,
+    SafeZone,
+    ChevronLeft,
+    Alert,
+    Discord
 }
 
 internal static class FigmaIconRenderer
@@ -148,6 +160,7 @@ internal static class FigmaIconRenderer
         var fileName = asset switch
         {
             FigmaIconAsset.ArrowRight => "arrow-right",
+            FigmaIconAsset.ChevronLeft => "chevron-left",
             FigmaIconAsset.ChevronRight => "chevron-right",
             _ => asset.ToString().ToLowerInvariant()
         };

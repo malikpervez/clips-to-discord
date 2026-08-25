@@ -18,12 +18,24 @@ internal sealed record CaptureSettings(
     string CameraDevice,
     string LibraryRoot)
 {
+    internal const bool ReactionCameraAvailable = true;
     internal const string DefaultSaveHotkey = "Ctrl + Alt + S";
     internal const string DefaultOutputDevice = "Default output device";
     internal const string DefaultMicrophoneDevice = "Default microphone";
     internal const string DefaultVoiceChatDevice = "Default communications device";
     internal const string DefaultCameraDevice = "Default camera";
     internal static IReadOnlyList<int> ReplayDurationChoices { get; } = [15, 30, 60, 120, 300];
+
+    // These are additive JSON properties so existing 2.0 preview settings continue to load.
+    // The stable device id drives capture; CameraDevice remains the human-readable label.
+    public string CameraDeviceId { get; init; } = string.Empty;
+    public bool ReactionCameraConsentGranted { get; init; }
+    public bool SilhouetteLandscapeEnabled { get; init; } = true;
+    public bool SilhouettePortraitEnabled { get; init; }
+    // Resolved by the UI process at capture start and carried across the capture-host
+    // boundary. The worker must never reread mutable global layout defaults while a clip
+    // is recording or finalizing.
+    public SilhouettePreferencesDocument? SilhouettePreferencesSnapshot { get; init; }
 
     internal static CaptureSettings Default => new(
         InstantReplayEnabled: false,
@@ -72,6 +84,11 @@ internal sealed record CaptureSettings(
         var replaySeconds = ReplayDurationChoices.Contains(value.ReplaySeconds)
             ? value.ReplaySeconds
             : defaults.ReplaySeconds;
+        var landscapeEnabled = value.SilhouetteLandscapeEnabled;
+        var portraitEnabled = value.SilhouettePortraitEnabled;
+        // Reaction Camera always has at least one automatic composition target. Restoring
+        // Landscape is deterministic and matches the existing Local/Discord capture flow.
+        if (!landscapeEnabled && !portraitEnabled) landscapeEnabled = true;
         return value with
         {
             Resolution = resolution,
@@ -81,7 +98,13 @@ internal sealed record CaptureSettings(
             GameAudioDevice = NormalizeDevice(value.GameAudioDevice, DefaultOutputDevice),
             MicrophoneDevice = NormalizeDevice(value.MicrophoneDevice, DefaultMicrophoneDevice),
             VoiceChatDevice = NormalizeDevice(value.VoiceChatDevice, DefaultVoiceChatDevice),
+            IncludeReactionCamera = value.ReactionCameraConsentGranted && value.IncludeReactionCamera,
             CameraDevice = NormalizeDevice(value.CameraDevice, DefaultCameraDevice),
+            CameraDeviceId = value.CameraDeviceId?.Trim() ?? string.Empty,
+            SilhouetteLandscapeEnabled = landscapeEnabled,
+            SilhouettePortraitEnabled = portraitEnabled,
+            SilhouettePreferencesSnapshot = NormalizeSilhouettePreferences(
+                value.SilhouettePreferencesSnapshot),
             LibraryRoot = NormalizeLibraryRoot(value.LibraryRoot)
         };
     }
@@ -96,6 +119,23 @@ internal sealed record CaptureSettings(
 
     private static string NormalizeDevice(string? value, string fallback) =>
         string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+    private static SilhouettePreferencesDocument? NormalizeSilhouettePreferences(
+        SilhouettePreferencesDocument? value)
+    {
+        if (value is null) return null;
+        try
+        {
+            // Camera preview/capture is mirrored by default today. A saved transform keeps
+            // its explicit mirror flag; this value only supplies deterministic fallbacks for
+            // a partially populated additive settings payload.
+            return SilhouettePreferencesModel.Normalize(value, mirrorCamera: true);
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
 
     private static string NormalizeLibraryRoot(string? value)
     {
@@ -152,8 +192,10 @@ internal static class CaptureSettingsStore
         try
         {
             if (!File.Exists(SettingsPath)) return CaptureSettings.Default;
-            return CaptureSettings.Normalize(
-                JsonSerializer.Deserialize<CaptureSettings>(File.ReadAllText(SettingsPath), JsonOptions));
+            return PrepareForPersistence(
+                JsonSerializer.Deserialize<CaptureSettings>(
+                    File.ReadAllText(SettingsPath),
+                    JsonOptions) ?? CaptureSettings.Default);
         }
         catch (Exception exception)
         {
@@ -165,10 +207,18 @@ internal static class CaptureSettingsStore
     internal static void Save(CaptureSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        var normalized = CaptureSettings.Normalize(settings);
+        var normalized = PrepareForPersistence(settings);
         Directory.CreateDirectory(SettingsStore.DataDirectory);
         var temporaryPath = SettingsPath + ".tmp";
         File.WriteAllText(temporaryPath, JsonSerializer.Serialize(normalized, JsonOptions));
         File.Move(temporaryPath, SettingsPath, overwrite: true);
     }
+
+    /// <summary>
+    /// A silhouette snapshot is a capture-command payload, not a durable preference. Persisting
+    /// it here would let an old capture-settings file override newer atomic layout defaults at
+    /// the next recording start.
+    /// </summary>
+    internal static CaptureSettings PrepareForPersistence(CaptureSettings settings) =>
+        CaptureSettings.Normalize(settings) with { SilhouettePreferencesSnapshot = null };
 }

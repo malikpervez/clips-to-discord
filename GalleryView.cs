@@ -7,6 +7,7 @@ internal sealed class GalleryView : UserControl
 {
     private readonly ToolTip _toolTip = new() { ShowAlways = true };
     private readonly SynchronizationContext _uiContext;
+    private readonly System.Windows.Forms.Timer _renditionRefreshTimer;
     private readonly Label _headingLabel;
     private readonly Label _summaryLabel;
     private readonly OutlineButton _backButton;
@@ -35,6 +36,7 @@ internal sealed class GalleryView : UserControl
     private readonly IClipPlaybackPreparer _playbackPreparer;
     private readonly IGalleryThumbnailProvider _thumbnailProvider;
     private readonly IFavoritesService _favorites;
+    private int? _effectiveDpiForTests;
     private string? _captureLibraryRoot;
     private readonly GalleryClipSource _externalClipSource;
     private readonly Dictionary<GalleryThumbnailTile, GalleryClipEntry> _thumbnailClips = [];
@@ -51,21 +53,35 @@ internal sealed class GalleryView : UserControl
     private bool _sortNewestFirst = true;
     private LocalClipEditorView? _editor;
     private ClipPlayerView? _player;
+    private Control? _playerContent;
     private GalleryClipEntry? _playerClip;
     private CancellationTokenSource? _playbackPrewarmCancellation;
     private string? _playbackPrewarmPath;
     private GalleryScreen _screen;
     private bool _active;
+    private bool _scanInProgress;
+    private bool _renditionRetrySawActiveWork;
+    private int _renditionRetryGracePolls;
     private bool _disposed;
 
     internal event Action<bool>? OperationBusyChanged;
     internal event Action<string, string>? HeaderChanged;
+    internal event EventHandler<GalleryRenditionRetryRequestedEventArgs>? RenditionRetryRequested;
     internal Control HeaderActions => _headerActions;
 
     internal void SetCaptureLibraryRoot(string? root)
     {
         _captureLibraryRoot = root;
         if (_active) RefreshCatalog(_clipsFolder);
+    }
+
+    internal void SetEffectiveDpiForTests(int effectiveDpi)
+    {
+        if (effectiveDpi <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(effectiveDpi));
+        }
+        _effectiveDpiForTests = effectiveDpi;
     }
 
     internal GalleryView(
@@ -89,6 +105,8 @@ internal sealed class GalleryView : UserControl
             ? GalleryClipSource.Nvidia
             : GalleryClipSource.SteelSeriesGg;
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        _renditionRefreshTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _renditionRefreshTimer.Tick += RenditionRefreshTimerTick;
         _favorites.Changed += FavoritesChanged;
         Name = "GalleryView";
         Dock = DockStyle.Fill;
@@ -483,6 +501,7 @@ internal sealed class GalleryView : UserControl
         _scanCancellation?.Dispose();
         var cancellation = new CancellationTokenSource();
         _scanCancellation = cancellation;
+        _scanInProgress = true;
         _refreshButton.Enabled = false;
         SetHeader(_headingLabel.Text, "Scanning uploaded and local-only clips…");
         GallerySnapshot? snapshot = null;
@@ -515,6 +534,7 @@ internal sealed class GalleryView : UserControl
     {
         if (_disposed || IsDisposed || Disposing || !_active || cancellation.IsCancellationRequested ||
             !ReferenceEquals(_scanCancellation, cancellation)) return;
+        _scanInProgress = false;
         _refreshButton.Enabled = true;
         if (failure is not null)
         {
@@ -522,7 +542,8 @@ internal sealed class GalleryView : UserControl
             snapshot = new GallerySnapshot([], ["ClipCord could not read the clip archive."]);
         }
         _snapshot = snapshot ?? new GallerySnapshot([], []);
-        if (_screen == GalleryScreen.Editor)
+        ObserveRenditionPollResult();
+        if (_screen is GalleryScreen.Editor or GalleryScreen.Player)
         {
             _refreshButton.Enabled = false;
             var currentName = _selectedGame?.Name;
@@ -531,6 +552,7 @@ internal sealed class GalleryView : UserControl
                 : _snapshot.Games.FirstOrDefault(game =>
                     game.Name.Equals(currentName, StringComparison.OrdinalIgnoreCase));
             if (refreshedGame is not null) _selectedGame = refreshedGame;
+            UpdateRenditionRefreshTimer();
             return;
         }
         if (_selectedGame is not null)
@@ -550,12 +572,15 @@ internal sealed class GalleryView : UserControl
     {
         _active = true;
         RefreshCatalog(clipsFolder);
+        UpdateRenditionRefreshTimer();
         RefreshViewport();
     }
 
     internal void Deactivate()
     {
         _active = false;
+        _scanInProgress = false;
+        _renditionRefreshTimer.Stop();
         _scanCancellation?.Cancel();
         CancelThumbnailRequests();
         CancelPlaybackPrewarm();
@@ -774,6 +799,7 @@ internal sealed class GalleryView : UserControl
         _scrollHost.RefreshContentLayout(preservePosition: false);
         _gameScrollHost.RefreshContentLayout(preservePosition: true);
         StartThumbnailRequests();
+        UpdateRenditionRefreshTimer();
     }
 
     private void StartThumbnailRequests()
@@ -1179,31 +1205,43 @@ internal sealed class GalleryView : UserControl
     /// .mp4 on this PC. Local-only clips are the reason this matters: passing one to an
     /// unknown player can put it somewhere that syncs off the machine.
     /// </summary>
-    private void ShowPlayer(GalleryClipEntry clip)
+    private void ShowPlayer(GalleryClipEntry clip) => ShowPlayer(clip, clip);
+
+    private void ShowPlayer(
+        GalleryClipEntry playbackClip,
+        GalleryClipEntry favoriteOwner)
     {
-        if (!File.Exists(clip.Path)) return;
+        if (!File.Exists(playbackClip.Path)) return;
         _scanCancellation?.Cancel();
         CancelThumbnailRequests();
-        if (!string.Equals(_playbackPrewarmPath, clip.Path, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(_playbackPrewarmPath, playbackClip.Path, StringComparison.OrdinalIgnoreCase))
         {
             CancelPlaybackPrewarm();
         }
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Player;
-        var route = clip.Route == GalleryClipRoute.LocalOnly ? "Local only" : "Uploaded";
-        SetHeader("Play clip", $"{clip.GameName} · {route} · {clip.FileName}");
+        var route = playbackClip.Route == GalleryClipRoute.LocalOnly ? "Local only" : "Uploaded";
+        var rendition = favoriteOwner.Renditions?.Outputs.FirstOrDefault(output =>
+            output.ArtifactPath.Equals(playbackClip.Path, StringComparison.OrdinalIgnoreCase));
+        var playbackKind = rendition is null ? route : $"{rendition.DisplayName} rendition";
+        SetHeader("Play clip", $"{playbackClip.GameName} · {playbackKind} · {playbackClip.FileName}");
         _backButton.Visible = true;
         _backButton.Text = "Back to clips";
         SetLibraryLayoutVisible(false);
         _refreshButton.Enabled = false;
         _player = new ClipPlayerView(
-            clip,
+            playbackClip,
             _playbackPreparer,
-            _favorites.IsFavorite(clip),
-            favorite => _favorites.SetFavorite(clip, favorite));
-        _playerClip = clip;
-        _scrollHost.Content = _player;
+            _favorites.IsFavorite(favoriteOwner),
+            favorite => _favorites.SetFavorite(favoriteOwner, favorite),
+            favoriteOwner.FileName,
+            _effectiveDpiForTests);
+        _playerClip = favoriteOwner;
+        _playerContent = favoriteOwner.HasRenditions
+            ? BuildProjectDetailContent(_player, favoriteOwner, playbackClip.Path)
+            : _player;
+        _scrollHost.Content = _playerContent;
         _scrollHost.RefreshContentLayout(preservePosition: false);
         BeginInvoke((Action)(() =>
         {
@@ -1211,13 +1249,600 @@ internal sealed class GalleryView : UserControl
         }));
     }
 
+    private Control BuildProjectDetailContent(
+        ClipPlayerView player,
+        GalleryClipEntry favoriteOwner,
+        string playbackPath)
+    {
+        var renditionPanel = BuildRenditionPanel(favoriteOwner, playbackPath);
+        var content = new GalleryProjectDetailPanel(
+            renditionPanel,
+            player,
+            ScaleUi(12))
+        {
+            Name = "GalleryProjectDetailContent",
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceBase,
+            AccessibleName = "Clip and Reaction Camera formats",
+            AccessibleRole = AccessibleRole.Pane
+        };
+        return content;
+    }
+
+    private Control BuildRenditionPanel(
+        GalleryClipEntry clip,
+        string playbackPath)
+    {
+        var presentation = clip.Renditions ??
+            throw new InvalidOperationException("A rendition panel requires a project presentation.");
+        var panel = new RoundedPanel
+        {
+            Name = "GalleryRenditionPanel",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = ClipCordTheme.SurfaceRaised,
+            BorderColor = presentation.Status == GalleryRenditionAggregateStatus.Failed
+                ? Color.FromArgb(128, 69, 82)
+                : ClipCordTheme.BorderDefault,
+            CornerRadius = ScaleUi(14),
+            Padding = ScalePadding(18, 16, 18, 16),
+            Margin = Padding.Empty,
+            AccessibleName = $"Reaction Camera, {presentation.FormatsLabel}, {presentation.StatusLabel}",
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        var layout = new BufferedTableLayoutPanel
+        {
+            Name = "GalleryRenditionLayout",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = presentation.Outputs.Count + 3,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = panel.BackColor
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        foreach (var output in presentation.Outputs)
+        {
+            layout.RowStyles.Add(new RowStyle(
+                SizeType.Absolute,
+                ScaleUi(GetRenditionOutputRowLogicalHeight(EffectiveDpi, output.CanPlay))));
+        }
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(70)));
+
+        layout.Controls.Add(BuildRenditionHeading(presentation), 0, 0);
+        layout.Controls.Add(BuildRenditionStatusMessage(presentation), 0, 1);
+        var row = 2;
+        foreach (var output in presentation.Outputs)
+        {
+            layout.Controls.Add(
+                BuildRenditionOutputRow(clip, presentation, output, playbackPath),
+                0,
+                row++);
+        }
+        layout.Controls.Add(BuildProjectSourceRow(presentation), 0, row);
+        panel.Controls.Add(layout);
+        return panel;
+    }
+
+    private Control BuildRenditionHeading(GalleryRenditionPresentation presentation)
+    {
+        var heading = new BufferedTableLayoutPanel
+        {
+            Name = "GalleryRenditionHeading",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 3,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceRaised
+        };
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        heading.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        heading.Controls.Add(new FigmaIconControl
+        {
+            Name = "GalleryRenditionHeadingIcon",
+            Asset = FigmaIconAsset.Silhouette,
+            IconColor = ClipCordTheme.TextPrimary,
+            Size = new Size(ScaleUi(24), ScaleUi(24)),
+            Margin = ScalePadding(0, 1, 10, 0),
+            AccessibleRole = AccessibleRole.None
+        }, 0, 0);
+        heading.Controls.Add(new Label
+        {
+            Name = "GalleryRenditionTitle",
+            Text = "Reaction Camera formats",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Font = ClipCordTheme.DisplayFont(11.5f, FontStyle.Bold),
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 1, 0);
+        heading.Controls.Add(
+            CreateRenditionStatusChip(
+                $"{presentation.FormatsLabel}  ·  {presentation.StatusLabel}",
+                presentation.Status),
+            2,
+            0);
+        var subtitle = new Label
+        {
+            Name = "GalleryRenditionSubtitle",
+            Text = "One captured moment, with each requested layout kept inside the same Gallery entry.",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextSecondary,
+            Font = ClipCordTheme.InterfaceFont(8.8f),
+            Margin = ScalePadding(34, 3, 0, 0),
+            UseMnemonic = false
+        };
+        heading.Controls.Add(subtitle, 0, 1);
+        heading.SetColumnSpan(subtitle, 3);
+        return heading;
+    }
+
+    private Control BuildRenditionStatusMessage(GalleryRenditionPresentation presentation)
+    {
+        var warning = presentation.Status is GalleryRenditionAggregateStatus.Failed or
+            GalleryRenditionAggregateStatus.PartiallyReady;
+        var message = new RoundedPanel
+        {
+            Name = "GalleryRenditionStatusMessage",
+            Dock = DockStyle.Top,
+            Height = ScaleUi(38),
+            BackColor = warning ? Color.FromArgb(48, 30, 39) : ClipCordTheme.SurfaceSunken,
+            BorderColor = warning ? Color.FromArgb(135, 70, 87) : ClipCordTheme.BorderDefault,
+            CornerRadius = ScaleUi(8),
+            Padding = ScalePadding(10, 7, 10, 6),
+            Margin = ScalePadding(0, 11, 0, 8),
+            AccessibleRole = AccessibleRole.StaticText
+        };
+        message.Controls.Add(new Label
+        {
+            Name = "GalleryRenditionStatusLabel",
+            Text = presentation.StatusMessage ?? presentation.StatusLabel,
+            Dock = DockStyle.Fill,
+            AutoEllipsis = true,
+            ForeColor = warning ? Color.FromArgb(255, 205, 211) : ClipCordTheme.TextSecondary,
+            Font = ClipCordTheme.InterfaceFont(8.7f),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        });
+        return message;
+    }
+
+    private Control BuildRenditionOutputRow(
+        GalleryClipEntry favoriteOwner,
+        GalleryRenditionPresentation presentation,
+        GalleryRenditionOutputPresentation output,
+        string playbackPath)
+    {
+        var token = GetOrientationControlToken(output.OrientationId);
+        var failed = output.Status == GalleryRenditionOutputStatus.Failed;
+        var playing = output.CanPlay &&
+            output.ArtifactPath.Equals(playbackPath, StringComparison.OrdinalIgnoreCase);
+        var stackActions = ShouldStackRenditionActions(EffectiveDpi) && output.CanPlay;
+        var row = new RoundedPanel
+        {
+            Name = $"Gallery{token}RenditionRow",
+            Dock = DockStyle.Fill,
+            BackColor = failed ? Color.FromArgb(43, 28, 39) : ClipCordTheme.SurfaceSunken,
+            BorderColor = playing
+                ? ClipCordTheme.Violet
+                : failed ? Color.FromArgb(133, 70, 89) : ClipCordTheme.BorderDefault,
+            CornerRadius = ScaleUi(10),
+            Padding = ScalePadding(12, 10, 12, 10),
+            Margin = ScalePadding(0, 4, 0, 4),
+            AccessibleName = $"{output.DisplayName} rendition, {output.StatusLabel}",
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        var layout = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = stackActions ? 2 : 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = row.BackColor
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleUi(36)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        if (stackActions)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
+        layout.Controls.Add(new FigmaIconControl
+        {
+            Name = $"Gallery{token}RenditionIcon",
+            Asset = output.OrientationId == CompositionOrientationIds.Landscape
+                ? FigmaIconAsset.Landscape
+                : FigmaIconAsset.Portrait,
+            IconColor = failed ? ClipCordTheme.Coral : ClipCordTheme.TextSecondary,
+            Size = new Size(ScaleUi(24), ScaleUi(24)),
+            Anchor = AnchorStyles.Left,
+            Margin = Padding.Empty,
+            AccessibleRole = AccessibleRole.None
+        }, 0, 0);
+
+        var copy = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = row.BackColor
+        };
+        copy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        copy.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        copy.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        copy.Controls.Add(new Label
+        {
+            Name = $"Gallery{token}RenditionTitle",
+            Text = $"{output.DisplayName}  ·  {output.StatusLabel}{(playing ? "  ·  Playing" : string.Empty)}",
+            Dock = DockStyle.Fill,
+            AutoEllipsis = true,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Font = ClipCordTheme.InterfaceFont(9.2f, FontStyle.Bold),
+            TextAlign = ContentAlignment.BottomLeft,
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 0, 0);
+        copy.Controls.Add(new Label
+        {
+            Name = $"Gallery{token}RenditionDetail",
+            Text = output.Status switch
+            {
+                GalleryRenditionOutputStatus.Ready => GalleryView.FormatBytes(output.Length),
+                GalleryRenditionOutputStatus.Failed => output.FailureReason ?? "This format could not be rendered.",
+                GalleryRenditionOutputStatus.Processing => "Rendering locally…",
+                GalleryRenditionOutputStatus.Waiting => "Waiting for local processing",
+                _ => output.FailureReason ?? "Status unavailable"
+            },
+            Dock = DockStyle.Fill,
+            AutoEllipsis = true,
+            ForeColor = failed ? Color.FromArgb(255, 181, 190) : ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8.2f),
+            TextAlign = ContentAlignment.TopLeft,
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 0, 1);
+        layout.Controls.Add(copy, 1, 0);
+        if (stackActions)
+        {
+            layout.SetColumnSpan(copy, 2);
+        }
+
+        var actions = new FlowLayoutPanel
+        {
+            Name = $"Gallery{token}RenditionActions",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            FlowDirection = stackActions ? FlowDirection.TopDown : FlowDirection.LeftToRight,
+            Anchor = AnchorStyles.Right,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = row.BackColor
+        };
+        if (output.CanPlay)
+        {
+            var play = CreateCardButton("Play", 72);
+            play.Name = $"Gallery{token}RenditionPlayButton";
+            play.Size = new Size(ScaleUi(72), ScaleUi(34));
+            play.LeadingIcon = FigmaIconAsset.Play;
+            play.AccessibleName = $"Play {output.DisplayName} rendition";
+            play.Enabled = output.CanPlay;
+            play.Click += (_, _) => PlayRendition(favoriteOwner, output);
+            actions.Controls.Add(play);
+
+            var folder = CreateCardButton("Folder", 82);
+            folder.Name = $"Gallery{token}RenditionFolderButton";
+            folder.Size = new Size(ScaleUi(82), ScaleUi(34));
+            folder.LeadingIcon = FigmaIconAsset.Folder;
+            folder.Margin = stackActions
+                ? ScalePadding(0, 8, 0, 0)
+                : ScalePadding(8, 0, 0, 0);
+            folder.AccessibleName = $"Open the {output.DisplayName} rendition folder";
+            folder.Enabled = output.CanPlay;
+            folder.Click += (_, _) => ShowRenditionInFolder(output);
+            actions.Controls.Add(folder);
+        }
+        else if (output.CanRetry)
+        {
+            var retry = CreateCardButton($"Retry {output.DisplayName}", 130);
+            retry.Name = $"Gallery{token}RenditionRetryButton";
+            retry.Size = new Size(ScaleUi(130), ScaleUi(34));
+            retry.LeadingIcon = FigmaIconAsset.Refresh;
+            retry.SurfaceColor = ClipCordTheme.VioletMuted;
+            retry.HoverColor = Color.FromArgb(69, 53, 105);
+            retry.OutlineColor = ClipCordTheme.Violet;
+            retry.AccessibleName = $"Retry {output.DisplayName} rendition";
+            retry.Enabled = RenditionRetryRequested is not null;
+            retry.Click += (_, _) => RequestRenditionRetry(retry, presentation, output);
+            actions.Controls.Add(retry);
+        }
+        if (stackActions)
+        {
+            layout.Controls.Add(actions, 0, 1);
+            layout.SetColumnSpan(actions, 3);
+        }
+        else
+        {
+            layout.Controls.Add(actions, 2, 0);
+        }
+        row.Controls.Add(layout);
+        return row;
+    }
+
+    private Control BuildProjectSourceRow(GalleryRenditionPresentation presentation)
+    {
+        var source = new RoundedPanel
+        {
+            Name = "GalleryRenditionSourceFiles",
+            Dock = DockStyle.Fill,
+            BackColor = ClipCordTheme.SurfaceRaised,
+            BorderColor = ClipCordTheme.BorderDefault,
+            CornerRadius = ScaleUi(9),
+            Padding = ScalePadding(10, 9, 10, 8),
+            Margin = ScalePadding(0, 6, 0, 0),
+            AccessibleName = "Untouched source files",
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        var layout = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SurfaceRaised
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleUi(30)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        layout.Controls.Add(new FigmaIconControl
+        {
+            Name = "GalleryRenditionSourceIcon",
+            Asset = FigmaIconAsset.Layers,
+            IconColor = ClipCordTheme.TextTertiary,
+            Size = new Size(ScaleUi(22), ScaleUi(22)),
+            Anchor = AnchorStyles.Left,
+            Margin = Padding.Empty,
+            AccessibleRole = AccessibleRole.None
+        }, 0, 0);
+        layout.SetRowSpan(layout.Controls[0], 2);
+        layout.Controls.Add(new Label
+        {
+            Name = "GalleryOriginalGameplaySource",
+            Text = "Original gameplay clip · untouched",
+            Dock = DockStyle.Fill,
+            AutoEllipsis = true,
+            ForeColor = ClipCordTheme.TextSecondary,
+            Font = ClipCordTheme.InterfaceFont(8.5f, FontStyle.Bold),
+            TextAlign = ContentAlignment.BottomLeft,
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 1, 0);
+        layout.Controls.Add(new Label
+        {
+            Name = "GalleryReactionCameraSource",
+            Text = "Sources stay untouched · ready formats are saved in this game folder",
+            Dock = DockStyle.Fill,
+            AutoEllipsis = true,
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8.2f),
+            TextAlign = ContentAlignment.TopLeft,
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 1, 1);
+        source.Controls.Add(layout);
+        return source;
+    }
+
+    private static Control CreateRenditionStatusChip(
+        string text,
+        GalleryRenditionAggregateStatus status)
+    {
+        var (background, border, foreground) = status switch
+        {
+            GalleryRenditionAggregateStatus.Ready => (
+                ClipCordTheme.SuccessSurface,
+                ClipCordTheme.SuccessBorder,
+                ClipCordTheme.SuccessText),
+            GalleryRenditionAggregateStatus.Failed or GalleryRenditionAggregateStatus.PartiallyReady => (
+                Color.FromArgb(54, 25, 39),
+                ClipCordTheme.Coral,
+                Color.FromArgb(255, 213, 216)),
+            _ => (
+                ClipCordTheme.VioletMuted,
+                ClipCordTheme.Violet,
+                Color.FromArgb(214, 203, 255))
+        };
+        var label = new Label
+        {
+            Text = text,
+            AutoSize = true,
+            ForeColor = foreground,
+            Font = ClipCordTheme.InterfaceFont(8.1f, FontStyle.Bold),
+            BackColor = Color.Transparent,
+            Location = new Point(9, 4),
+            Margin = Padding.Empty,
+            UseMnemonic = false,
+            AccessibleRole = AccessibleRole.None
+        };
+        return new RoundedPanel
+        {
+            Name = "GalleryRenditionStatusChip",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = background,
+            BorderColor = border,
+            CornerRadius = 8,
+            Padding = new Padding(9, 4, 9, 4),
+            Margin = Padding.Empty,
+            AccessibleName = text,
+            AccessibleRole = AccessibleRole.StaticText,
+            Controls = { label }
+        };
+    }
+
+    private void PlayRendition(
+        GalleryClipEntry favoriteOwner,
+        GalleryRenditionOutputPresentation output)
+    {
+        if (!output.CanPlay) return;
+        var renditionClip = favoriteOwner with
+        {
+            Path = output.ArtifactPath,
+            FileName = Path.GetFileName(output.ArtifactPath),
+            Length = output.Length
+        };
+        ShowPlayer(renditionClip, favoriteOwner);
+    }
+
+    private void ShowRenditionInFolder(GalleryRenditionOutputPresentation output)
+    {
+        if (!output.CanPlay) return;
+        try
+        {
+            Process.Start(ActivityView.CreateSelectFileStartInfo(output.ArtifactPath));
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Could not open the {output.DisplayName} rendition location.", exception);
+            MessageBox.Show(
+                this,
+                "Windows could not open this rendition's location.",
+                "Could not open folder",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    private void RequestRenditionRetry(
+        OutlineButton button,
+        GalleryRenditionPresentation presentation,
+        GalleryRenditionOutputPresentation output)
+    {
+        var handler = RenditionRetryRequested;
+        if (handler is null || !output.CanRetry) return;
+        button.Enabled = false;
+        button.Text = "Retry requested";
+        _renditionRetrySawActiveWork = false;
+        _renditionRetryGracePolls = 3;
+        UpdateRenditionRefreshTimer();
+        handler.Invoke(
+            this,
+            new GalleryRenditionRetryRequestedEventArgs(
+                presentation.LibraryRoot,
+                presentation.ProjectId,
+                output.OrientationId));
+    }
+
+    private void RenditionRefreshTimerTick(object? sender, EventArgs eventArgs)
+    {
+        if (!_active || _disposed || IsDisposed || Disposing ||
+            _screen is not (GalleryScreen.Library or GalleryScreen.Game))
+        {
+            _renditionRefreshTimer.Stop();
+            return;
+        }
+        if (_scanInProgress) return;
+        if (HasRenditionStateChanged())
+        {
+            RefreshCatalog(_clipsFolder);
+            return;
+        }
+        if (_renditionRetryGracePolls > 0)
+        {
+            _renditionRetryGracePolls--;
+            UpdateRenditionRefreshTimer();
+        }
+    }
+
+    private void ObserveRenditionPollResult()
+    {
+        if (HasActiveRenditionWork())
+        {
+            _renditionRetrySawActiveWork = true;
+            _renditionRetryGracePolls = 0;
+            return;
+        }
+        if (_renditionRetrySawActiveWork)
+        {
+            _renditionRetrySawActiveWork = false;
+            _renditionRetryGracePolls = 0;
+            return;
+        }
+        if (_renditionRetryGracePolls > 0) _renditionRetryGracePolls--;
+    }
+
+    private bool HasActiveRenditionWork() => _snapshot.Games
+        .SelectMany(game => game.Clips)
+        .Select(clip => clip.Renditions)
+        .Any(renditions => renditions?.Status is GalleryRenditionAggregateStatus.Pending or
+            GalleryRenditionAggregateStatus.Processing);
+
+    private bool HasRenditionStateChanged() => _snapshot.Games
+        .SelectMany(game => game.Clips)
+        .Select(clip => clip.Renditions)
+        .Where(renditions => renditions is not null)
+        .Cast<GalleryRenditionPresentation>()
+        .Any(renditions => GalleryCatalog.GetRenditionStateStamp(
+            renditions.LibraryRoot,
+            renditions.ProjectId) != renditions.StateStamp);
+
+    private void UpdateRenditionRefreshTimer()
+    {
+        var shouldRun = _active && !_disposed && !IsDisposed && !Disposing &&
+            (_screen is GalleryScreen.Library or GalleryScreen.Game) &&
+            (HasActiveRenditionWork() || _renditionRetryGracePolls > 0);
+        if (shouldRun)
+        {
+            if (!_renditionRefreshTimer.Enabled) _renditionRefreshTimer.Start();
+        }
+        else
+        {
+            _renditionRefreshTimer.Stop();
+        }
+    }
+
+    private static string GetOrientationControlToken(string orientationId) => orientationId switch
+    {
+        CompositionOrientationIds.Landscape => "Landscape",
+        CompositionOrientationIds.Portrait => "Portrait",
+        _ => throw new ArgumentException(
+            "The rendition orientation is not supported.",
+            nameof(orientationId))
+    };
+
     private void DisposePlayer()
     {
         if (_player is null) return;
         _player.StopPlayback();
-        if (ReferenceEquals(_scrollHost.Content, _player)) _scrollHost.Content = null;
-        _player.Dispose();
+        if (ReferenceEquals(_scrollHost.Content, _playerContent)) _scrollHost.Content = null;
+        if (_playerContent is not null && !ReferenceEquals(_playerContent, _player))
+        {
+            _playerContent.Dispose();
+        }
+        else
+        {
+            _player.Dispose();
+        }
         _player = null;
+        _playerContent = null;
         _playerClip = null;
     }
 
@@ -1246,7 +1871,9 @@ internal sealed class GalleryView : UserControl
             CornerRadius = ScaleUi(13),
             Padding = Padding.Empty,
             Margin = Padding.Empty,
-            AccessibleName = $"{clip.FileName}, {GetRouteLabel(clip.Route)}",
+            AccessibleName = clip.Renditions is null
+                ? $"{clip.FileName}, {GetRouteLabel(clip.Route)}"
+                : $"{clip.FileName}, {GetRouteLabel(clip.Route)}, {clip.Renditions.FormatsLabel}, {clip.Renditions.StatusLabel}",
             AccessibleRole = AccessibleRole.Grouping
         };
         var layout = new BufferedTableLayoutPanel
@@ -1275,6 +1902,9 @@ internal sealed class GalleryView : UserControl
         _thumbnailClips.Add(art, clip);
         var routeBadge = CreateRouteBadge(clip.Route);
         routeBadge.Location = new Point(ScaleUi(10), ScaleUi(9));
+        var renditionBadge = clip.Renditions is null
+            ? null
+            : CreateRenditionBadge(clip.Renditions);
         var favorite = new FavoriteButton(
             _favorites.IsFavorite(clip),
             logicalSize: 26,
@@ -1308,6 +1938,12 @@ internal sealed class GalleryView : UserControl
             favorite.Location = new Point(
                 Math.Max(ScaleUi(8), art.ClientSize.Width - favorite.Width - ScaleUi(10)),
                 ScaleUi(9));
+            if (renditionBadge is not null)
+            {
+                renditionBadge.Location = new Point(
+                    ScaleUi(10),
+                    Math.Max(ScaleUi(9), art.ClientSize.Height - renditionBadge.Height - ScaleUi(9)));
+            }
         }
         art.MouseEnter += (_, _) => favorite.SetReveal(true);
         art.MouseLeave += (_, _) => favorite.SetReveal(false);
@@ -1315,16 +1951,19 @@ internal sealed class GalleryView : UserControl
         favorite.MouseLeave += (_, _) => favorite.SetReveal(false);
         art.Resize += (_, _) => PlaceThumbnailControls();
         art.Controls.Add(routeBadge);
+        if (renditionBadge is not null) art.Controls.Add(renditionBadge);
         art.Controls.Add(favorite);
         art.Controls.Add(play);
         art.Layout += (_, _) =>
         {
             routeBadge.BringToFront();
+            renditionBadge?.BringToFront();
             favorite.BringToFront();
             play.BringToFront();
             PlaceThumbnailControls();
         };
         routeBadge.BringToFront();
+        renditionBadge?.BringToFront();
         favorite.BringToFront();
         play.BringToFront();
         PlaceThumbnailControls();
@@ -1355,7 +1994,9 @@ internal sealed class GalleryView : UserControl
         details.Controls.Add(fileName, 0, 0);
         details.Controls.Add(new Label
         {
-            Text = $"{clip.GameName} · {clip.SourceLabel} · {FormatBytes(clip.Length)} · {clip.LastWriteTimeUtc.ToLocalTime():t}",
+            Text = clip.Renditions is null
+                ? $"{clip.GameName} · {clip.SourceLabel} · {FormatBytes(clip.Length)} · {clip.LastWriteTimeUtc.ToLocalTime():t}"
+                : $"{clip.GameName} · {clip.SourceLabel} · {clip.Renditions.FormatsLabel} · {clip.Renditions.StatusLabel}",
             Dock = DockStyle.Fill,
             AutoEllipsis = true,
             ForeColor = ClipCordTheme.TextTertiary,
@@ -1446,11 +2087,76 @@ internal sealed class GalleryView : UserControl
         };
     }
 
+    private Control CreateRenditionBadge(GalleryRenditionPresentation presentation)
+    {
+        var ready = presentation.Status == GalleryRenditionAggregateStatus.Ready;
+        var attention = presentation.Status is GalleryRenditionAggregateStatus.Failed or
+            GalleryRenditionAggregateStatus.PartiallyReady;
+        var text = $"{presentation.FormatsLabel}  ·  {presentation.StatusLabel}";
+        var label = new Label
+        {
+            Text = text,
+            AutoSize = true,
+            ForeColor = attention
+                ? Color.FromArgb(255, 213, 216)
+                : ready ? ClipCordTheme.SuccessText : Color.FromArgb(214, 203, 255),
+            Font = ClipCordTheme.InterfaceFont(7.6f, FontStyle.Bold),
+            BackColor = Color.Transparent,
+            Location = new Point(ScaleUi(7), ScaleUi(3)),
+            Margin = Padding.Empty,
+            UseMnemonic = false,
+            AccessibleRole = AccessibleRole.None
+        };
+        return new RoundedPanel
+        {
+            Name = "GalleryClipFormatsBadge",
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = attention
+                ? Color.FromArgb(54, 25, 39)
+                : ready ? ClipCordTheme.SuccessSurface : ClipCordTheme.VioletMuted,
+            BorderColor = attention
+                ? ClipCordTheme.Coral
+                : ready ? ClipCordTheme.SuccessBorder : ClipCordTheme.Violet,
+            CornerRadius = ScaleUi(7),
+            Padding = ScalePadding(7, 3, 7, 3),
+            AccessibleName = text,
+            AccessibleRole = AccessibleRole.StaticText,
+            Controls = { label }
+        };
+    }
+
     private void PlayClip(GalleryClipEntry clip)
     {
         if (!File.Exists(clip.Path)) return;
+        var preferredRendition = SelectPreferredReadyRendition(clip);
+        if (preferredRendition is not null)
+        {
+            PlayRendition(clip, preferredRendition);
+            return;
+        }
         ShowPlayer(clip);
     }
+
+    internal static GalleryRenditionOutputPresentation? SelectPreferredReadyRendition(
+        GalleryClipEntry clip)
+    {
+        ArgumentNullException.ThrowIfNull(clip);
+        var outputs = clip.Renditions?.Outputs;
+        if (outputs is null) return null;
+
+        return outputs.FirstOrDefault(output =>
+                   output.OrientationId == CompositionOrientationIds.Landscape && output.CanPlay) ??
+               outputs.FirstOrDefault(output =>
+                   output.OrientationId == CompositionOrientationIds.Portrait && output.CanPlay);
+    }
+
+    internal static bool ShouldStackRenditionActions(int dpi) => dpi >= 288;
+
+    private int EffectiveDpi => _effectiveDpiForTests ?? DeviceDpi;
+
+    internal static int GetRenditionOutputRowLogicalHeight(int dpi, bool canPlay) =>
+        ShouldStackRenditionActions(dpi) && canPlay ? 148 : 82;
 
     private void BeginPlaybackPrewarm(GalleryClipEntry clip)
     {
@@ -1677,6 +2383,10 @@ internal sealed class GalleryView : UserControl
         {
             _disposed = true;
             _active = false;
+            _scanInProgress = false;
+            _renditionRefreshTimer.Stop();
+            _renditionRefreshTimer.Tick -= RenditionRefreshTimerTick;
+            _renditionRefreshTimer.Dispose();
             _scanCancellation?.Cancel();
             _scanCancellation?.Dispose();
             CancelThumbnailRequests();
@@ -1697,6 +2407,84 @@ internal sealed class GalleryView : UserControl
         Game,
         Editor,
         Player
+    }
+
+    /// <summary>
+    /// Stacks the rendition selector and player at the width assigned by the branded
+    /// scroll host. A stock auto-sized TableLayoutPanel collapses to its 150px default
+    /// width after the host assigns its bounds, which made the player surface one pixel
+    /// tall and pushed the rendition actions outside their rows.
+    /// </summary>
+    private sealed class GalleryProjectDetailPanel : Panel
+    {
+        private readonly Control _renditionPanel;
+        private readonly ClipPlayerView _player;
+        private readonly int _gap;
+        private bool _layingOut;
+
+        internal GalleryProjectDetailPanel(
+            Control renditionPanel,
+            ClipPlayerView player,
+            int gap)
+        {
+            _renditionPanel = renditionPanel;
+            _player = player;
+            _gap = Math.Max(0, gap);
+            AutoSize = false;
+            Dock = DockStyle.None;
+            _renditionPanel.AutoSize = false;
+            _renditionPanel.Dock = DockStyle.None;
+            _renditionPanel.Margin = Padding.Empty;
+            _player.AutoSize = false;
+            _player.Dock = DockStyle.None;
+            _player.Margin = Padding.Empty;
+            Controls.Add(_renditionPanel);
+            Controls.Add(_player);
+        }
+
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            var width = proposedSize.Width is > 0 and < int.MaxValue
+                ? proposedSize.Width
+                : Math.Max(1, Width);
+            var renditionHeight = MeasureHeight(_renditionPanel, width);
+            var playerHeight = MeasureHeight(_player, width);
+            return new Size(
+                width,
+                (int)Math.Clamp(
+                    (long)renditionHeight + _gap + playerHeight,
+                    1,
+                    int.MaxValue));
+        }
+
+        protected override void OnLayout(LayoutEventArgs eventArgs)
+        {
+            base.OnLayout(eventArgs);
+            if (_layingOut) return;
+            _layingOut = true;
+            try
+            {
+                var width = Math.Max(1, ClientSize.Width);
+                var renditionHeight = MeasureHeight(_renditionPanel, width);
+                _renditionPanel.Bounds = new Rectangle(0, 0, width, renditionHeight);
+                var playerTop = renditionHeight + _gap;
+                _player.Bounds = new Rectangle(
+                    0,
+                    playerTop,
+                    width,
+                    MeasureHeight(_player, width));
+            }
+            finally
+            {
+                _layingOut = false;
+            }
+        }
+
+        private static int MeasureHeight(Control control, int width)
+        {
+            var preferred = control.GetPreferredSize(new Size(Math.Max(1, width), int.MaxValue));
+            return Math.Max(control.MinimumSize.Height, Math.Max(1, preferred.Height));
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace ClipsToDiscord;
 
 internal enum CaptureResolution
@@ -66,6 +68,18 @@ internal static class CaptureProfileCatalog
             _ => throw new ArgumentOutOfRangeException(nameof(resolution))
         };
 
+    internal static int GetVideoBitrateKbps(CaptureResolution resolution, int framesPerSecond)
+    {
+        if (!VideoBitratesKbps.TryGetValue((resolution, framesPerSecond), out var bitrate))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(framesPerSecond),
+                "ClipCord does not define a bitrate for this capture profile.");
+        }
+
+        return bitrate;
+    }
+
     internal static CaptureSizeEstimate Estimate(CaptureProfile profile, bool includeAudio = true)
     {
         ArgumentNullException.ThrowIfNull(profile);
@@ -127,11 +141,64 @@ internal static class CaptureLibraryLayout
     {
         var safeRoot = ValidateRoot(root);
         var safeGameName = UploadedFolder.SanitizeGameFolderName(gameName);
-        return Path.Combine(
+        var gameRoot = Path.Combine(
             safeRoot,
             LibraryFolderName,
-            GameFolderName,
-            safeGameName);
+            GameFolderName);
+        return ResolveEstablishedGameDirectory(gameRoot, safeGameName);
+    }
+
+    private static string ResolveEstablishedGameDirectory(string gameRoot, string safeGameName)
+    {
+        var proposed = Path.Combine(gameRoot, safeGameName);
+        if (!Directory.Exists(gameRoot)) return proposed;
+
+        var identity = CreateGameIdentity(safeGameName);
+        if (identity.Length == 0) return proposed;
+        try
+        {
+            var established = Directory.EnumerateDirectories(gameRoot, "*", SearchOption.TopDirectoryOnly)
+                .Select(path => new DirectoryInfo(path))
+                .Where(directory =>
+                    directory.LinkTarget is null &&
+                    (directory.Attributes & FileAttributes.ReparsePoint) == 0 &&
+                    CreateGameIdentity(directory.Name).Equals(identity, StringComparison.Ordinal))
+                .OrderBy(directory => directory.CreationTimeUtc)
+                .ThenBy(directory => directory.Name, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+            return established?.FullName ?? proposed;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return proposed;
+        }
+    }
+
+    internal static string CreateGameIdentity(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var identity = new StringBuilder(value.Length);
+        var withoutMarks = value
+            .Replace("™", string.Empty, StringComparison.Ordinal)
+            .Replace("®", string.Empty, StringComparison.Ordinal)
+            .Replace("©", string.Empty, StringComparison.Ordinal)
+            .Normalize(NormalizationForm.FormKC)
+            .Trim();
+        if (withoutMarks.Length > 2 &&
+            withoutMarks.EndsWith("TM", StringComparison.OrdinalIgnoreCase) &&
+            !char.IsLetterOrDigit(withoutMarks[^3]))
+        {
+            withoutMarks = withoutMarks[..^2].TrimEnd(' ', '-', '_', '.');
+        }
+        foreach (var character in withoutMarks)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                identity.Append(char.ToUpperInvariant(character));
+            }
+        }
+        return identity.ToString();
     }
 
     internal static string GetExportDirectory(string root, string destination, string? gameName)

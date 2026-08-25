@@ -225,10 +225,19 @@ internal static class Program
 
         internal static ID3D11Texture2D GetTexture(IDirect3DSurface surface)
         {
-            var access = (IDirect3DDxgiInterfaceAccess)(object)surface;
-            var iid = Texture2DIid;
-            var pointer = access.GetInterface(ref iid);
-            return new ID3D11Texture2D(pointer);
+            ArgumentNullException.ThrowIfNull(surface);
+            var unknown = WinRT.MarshalInspectable<IDirect3DSurface>.FromManaged(surface);
+            try
+            {
+                var access = (IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(unknown);
+                var iid = Texture2DIid;
+                var pointer = access.GetInterface(ref iid);
+                return new ID3D11Texture2D(pointer);
+            }
+            finally
+            {
+                Marshal.Release(unknown);
+            }
         }
 
         [ComImport]

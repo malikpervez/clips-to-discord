@@ -1,6 +1,179 @@
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 
 namespace ClipsToDiscord;
+
+internal sealed class SingleFlightGate
+{
+    private int _active;
+
+    internal bool TryEnter() => Interlocked.Exchange(ref _active, 1) == 0;
+    internal void Exit() => Volatile.Write(ref _active, 0);
+}
+
+internal sealed class ReplayAutomaticStartCoordinator
+{
+    private readonly IReplayCaptureController _controller;
+    private readonly Func<CaptureSettings> _settingsProvider;
+    private readonly Func<bool> _hotkeyAvailableProvider;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
+    private readonly Action<Exception> _reportFailure;
+    private readonly CancellationToken _lifetimeCancellation;
+    private readonly SingleFlightGate _gate = new();
+
+    internal ReplayAutomaticStartCoordinator(
+        IReplayCaptureController controller,
+        Func<CaptureSettings> settingsProvider,
+        Func<bool> hotkeyAvailableProvider,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        Action<Exception> reportFailure,
+        CancellationToken lifetimeCancellation)
+    {
+        _controller = controller ?? throw new ArgumentNullException(nameof(controller));
+        _settingsProvider = settingsProvider ?? throw new ArgumentNullException(nameof(settingsProvider));
+        _hotkeyAvailableProvider = hotkeyAvailableProvider ??
+            throw new ArgumentNullException(nameof(hotkeyAvailableProvider));
+        _delayAsync = delayAsync ?? throw new ArgumentNullException(nameof(delayAsync));
+        _reportFailure = reportFailure ?? throw new ArgumentNullException(nameof(reportFailure));
+        _lifetimeCancellation = lifetimeCancellation;
+    }
+
+    internal async Task RequestAsync()
+    {
+        if (!_gate.TryEnter()) return;
+        try
+        {
+            await ReplayAutomaticStartRunner.RunAsync(
+                _controller,
+                _settingsProvider,
+                _hotkeyAvailableProvider,
+                _delayAsync,
+                _lifetimeCancellation).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            _reportFailure(exception);
+        }
+        finally
+        {
+            _gate.Exit();
+            if (!_lifetimeCancellation.IsCancellationRequested)
+            {
+                var settings = CaptureSettings.Normalize(_settingsProvider());
+                if (ReplayCapturePolicy.ShouldAttemptAutomaticStart(
+                        settings.InstantReplayEnabled,
+                        _hotkeyAvailableProvider(),
+                        _controller.ReplayStatus))
+                {
+                    _ = RequestAsync();
+                }
+            }
+        }
+    }
+}
+
+internal static class CaptureHotkeyRegistration
+{
+    internal static bool TryApply(
+        GlobalHotkeyManager manager,
+        CaptureSettings settings,
+        out bool hotkeyAvailable,
+        out int errorCode)
+    {
+        ArgumentNullException.ThrowIfNull(manager);
+        settings = CaptureSettings.Normalize(settings);
+        GlobalHotkeyBinding? binding = null;
+        if (settings.InstantReplayEnabled)
+        {
+            if (!GlobalHotkeyBinding.TryParse(settings.SaveHotkey, out var parsed))
+            {
+                errorCode = 0;
+                hotkeyAvailable = manager.GetBinding(GlobalHotkeyManager.CaptureHotkeyIdentifier) is not null;
+                return false;
+            }
+            binding = parsed;
+        }
+
+        var applied = manager.TrySetBinding(
+            GlobalHotkeyManager.CaptureHotkeyIdentifier,
+            binding,
+            out errorCode);
+        hotkeyAvailable = applied ||
+            manager.GetBinding(GlobalHotkeyManager.CaptureHotkeyIdentifier) is not null;
+        return applied;
+    }
+}
+
+internal static class ReactionCameraTrayIconFactory
+{
+    private const int IconSize = 32;
+
+    internal static ReactionCameraRuntimeState SelectState(ReactionCameraRuntimeStatus status) =>
+        status.IsActive
+            ? ReactionCameraRuntimeState.Active
+            : status.IsStarting
+                ? ReactionCameraRuntimeState.Starting
+                : status.ReleaseNeedsAttention
+                    ? ReactionCameraRuntimeState.ReleaseNeedsAttention
+                    : ReactionCameraRuntimeState.Off;
+
+    internal static Icon Create(ReactionCameraRuntimeState state)
+    {
+        if (state is not (ReactionCameraRuntimeState.Starting or
+            ReactionCameraRuntimeState.Active or
+            ReactionCameraRuntimeState.ReleaseNeedsAttention))
+        {
+            throw new ArgumentOutOfRangeException(nameof(state));
+        }
+
+        using var bitmap = new Bitmap(IconSize, IconSize, PixelFormat.Format32bppArgb);
+        using (var graphics = Graphics.FromImage(bitmap))
+        {
+            graphics.Clear(Color.Transparent);
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            graphics.CompositingQuality = CompositingQuality.HighQuality;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            var backgroundColor = state switch
+            {
+                ReactionCameraRuntimeState.Starting => Color.FromArgb(244, 177, 76),
+                ReactionCameraRuntimeState.ReleaseNeedsAttention => Color.FromArgb(214, 55, 78),
+                _ => ClipCordTheme.Coral
+            };
+            using var background = new SolidBrush(backgroundColor);
+            using var outline = new Pen(Color.FromArgb(235, 255, 255, 255), 1.5f);
+            var badgeBounds = new RectangleF(1.5f, 1.5f, IconSize - 3f, IconSize - 3f);
+            graphics.FillEllipse(background, badgeBounds);
+            graphics.DrawEllipse(outline, badgeBounds);
+            FigmaIconRenderer.Draw(
+                graphics,
+                new Rectangle(7, 7, 18, 18),
+                state == ReactionCameraRuntimeState.ReleaseNeedsAttention
+                    ? FigmaIconAsset.Alert
+                    : FigmaIconAsset.Camera,
+                state == ReactionCameraRuntimeState.Starting
+                    ? Color.FromArgb(10, 18, 32)
+                    : Color.White);
+        }
+
+        var handle = bitmap.GetHicon();
+        try
+        {
+            using var borrowed = Icon.FromHandle(handle);
+            return (Icon)borrowed.Clone();
+        }
+        finally
+        {
+            _ = DestroyIcon(handle);
+        }
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyIcon(nint handle);
+}
 
 internal enum ModeHotkeyBlockReason
 {
@@ -14,8 +187,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly SynchronizationContext _uiContext;
     private readonly Icon _applicationIcon;
+    private readonly Icon _reactionCameraStartingIcon;
+    private readonly Icon _reactionCameraActiveIcon;
+    private readonly Icon _reactionCameraAttentionIcon;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _statusItem;
+    private readonly ToolStripMenuItem _disableReactionCameraItem;
     private readonly ToolStripMenuItem _uploadToDiscordItem;
     private readonly System.Windows.Forms.Timer _updateTimer;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -25,6 +202,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly IFavoritesService _favorites;
     private readonly GlobalHotkeyManager _globalHotkey;
     private readonly ModeFeedbackOverlay _modeFeedbackOverlay;
+    private readonly CaptureHostClient? _captureHostClient;
+    private readonly IManualCaptureRecorder? _manualCaptureRecorder;
+    private readonly ICaptureProjectCompletionSource? _captureProjectCompletionSource;
+    private readonly SilhouetteProcessingCoordinator _silhouetteProcessingCoordinator;
+    private volatile CaptureSettings _captureSettings;
+    private string _baseTrayStatus = "Starting…";
+    private ManualCaptureState _manualCaptureState = ManualCaptureState.NoTarget;
+    private ReplayCaptureState _replayCaptureState = ReplayCaptureState.Off;
+    private ReactionCameraRuntimeStatus _reactionCameraStatus = new(false, false);
+    private volatile bool _captureHotkeyAvailable;
+    private readonly ReplayAutomaticStartCoordinator? _replayStartCoordinator;
+    private int _replaySaveInProgress;
+    private int _reactionCameraDisableInProgress;
     private AppSettings _settings;
     private DiscordAwareController? _controller;
     private bool _settingsOpen;
@@ -42,12 +232,65 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _applicationIcon = LoadApplicationIcon();
+        _reactionCameraStartingIcon = ReactionCameraTrayIconFactory.Create(
+            ReactionCameraRuntimeState.Starting);
+        _reactionCameraActiveIcon = ReactionCameraTrayIconFactory.Create(
+            ReactionCameraRuntimeState.Active);
+        _reactionCameraAttentionIcon = ReactionCameraTrayIconFactory.Create(
+            ReactionCameraRuntimeState.ReleaseNeedsAttention);
         _settings = SettingsStore.Load();
+        _captureSettings = CaptureSettingsStore.Load();
         _activityHistory = new ActivityHistoryStore();
         _favorites = new FavoritesService();
         _globalHotkey = new GlobalHotkeyManager();
         _globalHotkey.Pressed += ModeToggleHotkeyPressed;
+        _globalHotkey.HotkeyPressed += GlobalHotkeyPressed;
         _modeFeedbackOverlay = new ModeFeedbackOverlay();
+        var captureCapability = new WindowsCaptureCapabilityProbe().Inspect();
+        _captureHostClient = captureCapability.Readiness == CaptureReadiness.Ready
+            ? new CaptureHostClient()
+            : null;
+        _manualCaptureRecorder = captureCapability.Readiness == CaptureReadiness.Ready
+            ? new CaptureHostManualRecorder(_captureHostClient!)
+            : null;
+        if (_manualCaptureRecorder is IReplayCaptureController automaticReplayController)
+        {
+            _replayStartCoordinator = new ReplayAutomaticStartCoordinator(
+                automaticReplayController,
+                () => _captureSettings,
+                () => _captureHotkeyAvailable,
+                static (delay, cancellationToken) => Task.Delay(delay, cancellationToken),
+                exception => Log.Error(
+                    "ClipCord could not restore the configured Instant Replay buffer.",
+                    exception),
+                _lifetimeCancellation.Token);
+        }
+        var recoveredCaptureFiles = CaptureStagingRecovery.RemoveOrphanedManualCaptures(
+            _captureSettings.LibraryRoot);
+        if (recoveredCaptureFiles > 0)
+        {
+            Log.Info($"Removed {recoveredCaptureFiles} abandoned capture staging file(s).");
+        }
+        var recoveredCameraProjects = CaptureStagingRecovery.RemoveOrphanedReactionCameraProjects(
+            _captureSettings.LibraryRoot);
+        if (recoveredCameraProjects > 0)
+        {
+            Log.Info($"Removed {recoveredCameraProjects} abandoned temporary camera project(s).");
+        }
+        var removedOrphanedCameraProjects = CaptureProjectStore.RemoveOrphanedProjects(
+            _captureSettings.LibraryRoot);
+        if (removedOrphanedCameraProjects > 0)
+        {
+            Log.Info($"Removed {removedOrphanedCameraProjects} camera project(s) whose gameplay clip was gone.");
+        }
+        _silhouetteProcessingCoordinator = new SilhouetteProcessingCoordinator(
+            _captureSettings.LibraryRoot);
+        _captureProjectCompletionSource =
+            _manualCaptureRecorder as ICaptureProjectCompletionSource;
+        if (_captureProjectCompletionSource is not null)
+        {
+            _captureProjectCompletionSource.ProjectCommitted += CaptureProjectCommitted;
+        }
         var assemblyVersion = typeof(TrayApplicationContext).Assembly.GetName().Version ?? new Version(0, 0, 0);
         _updateCoordinator = new UpdateCoordinator(
             GitHubUpdateChecker.Create(),
@@ -61,6 +304,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _updateTimer.Tick += UpdateTimerTick;
 
         _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
+        _disableReactionCameraItem = new ToolStripMenuItem("Turn Reaction Camera off")
+        {
+            Name = "TurnReactionCameraOffMenuItem",
+            Visible = false,
+            Enabled = false
+        };
+        _disableReactionCameraItem.Click += (_, _) => _ = DisableReactionCameraFromTrayAsync();
         var homeItem = new ToolStripMenuItem("Open ClipCord…", null, (_, _) => ShowSettings(initialPage: SettingsPage.Home));
         var configureItem = new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings());
         var activityItem = new ToolStripMenuItem("Activity…", null, (_, _) => ShowSettings(initialPage: SettingsPage.Activity));
@@ -75,6 +325,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => RequestExit());
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
+        menu.Items.Add(_disableReactionCameraItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(homeItem);
         menu.Items.Add(configureItem);
@@ -92,6 +343,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Visible = true
         };
         _trayIcon.DoubleClick += (_, _) => ShowSettings(initialPage: SettingsPage.Home);
+        if (_manualCaptureRecorder is not null)
+        {
+            _manualCaptureState = _manualCaptureRecorder.State;
+            _manualCaptureRecorder.StateChanged += ManualCaptureRecorderStateChanged;
+            if (_manualCaptureRecorder is IReplayCaptureController replayController)
+            {
+                _replayCaptureState = replayController.ReplayStatus.State;
+                replayController.ReplayStateChanged += ReplayCaptureStateChanged;
+            }
+            if (_manualCaptureRecorder is IReactionCameraController reactionCameraController)
+            {
+                _reactionCameraStatus = reactionCameraController.ReactionCameraStatus;
+                reactionCameraController.ReactionCameraStateChanged += ReactionCameraStateChanged;
+            }
+        }
 
         if (_settings.IsValid)
         {
@@ -110,6 +376,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             SetStatus("Setup required");
             Application.Idle += ShowFirstRunSettings;
+        }
+        _ = TryApplyCaptureHotkey(
+            _captureSettings,
+            out var initialCaptureHotkeyAvailable,
+            out var captureHotkeyError);
+        _captureHotkeyAvailable = initialCaptureHotkeyAvailable;
+        if (!_captureHotkeyAvailable)
+        {
+            Log.Error($"Could not register the Instant Replay shortcut. Windows error {captureHotkeyError}.");
+            _uiContext.Post(_ => ShowHotkeyNotification(
+                "Replay shortcut unavailable",
+                $"{_captureSettings.SaveHotkey} is already in use. Choose another shortcut in Capture.",
+                ToolTipIcon.Warning), null);
+        }
+        if (_manualCaptureRecorder is not null)
+        {
+            _ = WarmCaptureHostAsync();
         }
     }
 
@@ -150,9 +433,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     _settings,
                     UploadPreparedEditedClipExclusiveAsync),
                 favorites: _favorites,
-                captureSettings: CaptureSettingsStore.Load(),
-                captureEngineAvailable: false,
-                saveCaptureSettings: CaptureSettingsStore.Save);
+                captureSettings: _captureSettings,
+                captureEngineAvailable: _manualCaptureRecorder is IReplayCaptureController,
+                saveCaptureSettings: SaveAndApplyCaptureSettings,
+                manualCaptureRecorder: _manualCaptureRecorder);
+            form.GalleryRenditionRetryRequested += GalleryRenditionRetryRequested;
             _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
                 form.SavedSettings is not null &&
@@ -738,9 +1023,436 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _uiContext.Post(_ =>
         {
+            _baseTrayStatus = status;
             _statusItem.Text = status;
-            _trayIcon.Text = status.Length <= 63 ? status : status[..63];
+            UpdateTrayCaptureIndicator();
         }, null);
+    }
+
+    private async Task WarmCaptureHostAsync()
+    {
+        if (_captureHostClient is null) return;
+        try
+        {
+            await _captureHostClient.EnsureReadyAsync(_lifetimeCancellation.Token)
+                .ConfigureAwait(false);
+            await StartConfiguredReplayWhenGameAppearsAsync().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            Log.Error("ClipCord could not warm its isolated capture worker.", exception);
+        }
+    }
+
+    private async Task StartConfiguredReplayWhenGameAppearsAsync()
+    {
+        if (_replayStartCoordinator is not null)
+        {
+            await _replayStartCoordinator.RequestAsync().ConfigureAwait(false);
+        }
+    }
+
+    private void SaveAndApplyCaptureSettings(CaptureSettings settings)
+    {
+        settings = CaptureSettings.Normalize(settings);
+        var previous = _captureSettings;
+        var failClosedCameraSettings = previous.IncludeReactionCamera &&
+            !settings.IncludeReactionCamera
+                ? previous with { IncludeReactionCamera = false }
+                : null;
+        if (failClosedCameraSettings is not null)
+        {
+            _captureSettings = failClosedCameraSettings;
+        }
+        if (!TryApplyCaptureHotkey(settings, out var appliedHotkeyAvailable, out var errorCode))
+        {
+            _captureHotkeyAvailable = appliedHotkeyAvailable;
+            throw new InvalidOperationException(
+                $"{settings.SaveHotkey} is already in use. Choose another Instant Replay shortcut.");
+        }
+        _captureHotkeyAvailable = appliedHotkeyAvailable;
+        try
+        {
+            CaptureSettingsStore.Save(settings);
+            _captureSettings = settings;
+            _silhouetteProcessingCoordinator.UpdateLibraryRoot(settings.LibraryRoot);
+            if (settings.InstantReplayEnabled)
+            {
+                _ = StartConfiguredReplayWhenGameAppearsAsync();
+            }
+        }
+        catch
+        {
+            _ = TryApplyCaptureHotkey(previous, out var restoredHotkeyAvailable, out _);
+            _captureHotkeyAvailable = restoredHotkeyAvailable;
+            _captureSettings = failClosedCameraSettings ?? previous;
+            _silhouetteProcessingCoordinator.UpdateLibraryRoot(_captureSettings.LibraryRoot);
+            throw;
+        }
+    }
+
+    private void CaptureProjectCommitted(
+        object? sender,
+        CaptureProjectCommittedEventArgs eventArgs)
+    {
+        _ = _silhouetteProcessingCoordinator.TryEnqueue(
+            eventArgs.LibraryRoot,
+            eventArgs.ProjectId);
+    }
+
+    private async void GalleryRenditionRetryRequested(
+        object? sender,
+        GalleryRenditionRetryRequestedEventArgs eventArgs)
+    {
+        try
+        {
+            var scheduled = await _silhouetteProcessingCoordinator.RetryAsync(
+                eventArgs.LibraryRoot,
+                eventArgs.ProjectId,
+                eventArgs.OrientationId,
+                _lifetimeCancellation.Token);
+            if (!scheduled && !_shutdownScheduled)
+            {
+                Log.Info(
+                    $"The {GalleryCatalog.GetOrientationName(eventArgs.OrientationId)} silhouette retry " +
+                    $"for project {eventArgs.ProjectId} was no longer eligible or was already active.");
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Error(
+                $"ClipCord could not retry the {eventArgs.OrientationId} silhouette rendition.",
+                exception);
+            if (!_shutdownScheduled)
+            {
+                ShowHotkeyNotification(
+                    "Rendition retry unavailable",
+                    "ClipCord could not restart that local rendition. Refresh Gallery and try again.",
+                    ToolTipIcon.Warning);
+            }
+        }
+    }
+
+    private bool TryApplyCaptureHotkey(
+        CaptureSettings settings,
+        out bool hotkeyAvailable,
+        out int errorCode) =>
+        CaptureHotkeyRegistration.TryApply(
+            _globalHotkey,
+            settings,
+            out hotkeyAvailable,
+            out errorCode);
+
+    private void GlobalHotkeyPressed(object? sender, GlobalHotkeyPressedEventArgs eventArgs)
+    {
+        if (eventArgs.Identifier != GlobalHotkeyManager.CaptureHotkeyIdentifier) return;
+        _ = SaveReplayFromHotkeyAsync();
+    }
+
+    private async Task SaveReplayFromHotkeyAsync()
+    {
+        if (_shutdownScheduled ||
+            Interlocked.Exchange(ref _replaySaveInProgress, 1) != 0)
+        {
+            return;
+        }
+        try
+        {
+            var replayController = _manualCaptureRecorder as IReplayCaptureController;
+            var status = replayController?.ReplayStatus;
+            var availability = status is null
+                ? ReplaySaveAvailability.Off
+                : ReplayCapturePolicy.ClassifySaveAvailability(
+                    _captureSettings.InstantReplayEnabled,
+                    status);
+            if (availability != ReplaySaveAvailability.Ready)
+            {
+                var presentation = availability switch
+                {
+                    ReplaySaveAvailability.WaitingForGame => (
+                        "Waiting for a game",
+                        "No clip was saved. ClipCord will begin buffering automatically after it detects a supported game.",
+                        ToolTipIcon.Info),
+                    ReplaySaveAvailability.NeedsAttention => (
+                        "Instant Replay needs attention",
+                        "No clip was saved. Open Capture to review the recorder status, then restart Instant Replay.",
+                        ToolTipIcon.Warning),
+                    _ => (
+                        "Instant Replay is off",
+                        "Enable Instant Replay in Capture before using the save shortcut.",
+                        ToolTipIcon.Info)
+                };
+                ShowHotkeyNotification(
+                    presentation.Item1,
+                    presentation.Item2,
+                    presentation.Item3);
+                return;
+            }
+            var result = await replayController!.SaveReplayAsync(_lifetimeCancellation.Token);
+            if (result is not null)
+            {
+                ShowModeFeedback(ModeFeedbackPresentation.ForCapturedClip(
+                    result.GameName,
+                    result.Duration));
+                if (!string.IsNullOrWhiteSpace(result.ReactionCameraWarning))
+                {
+                    ShowHotkeyNotification(
+                        "Gameplay clip saved",
+                        "The gameplay clip was saved, but its optional Reaction Camera layer may be missing or incomplete.",
+                        ToolTipIcon.Warning);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            Log.Error("ClipCord could not save the Instant Replay hotkey snapshot.", exception);
+            ShowModeFeedback(ModeFeedbackPresentation.CaptureFailed);
+        }
+        finally
+        {
+            Volatile.Write(ref _replaySaveInProgress, 0);
+        }
+    }
+
+    private void ReplayCaptureStateChanged(object? sender, EventArgs eventArgs)
+    {
+        _uiContext.Post(_ =>
+        {
+            if (_shutdownScheduled || sender is not IReplayCaptureController replayController) return;
+            var previous = _replayCaptureState;
+            var replayStatus = replayController.ReplayStatus;
+            _replayCaptureState = replayStatus.State;
+            UpdateTrayCaptureIndicator();
+            if (_replayCaptureState == ReplayCaptureState.Buffering &&
+                previous == ReplayCaptureState.Starting)
+            {
+                ShowModeFeedback(ModeFeedbackPresentation.CaptureStarted);
+            }
+            else if (ReplayCapturePolicy.ShouldAttemptAutomaticStart(
+                         _captureSettings.InstantReplayEnabled,
+                         _captureHotkeyAvailable,
+                         replayStatus))
+            {
+                _ = StartConfiguredReplayWhenGameAppearsAsync();
+            }
+            else if (_replayCaptureState == ReplayCaptureState.Failed)
+            {
+                ShowModeFeedback(ModeFeedbackPresentation.CaptureFailed);
+            }
+        }, null);
+    }
+
+    private void ManualCaptureRecorderStateChanged(object? sender, EventArgs eventArgs)
+    {
+        _uiContext.Post(_ =>
+        {
+            if (_shutdownScheduled || _manualCaptureRecorder is null) return;
+            var previous = _manualCaptureState;
+            _manualCaptureState = _manualCaptureRecorder.State;
+            UpdateTrayCaptureIndicator();
+
+            if (_manualCaptureState == ManualCaptureState.Recording &&
+                previous != ManualCaptureState.Recording)
+            {
+                ShowModeFeedback(ModeFeedbackPresentation.CaptureStarted);
+            }
+            else if (_manualCaptureState == ManualCaptureState.Ready &&
+                     previous == ManualCaptureState.Finalizing)
+            {
+                ShowModeFeedback(ModeFeedbackPresentation.ForCapturedClip(
+                    _manualCaptureRecorder.Target?.DisplayName,
+                    TimeSpan.Zero));
+            }
+            else if (_manualCaptureState == ManualCaptureState.Failed)
+            {
+                ShowModeFeedback(ModeFeedbackPresentation.CaptureFailed);
+            }
+        }, null);
+    }
+
+    private void ReactionCameraStateChanged(object? sender, EventArgs eventArgs)
+    {
+        _uiContext.Post(_ =>
+        {
+            if (_shutdownScheduled || sender is not IReactionCameraController reactionCameraController)
+            {
+                return;
+            }
+            _reactionCameraStatus = reactionCameraController.ReactionCameraStatus;
+            UpdateTrayCaptureIndicator();
+        }, null);
+    }
+
+    private async Task DisableReactionCameraFromTrayAsync()
+    {
+        if (_shutdownScheduled ||
+            _manualCaptureRecorder is not IReactionCameraController reactionCameraController)
+        {
+            return;
+        }
+        var currentCameraStatus = reactionCameraController.ReactionCameraStatus;
+        if (currentCameraStatus.ReleaseNeedsAttention)
+        {
+            RequestExit();
+            return;
+        }
+        if (!(currentCameraStatus.IsActive || currentCameraStatus.IsStarting) ||
+            Interlocked.Exchange(ref _reactionCameraDisableInProgress, 1) != 0)
+        {
+            return;
+        }
+
+        Exception? preferenceFailure = null;
+        Exception? runtimeFailure = null;
+        try
+        {
+            var disabledSettings = CaptureSettings.Normalize(_captureSettings with
+            {
+                IncludeReactionCamera = false
+            });
+            // Fail closed in memory even if the settings file cannot be updated. A later
+            // automatically detected game in this process must not reopen a camera the user
+            // explicitly turned off.
+            _captureSettings = disabledSettings;
+            _settingsForm?.ApplyExternalCaptureSettings(disabledSettings);
+            try
+            {
+                CaptureSettingsStore.Save(disabledSettings);
+            }
+            catch (Exception exception)
+            {
+                preferenceFailure = exception;
+                Log.Error(
+                    "ClipCord could not save the Reaction Camera off preference from the tray.",
+                    exception);
+            }
+
+            try
+            {
+                await reactionCameraController.DisableReactionCameraAsync(
+                    _lifetimeCancellation.Token);
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+            {
+                runtimeFailure = exception;
+                Log.Error("ClipCord could not turn Reaction Camera off from the tray.", exception);
+            }
+
+            if (_shutdownScheduled) return;
+            _reactionCameraStatus = reactionCameraController.ReactionCameraStatus;
+            UpdateTrayCaptureIndicator();
+            if (preferenceFailure is not null ||
+                runtimeFailure is not null ||
+                _reactionCameraStatus.ReleaseNeedsAttention)
+            {
+                ShowHotkeyNotification(
+                    "Reaction Camera needs attention",
+                    _reactionCameraStatus.ReleaseNeedsAttention
+                        ? "The camera stopped accepting new frames, but Windows has not confirmed release. Exit ClipCord from the tray to guarantee the device closes; gameplay capture continues."
+                        : _reactionCameraStatus.IsActive
+                        ? "Reaction Camera may still be active. Gameplay capture continues; open Capture to review its status."
+                        : "Reaction Camera is not currently active, but ClipCord could not save every part of the off request. Review Capture before the next game.",
+                    ToolTipIcon.Warning);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _reactionCameraDisableInProgress, 0);
+        }
+    }
+
+    private void UpdateTrayCaptureIndicator()
+    {
+        var captureText = _replayCaptureState switch
+        {
+            ReplayCaptureState.Starting => "ClipCord — Starting Instant Replay",
+            ReplayCaptureState.Buffering => "ClipCord — Instant Replay active",
+            ReplayCaptureState.Saving => "ClipCord — Saving replay",
+            ReplayCaptureState.Stopping => "ClipCord — Stopping replay",
+            ReplayCaptureState.Off when _captureSettings.InstantReplayEnabled =>
+                "ClipCord — Waiting for a game",
+            ReplayCaptureState.Failed when _captureSettings.InstantReplayEnabled =>
+                "ClipCord — Waiting for a game",
+            _ => _manualCaptureState switch
+            {
+            ManualCaptureState.Starting => "ClipCord — Starting capture",
+            ManualCaptureState.Recording => "ClipCord — Recording game",
+            ManualCaptureState.Finalizing => "ClipCord — Saving recording",
+                _ => _baseTrayStatus
+            }
+        };
+        var cameraIndicatorState = ReactionCameraTrayIconFactory.SelectState(_reactionCameraStatus);
+        var cameraActive = cameraIndicatorState == ReactionCameraRuntimeState.Active;
+        var cameraStarting = cameraIndicatorState == ReactionCameraRuntimeState.Starting;
+        var cameraNeedsAttention =
+            cameraIndicatorState == ReactionCameraRuntimeState.ReleaseNeedsAttention;
+        var cameraInUse = cameraActive || cameraStarting || cameraNeedsAttention;
+        var desiredIcon = cameraActive
+            ? _reactionCameraActiveIcon
+            : cameraStarting
+                ? _reactionCameraStartingIcon
+                : cameraNeedsAttention
+                    ? _reactionCameraAttentionIcon
+                    : _applicationIcon;
+        if (!ReferenceEquals(_trayIcon.Icon, desiredIcon)) _trayIcon.Icon = desiredIcon;
+        _disableReactionCameraItem.Visible = cameraInUse;
+        _disableReactionCameraItem.Enabled = cameraInUse;
+        _disableReactionCameraItem.Text = cameraNeedsAttention
+            ? "Exit ClipCord to release Reaction Camera"
+            : "Turn Reaction Camera off";
+        _statusItem.Text = cameraNeedsAttention
+            ? "Reaction Camera release needs attention"
+            : cameraActive
+            ? $"{_baseTrayStatus} · Reaction Camera active"
+            : cameraStarting
+                ? $"{_baseTrayStatus} · Reaction Camera starting"
+                : _baseTrayStatus;
+
+        var text = captureText;
+        if (cameraNeedsAttention)
+        {
+            text = "ClipCord — Camera stopping; exit to force release";
+        }
+        else if (cameraActive)
+        {
+            const string clipCordPrefix = "ClipCord — ";
+            const string cameraActivePrefix = "ClipCord — Reaction Camera active";
+            const string separator = " · ";
+            var context = captureText.StartsWith(clipCordPrefix, StringComparison.Ordinal)
+                ? captureText[clipCordPrefix.Length..]
+                : captureText;
+            var maximumContextLength = 63 - cameraActivePrefix.Length - separator.Length;
+            if (context.Length > maximumContextLength)
+            {
+                context = context[..maximumContextLength];
+            }
+            text = $"{cameraActivePrefix}{separator}{context}";
+        }
+        else if (cameraStarting)
+        {
+            const string clipCordPrefix = "ClipCord — ";
+            const string cameraStartingPrefix = "ClipCord — Reaction Camera starting";
+            const string separator = " · ";
+            var context = captureText.StartsWith(clipCordPrefix, StringComparison.Ordinal)
+                ? captureText[clipCordPrefix.Length..]
+                : captureText;
+            var maximumContextLength = 63 - cameraStartingPrefix.Length - separator.Length;
+            if (context.Length > maximumContextLength)
+            {
+                context = context[..maximumContextLength];
+            }
+            text = $"{cameraStartingPrefix}{separator}{context}";
+        }
+        _trayIcon.Text = text.Length <= 63 ? text : text[..63];
     }
 
     private void OpenClipsFolder()
@@ -769,8 +1481,28 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _updateTimer.Dispose();
         _lifetimeCancellation.Cancel();
         _globalHotkey.Pressed -= ModeToggleHotkeyPressed;
+        _globalHotkey.HotkeyPressed -= GlobalHotkeyPressed;
         _globalHotkey.Dispose();
         _modeFeedbackOverlay.Dispose();
+        if (_captureProjectCompletionSource is not null)
+        {
+            _captureProjectCompletionSource.ProjectCommitted -= CaptureProjectCommitted;
+        }
+        _silhouetteProcessingCoordinator.Dispose();
+        if (_manualCaptureRecorder is not null)
+        {
+            _manualCaptureRecorder.StateChanged -= ManualCaptureRecorderStateChanged;
+            if (_manualCaptureRecorder is IReplayCaptureController replayController)
+            {
+                replayController.ReplayStateChanged -= ReplayCaptureStateChanged;
+            }
+            if (_manualCaptureRecorder is IReactionCameraController reactionCameraController)
+            {
+                reactionCameraController.ReactionCameraStateChanged -= ReactionCameraStateChanged;
+            }
+        }
+        _manualCaptureRecorder?.Dispose();
+        _captureHostClient?.Dispose();
         _controller?.Dispose();
         _updateCoordinator.Dispose();
         _updateDownloadService.Dispose();
@@ -778,6 +1510,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _lifetimeCancellation.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
+        _reactionCameraAttentionIcon.Dispose();
+        _reactionCameraActiveIcon.Dispose();
+        _reactionCameraStartingIcon.Dispose();
         _applicationIcon.Dispose();
         base.ExitThreadCore();
     }
