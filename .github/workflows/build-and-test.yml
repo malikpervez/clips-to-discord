@@ -22,11 +22,18 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Build with warnings as errors
+      - name: Build application with warnings as errors
         run: dotnet build .\ClipsToDiscord.csproj -c Release -warnaserror
 
+      - name: Build smoke tests with warnings as errors
+        run: dotnet build .\tests\ClipsToDiscord.SmokeTests\ClipsToDiscord.SmokeTests.csproj -c Release -warnaserror
+
+      - name: Prepare verified FFmpeg test dependency
+        shell: powershell
+        run: .\scripts\get-ffmpeg.ps1 | Out-Null
+
       - name: Run smoke tests
-        run: dotnet run --project .\tests\ClipsToDiscord.SmokeTests\ClipsToDiscord.SmokeTests.csproj -c Release
+        run: dotnet run --project .\tests\ClipsToDiscord.SmokeTests\ClipsToDiscord.SmokeTests.csproj -c Release --no-build
 
       - name: Build portable package layout
         shell: powershell
