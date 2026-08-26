@@ -24,6 +24,24 @@ function Get-OrdinaryFile([string]$Path, [string]$Description) {
     return $item
 }
 
+function Assert-StoreVersion([string]$Value, [string]$Description) {
+    if ($Value -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+        throw "$Description must use four numeric parts: $Value"
+    }
+    $parts = $Value.Split('.')
+    foreach ($part in $parts) {
+        if ([int]$part -gt 65535) {
+            throw "Each $Description part must be between 0 and 65535: $Value"
+        }
+    }
+    if ([int]$parts[0] -eq 0) {
+        throw "$Description major version must be greater than zero: $Value"
+    }
+    if ([int]$parts[3] -ne 0) {
+        throw "$Description fourth part is reserved for Microsoft Store use and must be zero: $Value"
+    }
+}
+
 function Get-RepositoryLicenseFiles {
     if (-not (Test-Path -LiteralPath $licensesSourceDirectory -PathType Container)) {
         throw "The repository license directory was not found: $licensesSourceDirectory"
@@ -85,8 +103,8 @@ $noticesSource = Get-OrdinaryFile $noticesSourcePath 'The repository third-party
 $licenseSources = @(Get-RepositoryLicenseFiles)
 
 [void](Get-OrdinaryFile $PackagePath 'The MSIX package')
-if ($ExpectedVersion -and $ExpectedVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
-    throw "ExpectedVersion must use four numeric parts: $ExpectedVersion"
+if ($ExpectedVersion) {
+    Assert-StoreVersion $ExpectedVersion 'ExpectedVersion'
 }
 
 $resolvedArtifacts = [IO.Path]::GetFullPath($artifactsDirectory).TrimEnd('\', '/')
@@ -127,6 +145,7 @@ $namespace.AddNamespace('uap11', 'http://schemas.microsoft.com/appx/manifest/uap
 $namespace.AddNamespace('rescap', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities')
 
 $identity = $manifest.SelectSingleNode('/f:Package/f:Identity', $namespace)
+Assert-StoreVersion ([string]$identity.Version) 'The packaged MSIX version'
 if ($identity.Name -ne 'DKGLabs.ClipCord') {
     throw "Unexpected Store identity: $($identity.Name)"
 }

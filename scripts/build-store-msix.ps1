@@ -95,17 +95,25 @@ if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $artifactsDirectory 'store'
 }
 if (-not $Version) {
-    [xml]$project = Get-Content -LiteralPath $projectPath
-    $Version = "{0}.0" -f [string]$project.Project.PropertyGroup.Version
+    $Version = & (Join-Path $PSScriptRoot 'resolve-package-version.ps1') `
+        -ProjectPath $projectPath `
+        -Format Store
 }
 
 if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "MSIX version must use four numeric parts: $Version"
 }
-foreach ($part in $Version.Split('.')) {
+$versionParts = $Version.Split('.')
+foreach ($part in $versionParts) {
     if ([int]$part -gt 65535) {
         throw "Each MSIX version part must be between 0 and 65535: $Version"
     }
+}
+if ([int]$versionParts[0] -eq 0) {
+    throw "The MSIX major version must be greater than zero: $Version"
+}
+if ([int]$versionParts[3] -ne 0) {
+    throw "The fourth MSIX version part is reserved for Microsoft Store use and must be zero: $Version"
 }
 if ($IdentityName -notmatch '^[A-Za-z0-9.-]{3,50}$') {
     throw "The Store identity name contains unsupported characters: $IdentityName"

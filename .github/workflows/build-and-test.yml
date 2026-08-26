@@ -22,6 +22,40 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Validate package version normalization
+        shell: powershell
+        run: |
+          $cases = @(
+            @{ Input = '2.0.0-alpha.1'; Core = '2.0.0'; Store = '2.0.0.0' },
+            @{ Input = '2.0.0+sha.abc123'; Core = '2.0.0'; Store = '2.0.0.0' },
+            @{ Input = '1.15.0'; Core = '1.15.0'; Store = '1.15.0.0' }
+          )
+          foreach ($case in $cases) {
+            $core = .\scripts\resolve-package-version.ps1 `
+              -ProjectVersion $case.Input `
+              -Format Core
+            $store = .\scripts\resolve-package-version.ps1 `
+              -ProjectVersion $case.Input `
+              -Format Store
+            if ($core -cne $case.Core -or $store -cne $case.Store) {
+              throw "Unexpected package-version mapping for $($case.Input): core=$core, store=$store"
+            }
+          }
+          foreach ($invalid in @('0.1.0', '1.2.3.4', '1.65536.0', '1.2.3-')) {
+            $rejected = $false
+            try {
+              .\scripts\resolve-package-version.ps1 `
+                -ProjectVersion $invalid `
+                -Format Store | Out-Null
+            }
+            catch {
+              $rejected = $true
+            }
+            if (-not $rejected) {
+              throw "Invalid package version was accepted: $invalid"
+            }
+          }
+
       - name: Build application with warnings as errors
         run: dotnet build .\ClipsToDiscord.csproj -c Release -warnaserror
 
@@ -47,8 +81,7 @@ jobs:
         shell: powershell
         run: |
           $ffmpegDirectory = .\scripts\get-ffmpeg.ps1
-          [xml]$project = Get-Content .\ClipsToDiscord.csproj
-          $storeVersion = "{0}.0" -f [string]$project.Project.PropertyGroup.Version
+          $storeVersion = .\scripts\resolve-package-version.ps1 -Format Store
           .\scripts\build-store-msix.ps1 `
             -Version $storeVersion `
             -FfmpegPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') `

@@ -132,8 +132,9 @@ if (-not $OutputDirectory) {
     $OutputDirectory = $artifactsDirectory
 }
 if (-not $Version) {
-    [xml]$project = Get-Content (Join-Path $repositoryRoot 'ClipsToDiscord.csproj')
-    $Version = [string]$project.Project.PropertyGroup.Version
+    $Version = & (Join-Path $PSScriptRoot 'resolve-package-version.ps1') `
+        -ProjectPath (Join-Path $repositoryRoot 'ClipsToDiscord.csproj') `
+        -Format Core
 }
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     throw "Installer version must use major.minor.patch format: $Version"
