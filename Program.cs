@@ -5,8 +5,39 @@ namespace ClipsToDiscord;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        if (args.Length > 0 &&
+            args[0].Equals(
+                SilhouetteWorkerLaunchOptions.WorkerArgument,
+                StringComparison.Ordinal))
+        {
+            if (!SilhouetteWorkerLaunchOptions.TryParse(
+                    args,
+                    out var silhouetteWorkerOptions))
+            {
+                Environment.ExitCode = SilhouetteWorkerProcess.InvalidArgumentsExitCode;
+                return;
+            }
+            Environment.ExitCode = SilhouetteWorkerProcess.RunAsync(
+                    silhouetteWorkerOptions!)
+                .GetAwaiter()
+                .GetResult();
+            return;
+        }
+
+        if (args.Length > 0 &&
+            args[0].Equals(CaptureHostLaunchOptions.HostArgument, StringComparison.Ordinal))
+        {
+            if (!CaptureHostLaunchOptions.TryParse(args, out var captureHostOptions))
+            {
+                Environment.ExitCode = 22;
+                return;
+            }
+            Environment.ExitCode = CaptureHostProcess.Run(captureHostOptions!);
+            return;
+        }
+
         UpdateLaunchRequest? pendingUpdate;
         using (var mutex = new Mutex(true, @"Local\ClipsToDiscord_Application", out var createdNew))
         {

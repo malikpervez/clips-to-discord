@@ -4,11 +4,77 @@ using System.Text.Json;
 using System.Windows.Forms;
 using ClipsToDiscord;
 
+var isolatedLogLines = new ConcurrentQueue<string>();
+using var isolatedLogging = Log.RedirectForTests(isolatedLogLines.Enqueue);
+const string isolatedLogSecret =
+    "https://discord.com/api/webhooks/123456789012345678/isolated-test-token";
+Log.Info($"Smoke test diagnostics are isolated: {isolatedLogSecret}");
+if (!isolatedLogLines.TryDequeue(out var isolatedLogProbe) ||
+    !isolatedLogProbe.Contains("Smoke test diagnostics are isolated:", StringComparison.Ordinal) ||
+    !isolatedLogProbe.Contains("[REDACTED DISCORD WEBHOOK]", StringComparison.Ordinal) ||
+    isolatedLogProbe.Contains("isolated-test-token", StringComparison.Ordinal))
+{
+    throw new InvalidOperationException(
+        "Smoke tests must redact and redirect product diagnostics away from the user's real app.log.");
+}
+
 try
 {
     Application.SetHighDpiMode(HighDpiMode.SystemAware);
     Application.EnableVisualStyles();
     Application.SetCompatibleTextRenderingDefault(false);
+
+    if (args.Length == 1 && args[0].Equals("--gallery-renditions", StringComparison.Ordinal))
+    {
+        var galleryRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordGalleryRenditions",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(galleryRoot);
+            GalleryRenditionTests.Run(galleryRoot);
+            Console.WriteLine("Gallery rendition tests passed.");
+        }
+        finally
+        {
+            try { if (Directory.Exists(galleryRoot)) Directory.Delete(galleryRoot, recursive: true); }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 && args[0].Equals("--capture-foundation", StringComparison.Ordinal))
+    {
+        var captureRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordCaptureFoundation",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(captureRoot);
+            CaptureFoundationTests.Run(captureRoot);
+            Console.WriteLine("Capture foundation tests passed.");
+        }
+        finally
+        {
+            try { if (Directory.Exists(captureRoot)) Directory.Delete(captureRoot, recursive: true); }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 4 &&
+        args[0].Equals("--create-silhouette-probe", StringComparison.Ordinal))
+    {
+        var project = SilhouettePipelineProbe.CreateProject(
+            args[1],
+            args[2],
+            args[3]);
+        Console.WriteLine($"ROOT={project.LibraryRoot}");
+        Console.WriteLine($"PROJECT_ID={project.ProjectId}");
+        return;
+    }
 
     if (args.Length == 2 && args[0].Equals("--render-mode-feedback", StringComparison.Ordinal))
     {
@@ -49,6 +115,41 @@ try
         RunPreviewOnStaThread(
             () => RenderSharedPagePreview(args[1], SettingsPage.Gallery),
             "Gallery preview");
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-capture", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(args[1], SettingsPage.Capture),
+            "Capture preview");
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-silhouette-layouts", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(args[1], SettingsPage.SilhouetteLayouts),
+            "Silhouette layouts preview");
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-silhouette-portrait", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(
+                args[1],
+                SettingsPage.SilhouetteLayouts,
+                CompositionOrientationIds.Portrait),
+            "Portrait silhouette layout preview");
+        return;
+    }
+
+    if (args.Length == 2 && args[0].Equals("--render-camera-consent", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderCameraConsentPreview(args[1]),
+            "Camera consent preview");
         return;
     }
 
@@ -415,6 +516,38 @@ try
            AppDistribution.HasPackageIdentityForResult(122) &&
            AppDistribution.HasPackageIdentityForResult(0),
         "Distribution detection must distinguish unpackaged, buffer-query, and packaged results.");
+    Assert(
+        AppDistribution.SelectUpdateRoute(isPackaged: false, manual: false) == AppUpdateRoute.GitHub &&
+        AppDistribution.SelectUpdateRoute(isPackaged: false, manual: true) == AppUpdateRoute.GitHub &&
+        AppDistribution.SelectUpdateRoute(isPackaged: true, manual: false) == AppUpdateRoute.None &&
+        AppDistribution.SelectUpdateRoute(isPackaged: true, manual: true) == AppUpdateRoute.MicrosoftStore,
+        "Packaged ClipCord must suppress automatic GitHub checks and route manual checks to Microsoft Store; unpackaged ClipCord must use GitHub.");
+    var updateTimerStarts = 0;
+    var updateIdleSchedules = 0;
+    var storeAutomaticScheduled = TrayApplicationContext.ConfigureAutomaticUpdateChecks(
+        AppUpdateRoute.None,
+        alreadyScheduled: false,
+        () => updateTimerStarts++,
+        () => updateIdleSchedules++);
+    Assert(
+        !storeAutomaticScheduled && updateTimerStarts == 0 && updateIdleSchedules == 0,
+        "A packaged Store build must not start or schedule the automatic GitHub updater.");
+    var githubAutomaticScheduled = TrayApplicationContext.ConfigureAutomaticUpdateChecks(
+        AppUpdateRoute.GitHub,
+        alreadyScheduled: false,
+        () => updateTimerStarts++,
+        () => updateIdleSchedules++);
+    Assert(
+        githubAutomaticScheduled && updateTimerStarts == 1 && updateIdleSchedules == 1,
+        "An unpackaged build must start its GitHub update timer and schedule its initial idle check exactly once.");
+    var githubAlreadyScheduled = TrayApplicationContext.ConfigureAutomaticUpdateChecks(
+        AppUpdateRoute.GitHub,
+        alreadyScheduled: true,
+        () => updateTimerStarts++,
+        () => updateIdleSchedules++);
+    Assert(
+        githubAlreadyScheduled && updateTimerStarts == 2 && updateIdleSchedules == 1,
+        "Restarting an unpackaged controller may restart its timer but must not register a duplicate idle update check.");
     var storeUpdatesStartInfo = AppDistribution.CreateStoreUpdatesStartInfo();
     Assert(storeUpdatesStartInfo.UseShellExecute &&
            storeUpdatesStartInfo.FileName == "ms-windows-store://downloadsandupdates" &&
@@ -577,6 +710,8 @@ try
 
     TraceSmokeStep("Capture source discovery");
     await AssertCaptureSourceDiscoveryAsync(Path.Combine(temporaryRoot, "capture-sources"));
+    TraceSmokeStep("ClipCord 2.0 capture foundation");
+    CaptureFoundationTests.Run(Path.Combine(temporaryRoot, "capture-foundation"));
 
     TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
@@ -1608,30 +1743,48 @@ static void AssertFigmaIconAssets()
     {
         [FigmaIconAsset.About] = ("about.png", "75ccb0fff9cf1b20dddfe69e52ab1454c3ab780e9e57fc551ad03cbb84611f63"),
         [FigmaIconAsset.Activity] = ("activity.png", "e554febc29160a06cf3fa0d4f2c96a588e715ff0ee21f13729ce6d1460beabd7"),
+        [FigmaIconAsset.Alert] = ("alert.png", "3931a2661fcaacba7b5021f340ff1efa7f1a6786ed6f755b9560c2a3f7b3d4e8"),
         [FigmaIconAsset.ArrowRight] = ("arrow-right.png", "a58377d09ce909c12cc81bdf164a24b1d49a565228886adc1cdf55d9caa1bbed"),
         [FigmaIconAsset.Bolt] = ("bolt.png", "838518842a4e6007969c4885476706410db290c81da0bd04907ceb8d5b0452ae"),
         [FigmaIconAsset.Check] = ("check.png", "8c84455f48add96786b59c2f1d71ec07f4663e0d937b14a4d6e2ebcf9c964a2c"),
+        [FigmaIconAsset.ChevronLeft] = ("chevron-left.png", "411fdc5c1d78aabe9a657f2dbd790349f8d70d0b47289d5e275cef1e1fb59bb9"),
         [FigmaIconAsset.ChevronRight] = ("chevron-right.png", "3a46b243c84b607d12f2e22c7c1bcb6b615a583288e492e4cff9df9e92766e15"),
         [FigmaIconAsset.Clock] = ("clock.png", "da18e4f5e86c4cf840f12d0b94175988b5a19d41263251e64d2b3ea40d02e8a6"),
+        [FigmaIconAsset.Crop] = ("crop.png", "7ad1f98ebb747a33efa74c0253215457d09569a9e66e57f4889bc5d8e19dee4c"),
+        [FigmaIconAsset.Capture] = ("capture.png", "912e1d9bf4283f2efcb93fa5ecfc22d6ecad05bac1a814acdf978278a00208d0"),
+        [FigmaIconAsset.Camera] = ("camera.png", "83ecc66bb79810e011393706955c9150f605e232e779df4cf771e397258bd4c8"),
+        [FigmaIconAsset.Disk] = ("disk.png", "0f3e02645b64cf7d500096d2366fa5fefbce876a116bf157b019526cacfda0b0"),
+        [FigmaIconAsset.Discord] = ("discord.png", "f6f4c1a7709c4921c9667e13255d7fbcdb080150194754788670aed8c882e549"),
         [FigmaIconAsset.External] = ("external.png", "48d0435ca376de91be57f9d57fd6918a532b0689b96a187b93acda3de48ec696"),
         [FigmaIconAsset.Film] = ("film.png", "5cdab9d22795aa1818a30095713e3a8b0c7b6d1c17fd4cb64dc7d72c3e348ddb"),
         [FigmaIconAsset.Folder] = ("folder.png", "fc9aa588cfadbdc8cc5531292a4a4facd930376941d32e6b9907a4fb2d7bde80"),
         [FigmaIconAsset.Gallery] = ("gallery.png", "ed6a0a7bc4a7a337178fb1415fe92039294e62b4c24d5021b9357a42927f1f42"),
         [FigmaIconAsset.Heart] = ("heart.png", "2f76ae84b631bf9bab09283046c84f0b19e0f62ba8774bb3aba10eedf677dcd2"),
         [FigmaIconAsset.HeartFill] = ("heartfill.png", "a7e0cbfb59afb577abbfb406d46ea3468dfe637602485795c2d3cd3e2ce1f19c"),
+        [FigmaIconAsset.Headset] = ("headset.png", "7c61f5a6d7d4bc288573306335d7060c7adc3dd8a7c881bea96cb3dc19abec58"),
         [FigmaIconAsset.Home] = ("home.png", "6557993d604a612d4ae2c06a5d2b2de5454089bcaa3aa7fe97ca1356ae3d5c0f"),
+        [FigmaIconAsset.Landscape] = ("landscape.png", "ea278ca9b8aa52c0874692aaf8dff6e2cd7d5b4669665b303d2e1c921f813518"),
+        [FigmaIconAsset.Layers] = ("layers.png", "6fc3a89ddee32cf19aa9e340aafdaa0ced55d41e83fd2dbe94e0ef83be9e0f29"),
         [FigmaIconAsset.More] = ("more.png", "7825ca39fd29e36d4884d7ca4924e0a27f4e82e473e6e650a5ae8813aa9f343c"),
+        [FigmaIconAsset.Mic] = ("mic.png", "ee66476e921d9795bf35140f98076aac80db17313142c4d3ec3fba36a61bf1c0"),
+        [FigmaIconAsset.Mirror] = ("mirror.png", "fd9cd2792b14a28db1ae1b4ed188d59519daefc48b76abaaa3f36efa9736301e"),
+        [FigmaIconAsset.Move] = ("move.png", "e6314bc5b2a8234d0e9d35f14f71e1970382ed891a54c0685499e98e654b4827"),
+        [FigmaIconAsset.Mute] = ("mute.png", "d9219bcac6bb0936250f1a7aac680e4226191dd57712a16b0b88b2ffdf1c3943"),
         [FigmaIconAsset.Play] = ("play.png", "37709608177cda025a60f73093ca50dc2f1cd6a21a6c7227300a1c1d235e3227"),
+        [FigmaIconAsset.Portrait] = ("portrait.png", "dd657e58343807a30f574dbb261d2a11dd55f16e8147150b32fdcc4368e6ddd3"),
         [FigmaIconAsset.Refresh] = ("refresh.png", "76de4b8515f3a30b10a22aef9aea7bedcefebea1ddd3ea7d6526fe2cab537ff8"),
+        [FigmaIconAsset.SafeZone] = ("safezone.png", "4b5f3881558252b9380a66ab3ea412ca90255bba22571232beb83f1eeeaacaa5"),
         [FigmaIconAsset.Search] = ("search.png", "5864d203d75f638db750af490cc957f15d16e08e65c2a7c0c03c6705a3779fd1"),
         [FigmaIconAsset.Settings] = ("settings.png", "c66fbb264e0b2493606b50618665b035c6551a3d9b4fce8e44462b58212d9e65"),
-        [FigmaIconAsset.Shield] = ("shield.png", "80a16c83d41e6ba022f60011e88707ad5af6a429fa93b93d951aa9fa39b35921"),
+        [FigmaIconAsset.Shield] = ("shield.png", "9e561e36d9db63c365d754c5cc0c587cdc6ed890a72b26259b6b26ab9b01b8bd"),
+        [FigmaIconAsset.Silhouette] = ("silhouette.png", "a8f918e0f4c504784fdb677d906ac8cb2c6ee8897ea04b60b00ab7fa69022440"),
+        [FigmaIconAsset.Speaker] = ("speaker.png", "81bf0beced762c85dc15b8b0b00b1aa62ad8b0641b65cceab98be6122d26da96"),
         [FigmaIconAsset.Trim] = ("trim.png", "e231336c071756e0bb62f946bdece590f614f8aa0334665d75a244a1e01d967d"),
         [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde")
     };
     var enumAssets = Enum.GetValues<FigmaIconAsset>();
-    Assert(enumAssets.Length == 22 && enumAssets.ToHashSet().SetEquals(expected.Keys),
-        $"The approved Figma icon catalog must contain exactly 22 pinned assets; got {string.Join(", ", enumAssets)}.");
+    Assert(enumAssets.Length == 40 && enumAssets.ToHashSet().SetEquals(expected.Keys),
+        $"The approved Figma icon catalog must contain exactly 40 pinned assets; got {string.Join(", ", enumAssets)}.");
 
     var assembly = typeof(FigmaIconRenderer).Assembly;
     var actualResources = assembly.GetManifestResourceNames()
@@ -1641,7 +1794,7 @@ static void AssertFigmaIconAssets()
         .Select(value => resourcePrefix + value.FileName)
         .ToHashSet(StringComparer.Ordinal);
     Assert(actualResources.SetEquals(expectedResources),
-        $"Embedded Figma icon resources diverged from the 22 approved exports: " +
+        $"Embedded Figma icon resources diverged from the 40 approved exports: " +
         $"expected={string.Join(", ", expectedResources.OrderBy(name => name, StringComparer.Ordinal))}; " +
         $"actual={string.Join(", ", actualResources.OrderBy(name => name, StringComparer.Ordinal))}.");
     foreach (var (asset, contract) in expected)
@@ -1659,6 +1812,29 @@ static void AssertFigmaIconAssets()
         using var image = Image.FromStream(imageStream);
         Assert(image.Size == new Size(96, 96),
             $"Figma icon {asset} must remain a square 96x96 alpha mask; got {image.Size}.");
+        if (asset is FigmaIconAsset.Capture or FigmaIconAsset.Camera or FigmaIconAsset.Disk or
+            FigmaIconAsset.Headset or FigmaIconAsset.Mic or FigmaIconAsset.Speaker)
+        {
+            using var bitmap = new Bitmap(image);
+            var cornerAlpha = new[]
+            {
+                bitmap.GetPixel(0, 0).A,
+                bitmap.GetPixel(bitmap.Width - 1, 0).A,
+                bitmap.GetPixel(0, bitmap.Height - 1).A,
+                bitmap.GetPixel(bitmap.Width - 1, bitmap.Height - 1).A
+            };
+            var maximumAlpha = 0;
+            for (var y = 0; y < bitmap.Height; y++)
+            {
+                for (var x = 0; x < bitmap.Width; x++)
+                {
+                    maximumAlpha = Math.Max(maximumAlpha, bitmap.GetPixel(x, y).A);
+                }
+            }
+            Assert(maximumAlpha == 255 && cornerAlpha.All(alpha => alpha == 0),
+                $"Figma icon {asset} must remain a full-opacity silhouette on a transparent canvas; " +
+                $"max={maximumAlpha}, corners={string.Join(',', cornerAlpha)}.");
+        }
         if (asset is FigmaIconAsset.Heart or FigmaIconAsset.HeartFill)
         {
             using var bitmap = new Bitmap(image);
@@ -1692,6 +1868,7 @@ static void AssertFigmaIconAssets()
         [BrandGlyph.Home] = FigmaIconAsset.Home,
         [BrandGlyph.Settings] = FigmaIconAsset.Settings,
         [BrandGlyph.Activity] = FigmaIconAsset.Activity,
+        [BrandGlyph.Capture] = FigmaIconAsset.Capture,
         [BrandGlyph.Gallery] = FigmaIconAsset.Gallery,
         [BrandGlyph.About] = FigmaIconAsset.About,
         [BrandGlyph.Folder] = FigmaIconAsset.Folder,
@@ -2161,6 +2338,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertActivityEditorHandoff(settings);
             TraceSmokeStep("Settings layout: About actions and privacy seams");
             AssertAboutViewActions(settings);
+            TraceSmokeStep("Settings layout: Capture source separation and controls");
+            AssertCaptureViewContract(settings);
             TraceSmokeStep("Settings layout: Activity navigation lifecycle");
             using (var activityOnly = new SettingsForm(
                        settings,
@@ -2243,7 +2422,11 @@ static void AssertSettingsFormLayout(AppSettings settings)
                 settings,
                 checkForUpdatesAsync: _ => Task.CompletedTask,
                 watcherStatusProvider: () => "Discord open — local-only mode",
-                activityHistory: activityHistory);
+                activityHistory: activityHistory,
+                captureSettings: CaptureSettings.Default with
+                {
+                    LibraryRoot = Path.Combine(settings.ClipsFolder, "..", "isolated-capture-library")
+                });
             TraceSmokeStep("Settings layout: primary form geometry");
             form.CreateControl();
             Assert(form.Text == "ClipCord — Settings", "The settings window must use the ClipCord brand.");
@@ -2721,6 +2904,14 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertActivityScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Activity action 200% scaling");
             AssertActivityScaledLayout(settings, 2f);
+            TraceSmokeStep("Settings layout: Capture 150% scaling");
+            AssertCaptureScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Capture 200% scaling");
+            AssertCaptureScaledLayout(settings, 2f);
+            TraceSmokeStep("Settings layout: Silhouette editor 150% scaling");
+            AssertSilhouetteScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Silhouette editor 200% scaling");
+            AssertSilhouetteScaledLayout(settings, 2f);
             TraceSmokeStep("Settings layout: Gallery 150% scaling");
             AssertGalleryScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Gallery 200% scaling");
@@ -3903,6 +4094,1017 @@ static void AssertAboutPageSupport(string testRoot)
            selectExistingLog.ArgumentList.Count == 0 &&
            selectExistingLog.Arguments == $"/select,\"{expectedLogPath}\"",
         "About must select an existing log with Explorer's exact safe /select quoting shape.");
+}
+
+static void AssertCaptureViewContract(AppSettings settings)
+{
+    var saved = new List<CaptureSettings>();
+    var defaultCaptureSettings = CaptureSettings.Normalize(null);
+    var repairedOutputSelection = CaptureSettings.Normalize(defaultCaptureSettings with
+    {
+        SilhouetteLandscapeEnabled = false,
+        SilhouettePortraitEnabled = false
+    });
+    var portraitOnlySelection = CaptureSettings.Normalize(defaultCaptureSettings with
+    {
+        SilhouetteLandscapeEnabled = false,
+        SilhouettePortraitEnabled = true
+    });
+    Assert(
+        defaultCaptureSettings.SilhouetteLandscapeEnabled &&
+        !defaultCaptureSettings.SilhouettePortraitEnabled &&
+        repairedOutputSelection.SilhouetteLandscapeEnabled &&
+        !repairedOutputSelection.SilhouettePortraitEnabled &&
+        !portraitOnlySelection.SilhouetteLandscapeEnabled &&
+        portraitOnlySelection.SilhouettePortraitEnabled,
+        "Capture settings must default to Landscape, repair a hostile zero-output state, and preserve an intentional Portrait-only selection.");
+    var captureSettings = CaptureSettings.Default with
+    {
+        LibraryRoot = Path.Combine(settings.ClipsFolder, "..", "ClipCord-capture-library")
+    };
+    var requestedCameraSettings = captureSettings with
+    {
+        IncludeReactionCamera = true,
+        CameraDevice = "Legacy webcam preference"
+    };
+    var legacyCameraSettings = CaptureSettings.Normalize(requestedCameraSettings);
+    var normalEstimate = CaptureProfileCatalog.Estimate(captureSettings.Profile, captureSettings.HasAudio);
+    var gatedCameraEstimate = CaptureProfileCatalog.Estimate(
+        legacyCameraSettings.Profile,
+        legacyCameraSettings.HasAudio);
+    Assert(
+        !legacyCameraSettings.IncludeReactionCamera &&
+        !legacyCameraSettings.Profile.IncludeReactionCamera &&
+        gatedCameraEstimate.ReactionCameraBitrateKbps == 0 &&
+        gatedCameraEstimate.ExpectedBytes == normalEstimate.ExpectedBytes,
+        "A legacy camera preference without explicit ClipCord consent must normalize off and add no camera data to the estimate.");
+    using var form = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Capture,
+        captureSettings: captureSettings,
+        captureEngineAvailable: true,
+        saveCaptureSettings: value => saved.Add(value));
+    form.Show();
+    Application.DoEvents();
+
+    var controls = EnumerateControls(form).ToArray();
+    var capture = controls.OfType<CaptureView>().Single();
+    Assert(capture.Visible && form.Text == "ClipCord — Capture",
+        "The dedicated Capture navigation item must open the ClipCord recorder without replacing Settings.");
+    Assert(controls.Single(control => control.Name == "CaptureNavItem").Visible,
+        "Capture must have its own visible navigation entry between Activity and Gallery.");
+    AssertCaptureLayout(form);
+
+    var game = controls.OfType<ToggleSwitch>().Single(control => control.Name == "RecordGameAudioToggle");
+    var microphone = controls.OfType<ToggleSwitch>().Single(control => control.Name == "IncludeMicrophoneToggle");
+    var voiceChat = controls.OfType<ToggleSwitch>().Single(control => control.Name == "IncludeVoiceChatToggle");
+    var gameDevice = controls.OfType<CaptureDeviceSelector>().Single(control => control.Name == "GameAudioDeviceSelector");
+    var microphoneDevice = controls.OfType<CaptureDeviceSelector>().Single(control => control.Name == "MicrophoneDeviceSelector");
+    var voiceChatDevice = controls.OfType<CaptureDeviceSelector>().Single(control => control.Name == "VoiceChatDeviceSelector");
+    var reactionCamera = controls.OfType<ToggleSwitch>().Single(control => control.Name == "IncludeReactionCameraToggle");
+    var reactionCameraStatus = controls.OfType<Label>().Single(control => control.Name == "ReactionCameraStatus");
+    var reactionCameraCopy = controls.OfType<Label>().Single(control => control.Name == "CaptureCameraPrivacyCopy");
+    Assert(game.Checked && !microphone.Checked && !voiceChat.Checked &&
+           gameDevice.Enabled && !microphoneDevice.Enabled && !voiceChatDevice.Enabled &&
+           !microphoneDevice.TabStop && !voiceChatDevice.TabStop,
+        "The three audio inputs must remain explicit while disabled selectors stay visible and leave the tab order.");
+    Assert(
+        !reactionCamera.Checked && reactionCamera.Enabled && reactionCamera.TabStop &&
+        reactionCameraStatus.Text.Contains("Off", StringComparison.Ordinal) &&
+        reactionCameraStatus.Text.Contains("preview", StringComparison.OrdinalIgnoreCase) &&
+        reactionCameraCopy.Text.Contains("stay in memory", StringComparison.OrdinalIgnoreCase) &&
+        reactionCameraCopy.Text.Contains("silhouette processing", StringComparison.OrdinalIgnoreCase),
+        "Reaction Camera must be opt-in, keyboard reachable, and truthful about memory-only buffering plus local silhouette processing.");
+    Assert(controls.OfType<Label>().Single(label => label.Name == "CaptureEstimatedSizeValue").Text == "about 144 MB" &&
+           controls.OfType<Label>().Single(label => label.Name == "CaptureEstimatedSizeRange").Text.Contains("116–181 MB", StringComparison.Ordinal),
+        "The default 1080p60 estimate must use one mixed 192 kbps audio stream.");
+    AssertCaptureMinimumWidthLayout(form, cameraSelected: false);
+    AssertCaptureDesignedWidthLayout(form);
+
+    microphone.Checked = true;
+    Application.DoEvents();
+    Assert(microphoneDevice.Enabled && microphoneDevice.TabStop && saved.Last().IncludeMicrophone,
+        "Enabling a capture input must activate its device selector and persist the independent input preference.");
+
+    var replay = controls.OfType<ToggleSwitch>().Single(control => control.Name == "InstantReplayToggle");
+    replay.Checked = true;
+    Application.DoEvents();
+    var captureStatus = controls.OfType<Label>().Single(label => label.Name == "CaptureStatusText");
+    Assert(capture.State == CaptureViewState.Buffering &&
+           !game.Enabled && !microphone.Enabled && !voiceChat.Enabled &&
+           !reactionCamera.Enabled && !reactionCamera.Checked &&
+           controls.OfType<Button>().Single(button => button.Name == "ChangeCaptureShortcutButton").Enabled &&
+           captureStatus.Text.Contains("BUFFERING", StringComparison.Ordinal) &&
+           captureStatus.ForeColor == ClipCordTheme.Coral &&
+           reactionCameraStatus.Text.Contains("Off", StringComparison.Ordinal),
+        "Buffering must lock disabled capture inputs while leaving harmless shortcut rebinding available.");
+    Assert(!capture.CurrentSettings.HasHotkeyConflict(settings) &&
+           !capture.CurrentSettings.OverlapsExternalFolder(settings.ClipsFolder),
+        "ClipCord Capture must default to a separate shortcut and storage root from the external watcher.");
+
+    form.Close();
+
+    using (var minimumCameraForm = new SettingsForm(
+               settings,
+               checkForUpdatesAsync: _ => Task.CompletedTask,
+               initialPage: SettingsPage.Capture,
+               captureSettings: captureSettings with
+               {
+                   Resolution = CaptureResolution.UltraHd4K,
+                   FramesPerSecond = 60,
+                   ReplaySeconds = 300,
+                   ReactionCameraConsentGranted = true,
+                   IncludeReactionCamera = true
+               },
+               captureEngineAvailable: true))
+    {
+        minimumCameraForm.Show();
+        Application.DoEvents();
+        AssertCaptureMinimumWidthLayout(minimumCameraForm, cameraSelected: true);
+        minimumCameraForm.Close();
+    }
+
+    var silhouetteSaves = new List<CaptureSettings>();
+    var silhouetteSettingsDirectory = Path.Combine(
+        settings.ClipsFolder,
+        ".silhouette-layout-ui-test");
+    using var silhouetteForm = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Capture,
+        captureSettings: captureSettings with
+        {
+            ReactionCameraConsentGranted = true,
+            IncludeReactionCamera = true
+        },
+        captureEngineAvailable: true,
+        saveCaptureSettings: value => silhouetteSaves.Add(value),
+        silhouetteSettingsDirectory: silhouetteSettingsDirectory);
+    silhouetteForm.Show();
+    Application.DoEvents();
+    var silhouetteControls = EnumerateControls(silhouetteForm).ToArray();
+    var landscapeOutput = silhouetteControls.OfType<ToggleSwitch>()
+        .Single(toggle => toggle.Name == "LandscapeSilhouetteOutputToggle");
+    var portraitOutput = silhouetteControls.OfType<ToggleSwitch>()
+        .Single(toggle => toggle.Name == "PortraitSilhouetteOutputToggle");
+    var outputSummary = silhouetteControls.OfType<Label>()
+        .Single(label => label.Name == "SilhouetteOutputSummary");
+    var editLayouts = silhouetteControls.OfType<OutlineButton>()
+        .Single(button => button.Name == "EditSilhouetteLayoutsButton");
+    var landscapeRow = silhouetteControls.Single(control =>
+        control.Name == "CaptureLandscapeSilhouetteOutputRow");
+    var portraitRow = silhouetteControls.Single(control =>
+        control.Name == "CapturePortraitSilhouetteOutputRow");
+    Assert(
+        landscapeOutput.Checked && !portraitOutput.Checked &&
+        landscapeOutput.Enabled && portraitOutput.Enabled &&
+        landscapeOutput.TabStop && portraitOutput.TabStop &&
+        outputSummary.Text == "1 SELECTED · REQUIRED" &&
+        editLayouts.Visible && editLayouts.Enabled && editLayouts.TabStop &&
+        editLayouts.LeadingIcon == FigmaIconAsset.Silhouette &&
+        EnumerateControls(landscapeRow).OfType<FigmaIconControl>()
+            .Single().Asset == FigmaIconAsset.Landscape &&
+        EnumerateControls(portraitRow).OfType<FigmaIconControl>()
+            .Single().Asset == FigmaIconAsset.Portrait,
+        "Reaction Camera must reveal the approved Figma Landscape/Portrait selectors, default to one required Landscape output, and keep layout editing keyboard reachable.");
+
+    portraitOutput.Checked = true;
+    Application.DoEvents();
+    Assert(
+        silhouetteSaves.Last().SilhouetteLandscapeEnabled &&
+        silhouetteSaves.Last().SilhouettePortraitEnabled &&
+        outputSummary.Text == "BOTH SELECTED",
+        "Selecting Portrait must persist both automatic rendition choices and update the Figma summary.");
+    landscapeOutput.Checked = false;
+    Application.DoEvents();
+    Assert(
+        !silhouetteSaves.Last().SilhouetteLandscapeEnabled &&
+        silhouetteSaves.Last().SilhouettePortraitEnabled,
+        "Landscape and Portrait output choices must remain independent.");
+    var saveCountBeforeLastOutputAttempt = silhouetteSaves.Count;
+    portraitOutput.Checked = false;
+    Application.DoEvents();
+    Assert(
+        !landscapeOutput.Checked && portraitOutput.Checked &&
+        silhouetteSaves.Count == saveCountBeforeLastOutputAttempt &&
+        outputSummary.Text == "1 SELECTED · REQUIRED",
+        "The last-enabled guard must restore the exact switch the user tried to clear without persisting an impossible zero-output state.");
+
+    var silhouetteCapture = silhouetteControls.OfType<CaptureView>().Single();
+    var silhouetteEditor = silhouetteControls.OfType<SilhouetteLayoutEditorView>().Single();
+    var pageActionHost = silhouetteControls.Single(control => control.Name == "PageActionHost");
+    var captureNavigationItem = silhouetteControls.Single(control => control.Name == "CaptureNavItem");
+    var pageTitle = silhouetteControls.OfType<Label>().Single(label => label.Name == "PageTitleLabel");
+    var pageSubtitle = silhouetteControls.OfType<Label>().Single(label => label.Name == "PageSubtitleLabel");
+    editLayouts.PerformClick();
+    Application.DoEvents();
+    Assert(
+        silhouetteEditor.Visible && !silhouetteCapture.Visible &&
+        silhouetteForm.Text == "ClipCord — Silhouette layouts" &&
+        pageTitle.Text == "Silhouette layouts" &&
+        pageSubtitle.Text.Contains("every capture", StringComparison.OrdinalIgnoreCase) &&
+        captureNavigationItem.AccessibleDescription == "Current page" &&
+        ReferenceEquals(silhouetteEditor.HeaderBackButton.Parent, pageActionHost) &&
+        silhouetteEditor.HeaderBackButton is SilhouetteBackButton &&
+        silhouetteEditor.HeaderBackButton.Name == "SilhouetteLayoutBackButton",
+        "Edit silhouette layouts must open the approved nested editor, retain Capture rail context, and move its exact Figma back action into shared chrome.");
+
+    var landscapeTab = silhouetteControls.OfType<OutlineButton>()
+        .Single(button => button.Name == "SilhouetteLandscapeTab");
+    var portraitTab = silhouetteControls.OfType<OutlineButton>()
+        .Single(button => button.Name == "SilhouettePortraitTab");
+    var safeAreas = silhouetteControls.OfType<ToggleSwitch>()
+        .Single(toggle => toggle.Name == "SilhouetteSafeAreasToggle");
+    var mirror = silhouetteControls.OfType<ToggleSwitch>()
+        .Single(toggle => toggle.Name == "SilhouetteMirrorToggle");
+    var saveLayout = silhouetteControls.OfType<GradientButton>()
+        .Single(button => button.Name == "SilhouetteSaveDefaultLayoutButton");
+    var saveStatus = silhouetteControls.OfType<Label>()
+        .Single(label => label.Name == "SilhouetteLayoutSaveStatusLabel");
+    SilhouettePreferencesDocument? raisedPreferences = null;
+    silhouetteEditor.Saved += (_, eventArgs) => raisedPreferences = eventArgs.Preferences;
+    Assert(
+        silhouetteEditor.SelectedOrientationId == CompositionOrientationIds.Landscape &&
+        landscapeTab.AccessibilitySelected && !portraitTab.AccessibilitySelected &&
+        landscapeTab.LeadingIcon == FigmaIconAsset.Landscape &&
+        portraitTab.LeadingIcon == FigmaIconAsset.Portrait &&
+        !safeAreas.Enabled && !safeAreas.TabStop && mirror.TabStop && saveLayout.TabStop &&
+        saveLayout.LeadingIcon == FigmaIconAsset.Disk &&
+        silhouetteControls.Single(control => control.Name == "SilhouetteLayoutGuideDisclaimer")
+            .Text.Contains("processed silhouette appears after", StringComparison.OrdinalIgnoreCase),
+        "The editor must default to Landscape, use the exact approved orientation/save assets, remain keyboard reachable, and describe its preview as a geometry guide rather than processed video.");
+
+    portraitTab.PerformClick();
+    Application.DoEvents();
+    var contextMode = silhouetteControls.OfType<OutlineButton>()
+        .Single(button => button.Name == "PortraitContextModeButton");
+    var focusMode = silhouetteControls.OfType<OutlineButton>()
+        .Single(button => button.Name == "PortraitFocusCropModeButton");
+    var customMode = silhouetteControls.OfType<OutlineButton>()
+        .Single(button => button.Name == "PortraitCustomModeButton");
+    Assert(
+        silhouetteEditor.SelectedOrientationId == CompositionOrientationIds.Portrait &&
+        portraitTab.AccessibilitySelected && !landscapeTab.AccessibilitySelected &&
+        contextMode.AccessibilitySelected &&
+        contextMode.LeadingIcon == FigmaIconAsset.Landscape &&
+        focusMode.LeadingIcon == FigmaIconAsset.Crop &&
+        customMode.LeadingIcon == FigmaIconAsset.Move &&
+        safeAreas.Enabled && safeAreas.TabStop &&
+        SilhouetteLayoutGuide.GetPortraitSafeArea(new Rectangle(0, 0, 1080, 1920)) ==
+            Rectangle.FromLTRB(60, 180, 940, 1436) &&
+        silhouetteEditor.CurrentPreferences.PortraitComposition.Layout ==
+            PortraitGameplayLayoutMode.Context,
+        "Portrait must open in the context-preserving mode, expose the three approved deterministic layout choices, and use the exact combined TikTok/Shorts safe region without inventing a Landscape overlay.");
+    var portraitModeHost = contextMode.Parent!;
+    Assert(
+        ReferenceEquals(focusMode.Parent, portraitModeHost) &&
+        ReferenceEquals(customMode.Parent, portraitModeHost) &&
+        new[] { contextMode, focusMode, customMode }.All(button =>
+            button.Left >= portraitModeHost.ClientRectangle.Left &&
+            button.Right <= portraitModeHost.ClientRectangle.Right),
+        "Portrait's Context, Focus crop, and Custom actions must reflow inside the inspector instead of clipping at scaled DPI.");
+
+    var sizeSlider = silhouetteControls.OfType<SilhouetteValueSlider>()
+        .Single(slider => slider.Name == "SilhouetteSizeSlider");
+    var updatedPortraitSize = Math.Min(sizeSlider.Maximum, sizeSlider.Value + 0.04);
+    sizeSlider.Value = updatedPortraitSize;
+    saveLayout.PerformClick();
+    var savedPreferencesPath = SilhouettePreferencesStore.GetPath(silhouetteSettingsDirectory);
+    WaitForUiCondition(
+        () => File.Exists(savedPreferencesPath) &&
+              saveStatus.Text.StartsWith("Saved.", StringComparison.Ordinal) &&
+              raisedPreferences is not null,
+        TimeSpan.FromSeconds(5),
+        "The silhouette layout editor did not atomically persist and propagate its reusable defaults.");
+    var savedPreferences = SilhouettePreferencesStore.LoadOrDefault(
+        silhouetteSettingsDirectory,
+        mirrorCamera: true);
+    var savedPortrait = savedPreferences.Document.Layouts.Single(layout =>
+        layout.OrientationId == CompositionOrientationIds.Portrait);
+    Assert(
+        savedPreferences.LoadedFromDisk &&
+        Math.Abs(savedPortrait.Transform.HeightFraction - updatedPortraitSize) < 0.000001 &&
+        raisedPreferences is not null &&
+        Math.Abs(raisedPreferences.Layouts.Single(layout =>
+            layout.OrientationId == CompositionOrientationIds.Portrait)
+            .Transform.HeightFraction - updatedPortraitSize) < 0.000001 &&
+        silhouetteCapture.CurrentSettings.SilhouettePreferencesSnapshot is null,
+        $"Saving must durably preserve the independent Portrait transform while leaving capture-start snapshotting to the recorder. " +
+        $"loaded={savedPreferences.Status}, requested={updatedPortraitSize:0.000000}, " +
+        $"saved={savedPortrait.Transform.HeightFraction:0.000000}.");
+
+    ((Button)silhouetteEditor.HeaderBackButton).PerformClick();
+    Application.DoEvents();
+    Assert(
+        silhouetteCapture.Visible && !silhouetteEditor.Visible &&
+        silhouetteForm.Text == "ClipCord — Capture" &&
+        pageTitle.Text == "Capture",
+        "The shared Back to Capture action must return to Capture without closing the settings shell.");
+    silhouetteForm.Close();
+
+    using var manualRecorder = new RecordingManualCaptureRecorder();
+    using var startingForm = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Capture,
+        captureSettings: captureSettings,
+        captureEngineAvailable: false,
+        manualCaptureRecorder: manualRecorder);
+    startingForm.Show();
+    Application.DoEvents();
+    manualRecorder.SetState(ManualCaptureState.Starting);
+    Application.DoEvents();
+    var startingControls = EnumerateControls(startingForm).ToArray();
+    Assert(
+        !startingControls.Single(control => control.Name == "ChooseCaptureTargetButton").Enabled &&
+        !startingControls.Single(control => control.Name == "ManualCaptureRecordButton").Enabled &&
+        startingControls.Single(control => control.Name == "ManualCaptureRecordButton").Text == "Starting capture…" &&
+        startingControls.OfType<Label>().Single(label => label.Name == "CaptureStatusText").Text.Contains("STARTING", StringComparison.Ordinal) &&
+        startingControls.OfType<ToggleSwitch>().Where(toggle =>
+                toggle.Name is "RecordGameAudioToggle" or "IncludeMicrophoneToggle" or "IncludeVoiceChatToggle")
+            .All(toggle => !toggle.Enabled),
+        "Permission and hardware-encoder startup must present a distinct state and lock every capture-pipeline control.");
+    manualRecorder.SetState(ManualCaptureState.Ready);
+    manualRecorder.SetReactionCameraStatus(new ReactionCameraRuntimeStatus(
+        false,
+        false,
+        "Windows did not confirm camera release.",
+        ReleaseNeedsAttention: true));
+    Application.DoEvents();
+    var releaseAttentionStatus = EnumerateControls(startingForm).OfType<Label>()
+        .Single(label => label.Name == "ReactionCameraStatus");
+    var releaseAttentionToggle = EnumerateControls(startingForm).OfType<ToggleSwitch>()
+        .Single(toggle => toggle.Name == "IncludeReactionCameraToggle");
+    Assert(!releaseAttentionToggle.Checked && !releaseAttentionToggle.Enabled &&
+           releaseAttentionStatus.Text.Contains("Windows did not confirm", StringComparison.Ordinal) &&
+           releaseAttentionStatus.Text.Contains("Exit ClipCord", StringComparison.OrdinalIgnoreCase) &&
+           releaseAttentionStatus.Text.Contains("guarantee camera release", StringComparison.OrdinalIgnoreCase),
+        "A pending camera release must stay fail-closed and tell the user to exit ClipCord instead of claiming the camera is off.");
+    startingForm.Close();
+
+    using var unavailable = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Capture,
+        captureSettings: captureSettings,
+        captureEngineAvailable: false);
+    unavailable.Show();
+    Application.DoEvents();
+    var unavailableCapture = EnumerateControls(unavailable).OfType<CaptureView>().Single();
+    var unavailableToggle = EnumerateControls(unavailable).OfType<ToggleSwitch>()
+        .Single(control => control.Name == "InstantReplayToggle");
+    Assert(unavailableCapture.State == CaptureViewState.Unavailable && !unavailableToggle.Enabled,
+        "Production must not pretend Instant Replay works before the encoded recorder engine is connected.");
+    unavailable.Close();
+
+    using var cameraConsent = new CaptureCameraConsentDialog(CaptureSettings.DefaultCameraDevice);
+    cameraConsent.CreateControl();
+    cameraConsent.PerformLayout();
+    var consentControls = EnumerateControls(cameraConsent).ToArray();
+    var previewCameraAction = consentControls.OfType<Button>()
+        .Single(button => button.Name == "CaptureAllowCameraButton");
+    var cameraCloseAction = consentControls.OfType<Button>()
+        .Single(button => button.Name == "CaptureDeclineCameraButton");
+    var cameraSelector = consentControls.OfType<CaptureDeviceSelector>().Single();
+    var cameraPreview = consentControls.Single(control => control.Name == "CaptureCameraConsentPreview");
+    var cameraFacts = consentControls.OfType<RoundedPanel>()
+        .Single(control => control.Name == "CaptureCameraConsentFacts");
+    var cameraConsentCopy = string.Join(
+        " ",
+        consentControls.OfType<Label>().Select(label => label.Text));
+    Assert(consentControls.Any(control => control.Name == "CaptureCameraConsentPreview") &&
+           cameraSelector is { LeadingIcon: FigmaIconAsset.Camera, Enabled: false, TabStop: false } &&
+           cameraSelector.AccessibleRole == AccessibleRole.ComboBox &&
+           cameraSelector.AccessibleDescription?.Contains("Selected device", StringComparison.OrdinalIgnoreCase) == true &&
+           consentControls.OfType<Label>().Count(control => control.Name.StartsWith("CaptureCameraConsentFact", StringComparison.Ordinal)) == 4 &&
+           !previewCameraAction.Enabled && previewCameraAction.DialogResult == DialogResult.None &&
+           previewCameraAction.Text == "Allow & preview" &&
+           !previewCameraAction.UseMnemonic &&
+           cameraCloseAction.DialogResult == DialogResult.Cancel &&
+           cameraConsentCopy.Contains("not open the camera until you allow", StringComparison.OrdinalIgnoreCase) &&
+           cameraConsentCopy.Contains("silhouette outputs", StringComparison.OrdinalIgnoreCase) &&
+           cameraConsentCopy.Contains("after capture", StringComparison.OrdinalIgnoreCase) &&
+           cameraConsentCopy.Contains("indicator", StringComparison.OrdinalIgnoreCase) &&
+           cameraConsentCopy.Contains("without affecting gameplay", StringComparison.OrdinalIgnoreCase),
+        "Constructing the consent modal must keep the device closed until an explicit preview action and expose the approved privacy facts.");
+
+    var consentScale = GetDpiScale(cameraConsent);
+    var previewBounds = GetBoundsRelativeTo(cameraPreview, cameraConsent);
+    var factsBounds = GetBoundsRelativeTo(cameraFacts, cameraConsent);
+    var consentContent = consentControls.Single(control => control.Name == "CaptureCameraConsentLayout");
+    var consentContentBounds = GetBoundsRelativeTo(consentContent, cameraConsent);
+    Assert(
+        Math.Abs(previewBounds.Top / consentScale - 75) <= 2 &&
+        Math.Abs(previewBounds.Height / consentScale - 190) <= 2 &&
+        Math.Abs(factsBounds.Top / consentScale - 324) <= 2 &&
+        Math.Abs(factsBounds.Height / consentScale - 116) <= 2,
+        $"Reaction Camera consent geometry must match Figma D4: preview={previewBounds}, facts={factsBounds}, scale={consentScale:F2}.");
+    Assert(new[] { cameraPreview, cameraFacts, previewCameraAction, cameraCloseAction }
+            .Select(control => GetBoundsRelativeTo(control, cameraConsent))
+            .All(bounds => bounds.Left >= consentContentBounds.Left && bounds.Right <= consentContentBounds.Right),
+        "Reaction Camera consent children must reflow inside the modal instead of retaining stale pre-DPI widths.");
+    Assert(cameraConsent.Region is not null &&
+           !cameraConsent.Region.IsVisible(0, 0) &&
+           cameraConsent.Region.IsVisible(
+               Math.Max(1, (int)Math.Round(18 * consentScale)),
+               Math.Max(1, (int)Math.Round(18 * consentScale))),
+        "Reaction Camera consent must expose the approved rounded elevated surface rather than a rectangular borderless form.");
+
+    var scrimWorkingArea = Screen.FromControl(cameraConsent).WorkingArea;
+    var scrimOwnerBounds = new Rectangle(
+        scrimWorkingArea.Left + 40,
+        scrimWorkingArea.Top + 30,
+        Math.Min(1200, Math.Max(1, scrimWorkingArea.Width - 80)),
+        Math.Min(760, Math.Max(1, scrimWorkingArea.Height - 60)));
+    using var scrim = new CaptureCameraConsentScrim(scrimOwnerBounds);
+    Assert(scrim.Bounds == scrimOwnerBounds &&
+           Math.Abs(scrim.Opacity - 0.72d) < 0.001d &&
+           scrim.FormBorderStyle == FormBorderStyle.None &&
+           !scrim.ShowInTaskbar,
+        $"Reaction Camera consent must provide the approved owner-sized 72% modal scrim: requested={scrimOwnerBounds}, actual={scrim.Bounds}, workingArea={scrimWorkingArea}, maxTrack={SystemInformation.MaxWindowTrackSize}.");
+
+    using var constrainedConsent = new CaptureCameraConsentDialog("Logitech StreamCam");
+    constrainedConsent.CreateControl();
+    var relativeConsentScale = 2f / GetDpiScale(constrainedConsent);
+    constrainedConsent.Scale(new SizeF(relativeConsentScale, relativeConsentScale));
+    constrainedConsent.FitToWorkingArea(new Rectangle(0, 0, 1200, 760));
+    constrainedConsent.PerformLayout();
+    var constrainedControls = EnumerateControls(constrainedConsent).ToArray();
+    var constrainedHost = constrainedControls.OfType<BrandedScrollHost>()
+        .Single(control => control.Name == "CaptureCameraConsentScrollHost");
+    var constrainedAllow = constrainedControls.OfType<Button>()
+        .Single(button => button.Name == "CaptureAllowCameraButton");
+    constrainedHost.ScrollBy(int.MaxValue);
+    var constrainedAllowBounds = GetBoundsRelativeTo(constrainedAllow, constrainedHost);
+    Assert(constrainedConsent.Bounds.Width <= 1168 && constrainedConsent.Bounds.Height <= 728 &&
+           constrainedHost.HasOverflow && constrainedHost.ScrollOffset > 0 &&
+           constrainedAllowBounds.Top >= 0 && constrainedAllowBounds.Bottom <= constrainedHost.ClientSize.Height,
+        "Reaction Camera consent must stay inside a constrained work area and keep its actions reachable through branded scrolling at 200% DPI.");
+}
+
+static void AssertCaptureLayout(SettingsForm form, float? expectedScale = null)
+{
+    var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+    capture.RefreshViewport();
+    form.PerformLayout();
+    Application.DoEvents();
+    AssertControlsFit(form);
+
+    var detailedCardNames = new[]
+    {
+        "CaptureInstantReplayCard",
+        "CaptureVideoQualityCard",
+        "CaptureAudioCard",
+        "CaptureReactionCameraCard",
+        "CaptureRecordingLocationCard"
+    };
+    var expectedCardHeights = new Dictionary<string, int>(StringComparer.Ordinal)
+    {
+        ["CaptureInstantReplayCard"] = 130,
+        ["CaptureVideoQualityCard"] = 189,
+        ["CaptureSizeEstimateCard"] = 189,
+        ["CaptureAudioCard"] = 203,
+        ["CaptureReactionCameraCard"] = 203,
+        ["CaptureRecordingLocationCard"] = 111
+    };
+    var dpiScale = expectedScale ?? GetDpiScale(capture);
+    var singleColumnTables = EnumerateControls(capture)
+        .OfType<TableLayoutPanel>()
+        .Where(table => table.ColumnCount == 1)
+        .ToArray();
+    Assert(
+        singleColumnTables.Length > 0 &&
+        singleColumnTables.All(table =>
+            table.ColumnStyles.Count == 1 &&
+            table.ColumnStyles[0].SizeType == SizeType.Percent &&
+            Math.Abs(table.ColumnStyles[0].Width - 100) < 0.01f),
+        "Capture single-column layouts must use an explicit 100% column so content follows a contracting split-card viewport.");
+    foreach (var (cardName, expectedHeight) in expectedCardHeights)
+    {
+        var card = EnumerateControls(capture).Single(control => control.Name == cardName);
+        Assert(
+            Math.Abs(card.Height / dpiScale - expectedHeight) <= 2,
+            $"Capture card '{cardName}' must retain its approved Figma height at every DPI.");
+    }
+    foreach (var cardName in detailedCardNames)
+    {
+        var card = EnumerateControls(capture).Single(control => control.Name == cardName);
+        var descendants = EnumerateControls(card).ToArray();
+        var header = descendants.Single(control => control.Name == "CaptureCardHeader");
+        var badge = descendants.Single(control => control.Name == "CaptureCardBadge");
+        var title = descendants.Single(control => control.Name == "CaptureCardHeaderTitle");
+        var subtitle = descendants.Single(control =>
+            control is Label && ReferenceEquals(control.Parent?.Parent, header) &&
+            control.Name != "CaptureCardHeaderTitle");
+        var headerBounds = GetBoundsRelativeTo(header, card);
+        var badgeBounds = GetBoundsRelativeTo(badge, card);
+        var titleBounds = GetBoundsRelativeTo(title, card);
+        var subtitleBounds = GetBoundsRelativeTo(subtitle, card);
+        Assert(headerBounds.Contains(badgeBounds) &&
+               headerBounds.Contains(titleBounds) &&
+               headerBounds.Contains(subtitleBounds) &&
+               badgeBounds.Top <= titleBounds.Top + 2 &&
+               titleBounds.Bottom <= subtitleBounds.Top + 2,
+            $"Capture card '{cardName}' must keep its top-aligned badge and two-line copy inside the header: " +
+            $"header={headerBounds}, badge={badgeBounds}, title={titleBounds}, subtitle={subtitleBounds}.");
+        var measuredSubtitle = TextRenderer.MeasureText(
+            subtitle.Text,
+            subtitle.Font,
+            new Size(Math.Max(1, subtitle.Width), int.MaxValue),
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+        Assert(subtitle.Height >= measuredSubtitle.Height,
+            $"Capture card '{cardName}' must visibly expose its Figma subtitle: " +
+            $"text='{subtitle.Text}', bounds={subtitle.Bounds}, measured={measuredSubtitle}.");
+    }
+
+    var instantCard = EnumerateControls(capture).Single(control => control.Name == "CaptureInstantReplayCard");
+    var instantToggle = EnumerateControls(capture).OfType<ToggleSwitch>()
+        .Single(control => control.Name == "InstantReplayToggle");
+    Assert(GetBoundsRelativeTo(instantCard, capture).Contains(GetBoundsRelativeTo(instantToggle, capture)),
+        "The Instant Replay toggle must remain fully inside its card at every supported DPI.");
+    Assert(
+        Math.Abs(capture.HeaderStatusPill.Height / dpiScale - 25) <= 2,
+        "The Capture header status pill must retain the approved 25px Figma height.");
+    Assert(
+        Math.Abs(instantToggle.Width / dpiScale - 42) <= 2 &&
+        Math.Abs(instantToggle.Height / dpiScale - 23) <= 2,
+        "Capture toggles must retain the approved 42x23 Figma track geometry.");
+
+    var qualityCard = EnumerateControls(capture).Single(control => control.Name == "CaptureVideoQualityCard");
+    var cameraCard = EnumerateControls(capture).Single(control => control.Name == "CaptureReactionCameraCard");
+    var cameraPrivacyNote = EnumerateControls(cameraCard)
+        .OfType<RoundedPanel>()
+        .Single(control => control.Name == "CaptureCameraPrivacyNote");
+    var cameraPrivacyCopy = EnumerateControls(cameraPrivacyNote)
+        .OfType<Label>()
+        .Single(control => control.Name == "CaptureCameraPrivacyCopy");
+    var cameraPrivacyShield = EnumerateControls(cameraPrivacyNote)
+        .OfType<FigmaIconControl>()
+        .Single(control => control.Asset == FigmaIconAsset.Shield);
+    Assert(
+        Math.Abs(cameraPrivacyNote.Height / dpiScale - 64) <= 2 &&
+        cameraPrivacyCopy.ForeColor == ClipCordTheme.TextSecondary &&
+        cameraPrivacyShield.IconColor == Color.FromArgb(49, 177, 113),
+        "Reaction Camera must retain the Figma 64px privacy note with secondary copy and the green shield asset.");
+    var qualityAndEstimateRow = EnumerateControls(capture)
+        .Single(control => control.Name == "CaptureQualityAndEstimateRow");
+    if (Math.Abs(qualityAndEstimateRow.Width / dpiScale - 928) <= 3)
+    {
+        Assert(
+            Math.Abs(qualityCard.Width / dpiScale - 612) <= 3 &&
+            Math.Abs(cameraCard.Width / dpiScale - 340) <= 3,
+            $"Capture's split cards must retain the approved Figma widths; " +
+            $"quality={qualityCard.Width / dpiScale:F1}, camera={cameraCard.Width / dpiScale:F1}.");
+    }
+
+    var selectors = EnumerateControls(capture).OfType<CaptureDeviceSelector>().ToArray();
+    Assert(selectors.Length == 3 &&
+           selectors.Select(selector => selector.LeadingIcon).ToHashSet().SetEquals([
+               FigmaIconAsset.Speaker, FigmaIconAsset.Mic, FigmaIconAsset.Headset
+           ]) &&
+           !EnumerateControls(capture).OfType<ComboBox>().Any(),
+        "Capture audio must use three branded selectors with distinct Figma source icons and no native ComboBox chrome.");
+    var selectorTops = selectors
+        .Select(selector => GetBoundsRelativeTo(selector, capture).Top / dpiScale)
+        .OrderBy(top => top)
+        .ToArray();
+    Assert(
+        selectorTops.Length == 3 &&
+        Math.Abs(selectorTops[1] - selectorTops[0] - 37) <= 2 &&
+        Math.Abs(selectorTops[2] - selectorTops[1] - 37) <= 2,
+        "Capture audio inputs must retain the approved 37px Figma row pitch.");
+    var hotkey = EnumerateControls(capture).OfType<CaptureFieldDisplay>()
+        .Single(control => control.Name == "CaptureSaveHotkey");
+    Assert(hotkey.KeycapMode && hotkey.SupportingText.Contains("buffered clip", StringComparison.Ordinal) &&
+           hotkey.Text == CaptureSettings.DefaultSaveHotkey,
+        "The Capture shortcut must render as keycaps with the Figma save-to-library explanation.");
+    var accessibleNames = EnumerateControls(capture)
+        .Where(control => control.Name is
+            "InstantReplayToggle" or
+            "RecordGameAudioToggle" or
+            "IncludeMicrophoneToggle" or
+            "IncludeVoiceChatToggle" or
+            "IncludeReactionCameraToggle" or
+            "CaptureSaveHotkey" or
+            "CaptureLibraryRootField" or
+            "GameAudioDeviceSelector" or
+            "MicrophoneDeviceSelector" or
+            "VoiceChatDeviceSelector")
+        .ToDictionary(control => control.Name, control => control.AccessibleName);
+    Assert(
+        accessibleNames.Count == 10 &&
+        accessibleNames["InstantReplayToggle"] == "Instant Replay" &&
+        accessibleNames["RecordGameAudioToggle"] == "Record game audio" &&
+        accessibleNames["IncludeMicrophoneToggle"] == "Include microphone" &&
+        accessibleNames["IncludeVoiceChatToggle"] == "Include voice chat" &&
+        accessibleNames["IncludeReactionCameraToggle"] == "Include reaction camera" &&
+        accessibleNames["CaptureSaveHotkey"] == "Save replay hotkey" &&
+        accessibleNames["CaptureLibraryRootField"] == "Capture library folder" &&
+        accessibleNames["GameAudioDeviceSelector"] == "Game audio device" &&
+        accessibleNames["MicrophoneDeviceSelector"] == "Microphone device" &&
+        accessibleNames["VoiceChatDeviceSelector"] == "Voice chat device",
+        "Capture controls must expose human-readable accessibility names instead of implementation identifiers.");
+    var recommended = EnumerateControls(capture).OfType<OutlineButton>()
+        .Single(button => button.Name == "CaptureResolutionFullHd1080pButton");
+    Assert(recommended.SecondaryText == "1920×1080" && recommended.SecondaryBadgeText == "Recommended",
+        "The approved 1080p option must retain its resolution and Recommended treatment.");
+    var resolutionChoices = EnumerateControls(capture)
+        .OfType<FlowLayoutPanel>()
+        .Single(control => control.Name == "CaptureResolutionChoices");
+    var resolutionButtons = new[]
+    {
+        "CaptureResolutionFullHd1080pButton",
+        "CaptureResolutionQuadHd1440pButton",
+        "CaptureResolutionUltraHd4KButton"
+    }
+        .Select(name => EnumerateControls(resolutionChoices)
+            .OfType<OutlineButton>()
+            .Single(button => button.Name == name))
+        .ToArray();
+    var requiredResolutionWidth = resolutionButtons.Sum(button => button.Width + button.Margin.Horizontal);
+    Assert(
+        requiredResolutionWidth / dpiScale <= 424 + 1 &&
+        resolutionButtons.All(button => button.Left >= 0 && button.Right <= resolutionChoices.ClientSize.Width + 1),
+        $"Capture resolution choices must retain the preferred 424px Figma span when room is available: " +
+        $"required={requiredResolutionWidth / dpiScale:F1}, host={resolutionChoices.ClientSize.Width / dpiScale:F1}, " +
+        $"buttons={string.Join(", ", resolutionButtons.Select(button => $"{button.Name}:{button.Bounds}"))}.");
+    Assert(EnumerateControls(capture).Any(control => control.Name == "CaptureEstimateDetails"),
+        "The Capture estimate must use a real two-column details grid instead of proportional-font space padding.");
+}
+
+static void AssertCaptureMinimumWidthLayout(SettingsForm form, bool cameraSelected)
+{
+    var originalSize = form.Size;
+    try
+    {
+        form.Size = SettingsForm.GetScaledMinimumSize(form.DeviceDpi);
+        form.PerformLayout();
+        Application.DoEvents();
+        var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+        capture.RefreshViewport();
+        form.PerformLayout();
+        Application.DoEvents();
+
+        var dpiScale = GetDpiScale(form);
+        Assert(Math.Abs(form.Width / dpiScale - 960) <= 2,
+            $"Capture minimum-width QA must exercise the declared 960px viewport; form={form.Size}, scale={dpiScale:F2}.");
+        AssertControlsFit(form);
+
+        var resolutionChoices = EnumerateControls(capture)
+            .OfType<FlowLayoutPanel>()
+            .Single(control => control.Name == "CaptureResolutionChoices");
+        var resolutionButtons = new[]
+        {
+            "CaptureResolutionFullHd1080pButton",
+            "CaptureResolutionQuadHd1440pButton",
+            "CaptureResolutionUltraHd4KButton"
+        }
+            .Select(name => EnumerateControls(resolutionChoices)
+                .OfType<OutlineButton>()
+                .Single(button => button.Name == name))
+            .ToArray();
+        var requiredResolutionWidth = resolutionButtons.Sum(button => button.Width + button.Margin.Horizontal);
+        Assert(
+            resolutionChoices.ClientSize.Width / dpiScale < 424 &&
+            requiredResolutionWidth <= resolutionChoices.ClientSize.Width + 1 &&
+            resolutionButtons.All(button => button.Left >= 0 && button.Right <= resolutionChoices.ClientSize.Width + 1) &&
+            resolutionButtons.Skip(1).All(button => button.Width / dpiScale < 128),
+            $"Capture resolution choices must compact inside the true minimum viewport: " +
+            $"required={requiredResolutionWidth / dpiScale:F1}, host={resolutionChoices.ClientSize.Width / dpiScale:F1}, " +
+            $"buttons={string.Join(", ", resolutionButtons.Select(button => $"{button.Name}:{button.Bounds}"))}.");
+
+        var estimateValue = EnumerateControls(capture).OfType<Label>()
+            .Single(label => label.Name == "CaptureEstimatedSizeValue");
+        var estimateRange = EnumerateControls(capture).OfType<Label>()
+            .Single(label => label.Name == "CaptureEstimatedSizeRange");
+        AssertSingleLineTextFits(estimateValue, "Capture's primary size estimate");
+        AssertWrappedTextFits(estimateRange, "Capture's estimate range");
+        var estimateDetails = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureEstimateDetails");
+        foreach (var detail in EnumerateControls(estimateDetails).OfType<Label>())
+        {
+            AssertSingleLineTextFits(detail, $"Capture estimate detail '{detail.Text}'");
+        }
+
+        var cameraCard = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureReactionCameraCard");
+        var cameraLabels = EnumerateControls(cameraCard).OfType<Label>().ToArray();
+        var cameraToggleHelper = cameraLabels.Single(label =>
+            label.Text == "Consent + preview · capture only");
+        AssertSingleLineTextFits(cameraToggleHelper, "Reaction Camera's consent summary");
+
+        if (!cameraSelected)
+        {
+            var privacyCopy = cameraLabels.Single(label => label.Name == "CaptureCameraPrivacyCopy");
+            AssertWrappedTextFits(privacyCopy, "Reaction Camera's privacy note");
+            var originalSettings = capture.CurrentSettings;
+            try
+            {
+                capture.ApplyExternalSettings(originalSettings with
+                {
+                    ReactionCameraConsentGranted = true,
+                    IncludeReactionCamera = true
+                });
+                capture.RefreshViewport();
+                form.PerformLayout();
+                Application.DoEvents();
+                AssertCompactCameraTextFits(capture);
+            }
+            finally
+            {
+                capture.ApplyExternalSettings(originalSettings);
+                capture.RefreshViewport();
+                Application.DoEvents();
+            }
+            return;
+        }
+        AssertCompactCameraTextFits(capture);
+    }
+    finally
+    {
+        form.Size = originalSize;
+        form.PerformLayout();
+        Application.DoEvents();
+        EnumerateControls(form).OfType<CaptureView>().Single().RefreshViewport();
+    }
+}
+
+static void AssertCompactCameraTextFits(CaptureView capture)
+{
+    var cameraCard = EnumerateControls(capture)
+        .Single(control => control.Name == "CaptureReactionCameraCard");
+    var cameraLabels = EnumerateControls(cameraCard).OfType<Label>().ToArray();
+    var outputs = EnumerateControls(cameraCard)
+        .Single(control => control.Name == "CaptureSilhouetteOutputControls");
+    var caption = cameraLabels.Single(label => label.Name == "SilhouetteOutputCaption");
+    var summary = cameraLabels.Single(label => label.Name == "SilhouetteOutputSummary");
+    var landscapeHelper = cameraLabels.Single(label => label.Text == "For Discord and YouTube");
+    var portraitHelper = cameraLabels.Single(label => label.Text == "For TikTok and Shorts");
+    Assert(outputs.Visible && summary.Text == "1 SELECTED · REQUIRED",
+        "The compact camera layout must become visible and preserve the exact one-required selection contract.");
+    AssertSingleLineTextFits(caption, "Reaction Camera's silhouette caption");
+    AssertSingleLineTextFits(summary, "Reaction Camera's silhouette selection summary");
+    AssertSingleLineTextFits(landscapeHelper, "Reaction Camera's Landscape destination helper");
+    AssertSingleLineTextFits(portraitHelper, "Reaction Camera's Portrait destination helper");
+}
+
+static void AssertCaptureDesignedWidthLayout(SettingsForm form)
+{
+    const int approvedRootLogicalWidth = 1184;
+    const int approvedRootLogicalHeight = 736;
+    var rootLayout = form.Controls.Cast<Control>()
+        .Single(control => control.Name == "RootLayout");
+    var originalDock = rootLayout.Dock;
+    var originalSize = rootLayout.Size;
+    try
+    {
+        var dpiScale = GetDpiScale(form);
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = new Size(
+            (int)Math.Round(approvedRootLogicalWidth * dpiScale),
+            (int)Math.Round(approvedRootLogicalHeight * dpiScale));
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        Application.DoEvents();
+        var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+        capture.RefreshViewport();
+        form.PerformLayout();
+        Application.DoEvents();
+
+        var splitRow = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureQualityAndEstimateRow");
+        var qualityCard = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureVideoQualityCard");
+        var cameraCard = EnumerateControls(capture)
+            .Single(control => control.Name == "CaptureReactionCameraCard");
+        Assert(
+            Math.Abs(rootLayout.Width / dpiScale - approvedRootLogicalWidth) <= 2 &&
+            Math.Abs(splitRow.Width / dpiScale - 928) <= 3 &&
+            Math.Abs(qualityCard.Width / dpiScale - 612) <= 3 &&
+            Math.Abs(cameraCard.Width / dpiScale - 340) <= 3,
+            $"Capture's unconstrained opening must retain the approved Figma geometry: " +
+            $"root={rootLayout.Size}, row={splitRow.Size}, quality={qualityCard.Size}, camera={cameraCard.Size}, scale={dpiScale:F2}.");
+
+        var labels = EnumerateControls(capture).OfType<Label>().ToArray();
+        var range = labels.Single(label => label.Name == "CaptureEstimatedSizeRange");
+        var caption = labels.Single(label => label.Name == "SilhouetteOutputCaption");
+        var summary = labels.Single(label => label.Name == "SilhouetteOutputSummary");
+        Assert(
+            range.Text.Contains("for a 60 sec clip. Motion and detail affect the final size.", StringComparison.Ordinal) &&
+            labels.Any(label => label.Text == "Consent required · opens only while capturing.") &&
+            labels.Any(label => label.Text == "Replay buffer memory") &&
+            labels.Any(label => label.Text == "Layout preference for Discord and YouTube") &&
+            labels.Any(label => label.Text == "Layout preference for TikTok and Shorts") &&
+            Math.Abs(caption.Font.Size - 7.25f) < 0.01f &&
+            Math.Abs(summary.Font.Size - 7.25f) < 0.01f,
+            $"Capture's full-width responsive state must preserve the approved Figma copy and caption typography: " +
+            $"range='{range.Text}', caption={caption.Font.Size:0.##}pt, summary={summary.Font.Size:0.##}pt, " +
+            $"cameraHelpers=[{string.Join(" | ", labels.Where(label => label.Text.Contains("Consent", StringComparison.Ordinal) || label.Text.Contains("preference", StringComparison.Ordinal)).Select(label => label.Text))}].");
+    }
+    finally
+    {
+        rootLayout.Dock = originalDock;
+        rootLayout.Size = originalSize;
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        Application.DoEvents();
+        EnumerateControls(form).OfType<CaptureView>().Single().RefreshViewport();
+    }
+}
+
+static void AssertSingleLineTextFits(Label label, string context)
+{
+    var measured = TextRenderer.MeasureText(
+        label.Text,
+        label.Font,
+        Size.Empty,
+        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+    Assert(
+        measured.Width <= label.ClientSize.Width + 1 && measured.Height <= label.ClientSize.Height + 1,
+        $"{context} must fit on one line: text='{label.Text}', measured={measured}, client={label.ClientSize}, font={label.Font.Size:0.##}pt.");
+}
+
+static void AssertWrappedTextFits(Label label, string context)
+{
+    var measured = TextRenderer.MeasureText(
+        label.Text,
+        label.Font,
+        new Size(Math.Max(1, label.ClientSize.Width), int.MaxValue),
+        TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+    Assert(
+        measured.Height <= label.ClientSize.Height + 1,
+        $"{context} must wrap without truncation: text='{label.Text}', measured={measured}, client={label.ClientSize}.");
+}
+
+static void AssertCaptureScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            initialPage: SettingsPage.Capture,
+            captureSettings: CaptureSettings.Default with
+            {
+                InstantReplayEnabled = true,
+                IncludeMicrophone = true,
+                IncludeVoiceChat = true,
+                VoiceChatDevice = "Headset Earphone — SteelSeries Sonar Chat"
+            },
+            captureEngineAvailable: true);
+        var logicalDesignedOpeningSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.Capture, 96);
+        var scaledDesignedOpeningSize = new Size(
+            (int)Math.Round(logicalDesignedOpeningSize.Width * scale),
+            (int)Math.Round(logicalDesignedOpeningSize.Height * scale));
+        form.CreateControl();
+        var relativeScale = scale / GetDpiScale(form);
+        form.Scale(new SizeF(relativeScale, relativeScale));
+        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * relativeScale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+        form.AutoScroll = true;
+        var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = scaledDesignedOpeningSize;
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        var capture = EnumerateControls(form).OfType<CaptureView>().Single();
+        capture.SetState(CaptureViewState.Ready);
+        capture.RefreshViewport();
+        Application.DoEvents();
+        var deviceScale = GetDpiScale(form);
+        var effectiveLayoutScale = Math.Max(deviceScale, deviceScale * relativeScale);
+        AssertCaptureLayout(form, effectiveLayoutScale);
+        Assert(!capture.HasOverflow,
+            $"Capture must not scroll at its designed {scale:F1}x opening size.");
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+    }
+}
+
+static void AssertSilhouetteScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    var settingsDirectory = Path.Combine(
+        Path.GetTempPath(),
+        "ClipsToDiscordTests",
+        "silhouette-scaled-layout-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            initialPage: SettingsPage.SilhouetteLayouts,
+            captureSettings: CaptureSettings.Default with
+            {
+                ReactionCameraConsentGranted = true,
+                IncludeReactionCamera = true,
+                SilhouetteLandscapeEnabled = true,
+                SilhouettePortraitEnabled = true
+            },
+            captureEngineAvailable: true,
+            silhouetteSettingsDirectory: settingsDirectory);
+        var logicalDesignedOpeningSize = SettingsForm.GetDesignedOpeningSize(
+            SettingsPage.SilhouetteLayouts,
+            96);
+        var scaledDesignedOpeningSize = new Size(
+            (int)Math.Round(logicalDesignedOpeningSize.Width * scale),
+            (int)Math.Round(logicalDesignedOpeningSize.Height * scale));
+        form.CreateControl();
+        var relativeScale = scale / GetDpiScale(form);
+        form.Scale(new SizeF(relativeScale, relativeScale));
+        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * relativeScale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+
+        form.AutoScroll = true;
+        var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = scaledDesignedOpeningSize;
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        var editor = EnumerateControls(form).OfType<SilhouetteLayoutEditorView>().Single();
+        editor.SelectOrientation(CompositionOrientationIds.Portrait);
+        editor.RefreshViewport();
+        Application.DoEvents();
+
+        AssertControlsFit(form);
+        var footer = EnumerateControls(editor).Single(control => control.Name == "SilhouetteLayoutFooter");
+        var saveStatus = EnumerateControls(footer).Single(control =>
+            control.Name == "SilhouetteLayoutSaveStatusLabel");
+        var resetButton = EnumerateControls(footer).Single(control =>
+            control.Name == "SilhouetteResetCurrentLayoutButton");
+        var saveButton = EnumerateControls(footer).Single(control =>
+            control.Name == "SilhouetteSaveDefaultLayoutButton");
+        var effectiveLayoutScale = Math.Max(GetDpiScale(form), GetDpiScale(form) * relativeScale);
+        var footerChildBounds = new[] { saveStatus, resetButton, saveButton }
+            .Select(control => GetBoundsRelativeTo(control, footer))
+            .ToArray();
+        Assert(
+            Math.Abs(footer.Height / effectiveLayoutScale - 58) <= 1 &&
+            footerChildBounds.All(bounds =>
+                bounds.Width > 0 && bounds.Height > 0 &&
+                bounds.Left >= -1 && bounds.Top >= -1 &&
+                bounds.Right <= footer.ClientSize.Width + 1 &&
+                bounds.Bottom <= footer.ClientSize.Height + 1),
+            $"The Silhouette footer must retain its 58px logical height and three usable actions at {scale:F1}x: " +
+            $"footer={footer.Size}, scale={effectiveLayoutScale:F2}, status={saveStatus.Size}, " +
+            $"reset={resetButton.Size}, save={saveButton.Size}, bounds=[{string.Join(", ", footerChildBounds)}].");
+
+        var portraitModes = new[]
+        {
+            "PortraitContextModeButton",
+            "PortraitFocusCropModeButton",
+            "PortraitCustomModeButton"
+        }.Select(name => EnumerateControls(editor).Single(control => control.Name == name)).ToArray();
+        Assert(
+            portraitModes.All(button => button.Width > 0 && button.Height > 0 &&
+                button.Right <= button.Parent!.ClientSize.Width + 1 &&
+                button.Bottom <= button.Parent.ClientSize.Height + 1),
+            $"All Portrait layout modes must fit their selector at {scale:F1}x: " +
+            string.Join(", ", portraitModes.Select(button => $"{button.Name}={button.Bounds}")));
+
+        var scrollHost = EnumerateControls(editor).OfType<BrandedScrollHost>()
+            .Single(control => control.Name == "SilhouetteLayoutEditorScrollHost");
+        scrollHost.EnsureControlVisible(saveButton);
+        Application.DoEvents();
+        var saveBounds = scrollHost.RectangleToClient(
+            saveButton.RectangleToScreen(saveButton.ClientRectangle));
+        Assert(
+            saveBounds.Top >= -1 && saveBounds.Bottom <= scrollHost.ClientSize.Height + 1,
+            $"The Silhouette save action must remain reachable through branded scrolling at {scale:F1}x: " +
+            $"save={saveBounds}, viewport={scrollHost.ClientSize}.");
+
+        editor.SelectOrientation(CompositionOrientationIds.Landscape);
+        editor.RefreshViewport();
+        Application.DoEvents();
+        AssertControlsFit(form);
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+        if (Directory.Exists(settingsDirectory)) Directory.Delete(settingsDirectory, recursive: true);
+    }
 }
 
 static void AssertAboutViewActions(AppSettings settings)
@@ -5536,6 +6738,54 @@ static void AssertGlobalHotkeyLifecycle()
     disposableManager.Dispose();
     Assert(disposeRegistrar.UnregisterCount == 1,
         "Repeated disposal must not attempt to unregister the shortcut again.");
+
+    var multiRegistrar = new FakeGlobalHotkeyRegistrar();
+    using var multiManager = new GlobalHotkeyManager(multiRegistrar);
+    Assert(GlobalHotkeyBinding.TryParse(CaptureSettings.DefaultSaveHotkey, out var captureBinding),
+        "The capture shortcut fixture must be valid.");
+    Assert(
+        multiManager.TrySetBinding(
+            GlobalHotkeyManager.ModeHotkeyIdentifier,
+            GlobalHotkeyBinding.Default,
+            out _) &&
+        multiManager.TrySetBinding(
+            GlobalHotkeyManager.CaptureHotkeyIdentifier,
+            captureBinding,
+            out _) &&
+        multiManager.GetBinding(GlobalHotkeyManager.ModeHotkeyIdentifier) == GlobalHotkeyBinding.Default &&
+        multiManager.GetBinding(GlobalHotkeyManager.CaptureHotkeyIdentifier) == captureBinding &&
+        multiRegistrar.RegisterIdentifiers.SequenceEqual([
+            GlobalHotkeyManager.ModeHotkeyIdentifier,
+            GlobalHotkeyManager.CaptureHotkeyIdentifier]),
+        "Routing and replay shortcuts must coexist under independent Windows identifiers.");
+
+    var dispatched = new List<(int Identifier, GlobalHotkeyBinding Binding)>();
+    var legacyModePresses = 0;
+    multiManager.Pressed += (_, _) => legacyModePresses++;
+    multiManager.HotkeyPressed += (_, eventArgs) =>
+        dispatched.Add((eventArgs.Identifier, eventArgs.Binding));
+    Assert(
+        multiManager.HandleHotkeyMessage(GlobalHotkeyManager.CaptureHotkeyIdentifier) &&
+        legacyModePresses == 0 &&
+        dispatched.SequenceEqual([(GlobalHotkeyManager.CaptureHotkeyIdentifier, captureBinding)]) &&
+        multiManager.HandleHotkeyMessage(GlobalHotkeyManager.ModeHotkeyIdentifier) &&
+        legacyModePresses == 1 &&
+        dispatched[^1] == (GlobalHotkeyManager.ModeHotkeyIdentifier, GlobalHotkeyBinding.Default),
+        "WM_HOTKEY dispatch must identify replay separately while preserving the legacy mode event.");
+
+    var registrationsBeforeDuplicate = multiRegistrar.RegisterCalls.Count;
+    var unregistersBeforeDuplicate = multiRegistrar.UnregisterCount;
+    Assert(
+        !multiManager.TrySetBinding(
+            GlobalHotkeyManager.CaptureHotkeyIdentifier,
+            GlobalHotkeyBinding.Default,
+            out var duplicateError) &&
+        duplicateError == GlobalHotkeyManager.HotkeyConflictError &&
+        multiRegistrar.RegisterCalls.Count == registrationsBeforeDuplicate &&
+        multiRegistrar.UnregisterCount == unregistersBeforeDuplicate &&
+        multiManager.GetBinding(GlobalHotkeyManager.ModeHotkeyIdentifier) == GlobalHotkeyBinding.Default &&
+        multiManager.GetBinding(GlobalHotkeyManager.CaptureHotkeyIdentifier) == captureBinding,
+        "One ClipCord action must not steal another action's active shortcut or churn registration.");
 }
 
 static void AssertModeHotkeyGuardPolicy()
@@ -5595,17 +6845,34 @@ static void AssertModeFeedbackOverlayContract()
     var uploads = ModeFeedbackPresentation.ForUploadMode(true);
     var localOnly = ModeFeedbackPresentation.ForUploadMode(false);
     Assert(uploads == new ModeFeedbackPresentation(
-               "DISCORD UPLOADS ON",
-               "New clips will be sent automatically.",
+               "Discord uploads on",
+               "New clips upload automatically.",
                ModeFeedbackTone.UploadsEnabled) &&
            localOnly == new ModeFeedbackPresentation(
-               "LOCAL ONLY ON",
-               "New clips will stay on this PC.",
+               "Local only on",
+               "New clips stay on this PC.",
                ModeFeedbackTone.LocalOnlyEnabled),
         "Shortcut feedback must identify the confirmed route unambiguously.");
-    Assert(ModeFeedbackOverlay.GetGlyph(ModeFeedbackTone.UploadsEnabled) == BrandGlyph.DiscordDestination &&
-           ModeFeedbackOverlay.GetGlyph(ModeFeedbackTone.LocalOnlyEnabled) == BrandGlyph.Shield,
-        "In-game route feedback must use the corrected Discord destination artwork and retain the local-only shield.");
+    Assert(ModeFeedbackOverlay.GetIconAsset(ModeFeedbackTone.UploadsEnabled) == FigmaIconAsset.Discord &&
+           ModeFeedbackOverlay.GetIconAsset(ModeFeedbackTone.LocalOnlyEnabled) == FigmaIconAsset.Shield &&
+           ModeFeedbackOverlay.GetIconAsset(ModeFeedbackTone.CaptureRecording) == FigmaIconAsset.Capture &&
+           ModeFeedbackOverlay.GetIconAsset(ModeFeedbackTone.CaptureSaved) == FigmaIconAsset.Film &&
+           ModeFeedbackOverlay.GetIconAsset(ModeFeedbackTone.Error) == FigmaIconAsset.Alert,
+        "Every notification state must render its approved Figma asset directly.");
+    Assert(ModeFeedbackPresentation.CaptureStarted == new ModeFeedbackPresentation(
+               "Recording",
+               "Capturing your game window.",
+               ModeFeedbackTone.CaptureRecording) &&
+           ModeFeedbackPresentation.ForCapturedClip("Battlefield-6", TimeSpan.FromSeconds(32)) ==
+           new ModeFeedbackPresentation(
+               "Clip captured",
+               "Battlefield-6 · 0:32",
+               ModeFeedbackTone.CaptureSaved) &&
+           ModeFeedbackPresentation.CaptureFailed == new ModeFeedbackPresentation(
+               "Recording stopped",
+               "That recording could not be finished.",
+               ModeFeedbackTone.Error),
+        "Borderless capture must retain a clear app-owned start and saved notification.");
 
     Assert(ModeFeedbackOverlay.RequiredExtendedStyles == 0x080000A0,
         "The in-game mode indicator must retain the non-activating, tool-window, and click-through styles.");
@@ -5620,7 +6887,9 @@ static void AssertModeFeedbackOverlayContract()
     var oneHundredFiftyPercentBounds = ModeFeedbackOverlay.CalculateBounds(primary, 144);
     var scaledBounds = ModeFeedbackOverlay.CalculateBounds(secondary, 192);
     var compactBounds = ModeFeedbackOverlay.CalculateBounds(compact, 192);
-    Assert(primary.Contains(normalBounds) &&
+    Assert(normalBounds.Size == new Size(384, 74) &&
+           oneHundredFiftyPercentBounds.Size == new Size(576, 111) &&
+           primary.Contains(normalBounds) &&
            primary.Contains(oneHundredFiftyPercentBounds) &&
            secondary.Contains(scaledBounds) &&
            compact.Contains(compactBounds),
@@ -5737,6 +7006,11 @@ static void RenderModeFeedbackPreviews(string outputDirectory)
             {
                 ("discord-uploads-on.png", ModeFeedbackPresentation.ForUploadMode(true)),
                 ("local-only-on.png", ModeFeedbackPresentation.ForUploadMode(false)),
+                ("recording.png", ModeFeedbackPresentation.CaptureStarted),
+                ("clip-captured.png", ModeFeedbackPresentation.ForCapturedClip(
+                    "Battlefield-6",
+                    TimeSpan.FromSeconds(32))),
+                ("recording-stopped.png", ModeFeedbackPresentation.CaptureFailed),
                 ("dialog-open.png", ModeFeedbackPresentation.DialogOpen),
                 ("mode-change-in-progress.png", ModeFeedbackPresentation.ReconfigurationInProgress),
                 ("discord-setup-required.png", ModeFeedbackPresentation.DiscordSetupRequired),
@@ -5809,7 +7083,14 @@ static void AssertGalleryEditorScaledLayout(AppSettings settings, float scale)
             settings,
             checkForUpdatesAsync: _ => Task.CompletedTask,
             initialPage: SettingsPage.Gallery,
-            manualClipEditService: new FakeManualClipEditService());
+            manualClipEditService: new FakeManualClipEditService(),
+            captureSettings: CaptureSettings.Default with
+            {
+                LibraryRoot = Path.Combine(
+                    settings.ClipsFolder,
+                    "..",
+                    $"isolated-gallery-scaled-{scale:F1}-capture")
+            });
         form.Show();
         SelectGalleryGame(form, "Battlefield");
         EnumerateControls(form).OfType<Button>()
@@ -6101,7 +7382,14 @@ static void AssertGalleryEditorFlow(AppSettings settings)
         settings,
         checkForUpdatesAsync: _ => Task.CompletedTask,
         initialPage: SettingsPage.Gallery,
-        manualClipEditService: service);
+        manualClipEditService: service,
+        captureSettings: CaptureSettings.Default with
+        {
+            LibraryRoot = Path.Combine(
+                settings.ClipsFolder,
+                "..",
+                "isolated-gallery-editor-capture")
+        });
     form.Show();
     SelectGalleryGame(form, "Battlefield");
     Assert(EnumerateControls(form).Count(control => control.Name == "GalleryClipCard") == 2 &&
@@ -6474,7 +7762,14 @@ static void AssertGalleryEditorPreviewPlayback(AppSettings settings)
         initialPage: SettingsPage.Gallery,
         manualClipEditService: service,
         launchMediaFile: path => { launchedPaths.Add(path); return true; },
-        playbackPreparer: playbackPreparer);
+        playbackPreparer: playbackPreparer,
+        captureSettings: CaptureSettings.Default with
+        {
+            LibraryRoot = Path.Combine(
+                settings.ClipsFolder,
+                "..",
+                "isolated-gallery-playback-capture")
+        });
     form.Show();
     var editor = OpenLocalOnlyEditor(form);
     var trim = EnumerateControls(editor).OfType<TrimRangeControl>().Single();
@@ -6780,12 +8075,12 @@ static void AssertSharedShellLayout(SettingsForm form)
         "The legacy top navigation and always-on footer must not survive inside the redesigned left-rail shell.");
 
     var navigation = EnumerateControls(form).Single(control => control.Name == "SideNavigation");
-    var expectedItems = new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "GalleryNavItem", "AboutNavItem" };
+    var expectedItems = new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "CaptureNavItem", "GalleryNavItem", "AboutNavItem" };
     var actualItems = navigation.Controls.Cast<Control>().Select(control => control.Name).ToArray();
     Assert(actualItems.SequenceEqual(expectedItems) &&
            navigation.Controls.Cast<Control>().All(control =>
                control.TabStop && control.AccessibleRole == AccessibleRole.MenuItem),
-        $"The left rail must expose five ordered keyboard menu items; got {string.Join(", ", actualItems)}.");
+        $"The left rail must expose six ordered keyboard menu items; got {string.Join(", ", actualItems)}.");
     Assert(EnumerateControls(form).Single(control => control.Name == "RailStatusCard").Visible &&
            EnumerateControls(form).OfType<Button>().Count(button =>
                button.AccessibleRole == AccessibleRole.RadioButton &&
@@ -6796,19 +8091,30 @@ static void AssertSharedShellLayout(SettingsForm form)
     Assert(watcherDot.AccessibleRole == AccessibleRole.None && !watcherDot.TabStop &&
            watcherDot.Bounds.Bottom <= watcherDot.Parent!.ClientSize.Height,
         "The rail watcher state must use a silent painted dot that cannot inherit font-dependent clipping.");
+    var pageTitle = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "PageTitleLabel");
+    var measuredPageTitle = TextRenderer.MeasureText(
+        pageTitle.Text,
+        pageTitle.Font,
+        Size.Empty,
+        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
     Assert(EnumerateControls(form).OfType<TitleBarButton>().Count() == 3 &&
-           EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageTitleLabel").Visible &&
+           pageTitle.Visible &&
+           measuredPageTitle.Height <= pageTitle.ClientSize.Height &&
            EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageSubtitleLabel").Visible,
         "The shared header must retain page identity and all three custom window actions.");
+    Assert(
+        EnumerateControls(form).OfType<CaptureView>().Single().AccessibleName == "ClipCord Capture",
+        "The Capture page container must expose its approved accessible name to assistive technology.");
 
     var expectedNavigationGlyphSide = (int)Math.Round(16 * logicalScale);
     var navigationGlyphs = EnumerateControls(navigation).OfType<BrandGlyphControl>()
         .Where(control => control.Name == "NavigationGlyph")
         .ToArray();
-    Assert(navigationGlyphs.Length == 5 && navigationGlyphs.All(control =>
+    Assert(navigationGlyphs.Length == 6 && navigationGlyphs.All(control =>
                Math.Abs(Math.Min(control.Width, control.Height) - expectedNavigationGlyphSide) <= 1 &&
                Math.Abs(control.Width - control.Height) <= 1),
-        $"The five shared-rail Figma glyphs must retain their compact 16px logical width; " +
+        $"The six shared-rail Figma glyphs must retain their compact 16px logical width; " +
         $"expected={expectedNavigationGlyphSide}, actual={string.Join(", ", navigationGlyphs.Select(control => control.Size))}.");
 }
 
@@ -6954,11 +8260,15 @@ static void RenderAboutPreview(string outputPath)
     form.Hide();
 }
 
-static void RenderSharedPagePreview(string outputPath, SettingsPage page)
+static void RenderSharedPagePreview(
+    string outputPath,
+    SettingsPage page,
+    string? silhouetteOrientationId = null)
 {
-    if (page is not (SettingsPage.Home or SettingsPage.Activity or SettingsPage.Gallery))
+    if (page is not (SettingsPage.Home or SettingsPage.Activity or SettingsPage.Capture or
+        SettingsPage.SilhouetteLayouts or SettingsPage.Gallery))
     {
-        throw new ArgumentOutOfRangeException(nameof(page), page, "Only the three shared visual-QA pages are supported.");
+        throw new ArgumentOutOfRangeException(nameof(page), page, "Only shared visual-QA pages are supported.");
     }
 
     var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
@@ -7055,9 +8365,31 @@ static void RenderSharedPagePreview(string outputPath, SettingsPage page)
             activityHistory: history,
             initialPage: page,
             launchMediaFile: _ => true,
-            thumbnailProvider: new PreviewGalleryThumbnailProvider());
+            thumbnailProvider: new PreviewGalleryThumbnailProvider(),
+            captureSettings: CaptureSettings.Default with
+            {
+                InstantReplayEnabled = true,
+                IncludeMicrophone = true,
+                IncludeVoiceChat = true,
+                GameAudioDevice = "Speakers — Realtek(R) Audio",
+                MicrophoneDevice = "HyperX QuadCast S",
+                VoiceChatDevice = "Headset Earphone — SteelSeries Sonar Chat",
+                LibraryRoot = Path.Combine(Path.GetTempPath(), "ClipCordPreviewLibrary")
+            },
+            captureEngineAvailable: true,
+            silhouetteSettingsDirectory: Path.Combine(fixtureRoot, "silhouette-settings"));
         form.Show();
         Application.DoEvents();
+        if (page == SettingsPage.Capture)
+        {
+            EnumerateControls(form).OfType<CaptureView>().Single().SetState(CaptureViewState.Ready);
+        }
+        else if (page == SettingsPage.SilhouetteLayouts &&
+                 silhouetteOrientationId is not null)
+        {
+            EnumerateControls(form).OfType<SilhouetteLayoutEditorView>().Single()
+                .SelectOrientation(silhouetteOrientationId);
+        }
         form.Size = SettingsForm.GetDesignedOpeningSize(page, form.DeviceDpi);
         form.PerformLayout();
         Application.DoEvents();
@@ -7093,6 +8425,20 @@ static void RenderSharedPagePreview(string outputPath, SettingsPage page)
         try { Directory.Delete(fixtureRoot, recursive: true); }
         catch { }
     }
+}
+
+static void RenderCameraConsentPreview(string outputPath)
+{
+    var directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+    if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+    using var dialog = new CaptureCameraConsentDialog("Logitech StreamCam");
+    dialog.Show();
+    dialog.PerformLayout();
+    Application.DoEvents();
+    using var bitmap = new Bitmap(dialog.Width, dialog.Height);
+    dialog.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+    bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+    dialog.Close();
 }
 
 static void AssertActivityScaledLayout(AppSettings settings, float scale)
@@ -7368,12 +8714,19 @@ static void AssertRealGlobalHotkeyRegistration()
 {
     Assert(GlobalHotkeyBinding.TryParse("Ctrl + Alt + Shift + F24", out var probeBinding),
         "The native registration probe must use a valid shortcut.");
+    Assert(GlobalHotkeyBinding.TryParse("Ctrl + Alt + Shift + F23", out var captureProbeBinding),
+        "The native capture registration probe must use a valid shortcut.");
     var first = new GlobalHotkeyManager();
     using var second = new GlobalHotkeyManager();
     try
     {
         Assert(first.TrySetBinding(probeBinding, out var firstError),
             $"Windows rejected the isolated global-shortcut probe with error {firstError}.");
+        Assert(first.TrySetBinding(
+                GlobalHotkeyManager.CaptureHotkeyIdentifier,
+                captureProbeBinding,
+                out var captureError),
+            $"Windows rejected ClipCord's second independent shortcut with error {captureError}.");
         Assert(!second.TrySetBinding(probeBinding, out var conflictError) && conflictError != 0,
             "Windows must prevent two live ClipCord windows from owning the same global shortcut.");
         first.Dispose();
@@ -7946,16 +9299,20 @@ internal sealed class FakeGlobalHotkeyRegistrar : IGlobalHotkeyRegistrar
     public Queue<bool> RegisterResults { get; } = new();
     public Queue<bool> UnregisterResults { get; } = new();
     public List<GlobalHotkeyBinding> RegisterCalls { get; } = [];
+    public List<int> RegisterIdentifiers { get; } = [];
+    public List<int> UnregisterIdentifiers { get; } = [];
     public int UnregisterCount { get; private set; }
 
     public bool Register(IntPtr windowHandle, int identifier, GlobalHotkeyBinding binding)
     {
+        RegisterIdentifiers.Add(identifier);
         RegisterCalls.Add(binding);
         return RegisterResults.Count == 0 || RegisterResults.Dequeue();
     }
 
     public bool Unregister(IntPtr windowHandle, int identifier)
     {
+        UnregisterIdentifiers.Add(identifier);
         UnregisterCount++;
         return UnregisterResults.Count == 0 || UnregisterResults.Dequeue();
     }
@@ -8365,4 +9722,43 @@ internal sealed class RecordingClipPlaybackPreparer(
     }
 
     internal void Release() => _release.TrySetResult();
+}
+
+internal sealed class RecordingManualCaptureRecorder : IManualCaptureRecorder, IReactionCameraController
+{
+    public ManualCaptureState State { get; private set; } = ManualCaptureState.Ready;
+    public ManualCaptureTarget? Target { get; } = new("Test game", 1920, 1080);
+    public string? LastError { get; private set; }
+    public ReactionCameraRuntimeStatus ReactionCameraStatus { get; private set; } = new(false, false);
+    public event EventHandler? StateChanged;
+    public event EventHandler? ReactionCameraStateChanged;
+
+    internal void SetState(ManualCaptureState state, string? error = null)
+    {
+        State = state;
+        LastError = error;
+        StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    internal void SetReactionCameraStatus(ReactionCameraRuntimeStatus status)
+    {
+        ReactionCameraStatus = status;
+        ReactionCameraStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public Task<ManualCaptureTarget?> SelectTargetAsync(IWin32Window owner) =>
+        Task.FromResult(Target);
+
+    public Task StartAsync(CaptureSettings settings, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The layout fake does not run the Windows capture engine.");
+
+    public Task<ManualCaptureResult?> StopAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The layout fake does not run the Windows capture engine.");
+
+    public Task DisableReactionCameraAsync(CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+
+    public void Dispose()
+    {
+    }
 }

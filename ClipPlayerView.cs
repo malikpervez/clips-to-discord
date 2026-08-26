@@ -18,6 +18,8 @@ namespace ClipsToDiscord;
 internal sealed class ClipPlayerView : UserControl
 {
     private readonly GalleryClipEntry _clip;
+    private readonly string _favoriteOwnerFileName;
+    private readonly int? _effectiveDpiForTests;
     private readonly IClipPlaybackPreparer _preparer;
     private readonly Func<bool, bool>? _setFavorite;
     private readonly ElementHost _mediaHost;
@@ -44,10 +46,20 @@ internal sealed class ClipPlayerView : UserControl
         GalleryClipEntry clip,
         IClipPlaybackPreparer? preparer = null,
         bool isFavorite = false,
-        Func<bool, bool>? setFavorite = null)
+        Func<bool, bool>? setFavorite = null,
+        string? favoriteOwnerFileName = null,
+        int? effectiveDpiForTests = null)
     {
         ArgumentNullException.ThrowIfNull(clip);
+        if (effectiveDpiForTests is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(effectiveDpiForTests));
+        }
         _clip = clip;
+        _favoriteOwnerFileName = string.IsNullOrWhiteSpace(favoriteOwnerFileName)
+            ? clip.FileName
+            : favoriteOwnerFileName;
+        _effectiveDpiForTests = effectiveDpiForTests;
         _preparer = preparer ?? new ClipPlaybackPreparer();
         _isFavorite = isFavorite;
         _setFavorite = setFavorite;
@@ -229,7 +241,7 @@ internal sealed class ClipPlayerView : UserControl
             Name = "ClipPlayerFavoriteButton",
             Size = new Size(36, 36),
             Margin = new Padding(10, 0, 0, 0),
-            AccessibleName = $"Toggle Favorites for {_clip.FileName}",
+            AccessibleName = $"Toggle Favorites for source clip {_favoriteOwnerFileName}",
             Enabled = _setFavorite is not null
         };
         _favoriteButton.Click += (_, _) =>
@@ -643,7 +655,7 @@ internal sealed class ClipPlayerView : UserControl
             : $"{(int)value.TotalMinutes}:{value.Seconds:00}.{value.Milliseconds / 100}";
 
     private int ScaleLogical(int value) =>
-        Math.Max(1, (int)Math.Round(value * DeviceDpi / 96d));
+        Math.Max(1, (int)Math.Round(value * (_effectiveDpiForTests ?? DeviceDpi) / 96d));
 
     private static Label CreateMutedLabel(string text) => new()
     {

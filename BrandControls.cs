@@ -20,6 +20,9 @@ internal static class ClipCordTheme
     public static readonly Color TextPrimary = Color.FromArgb(245, 247, 252);
     public static readonly Color TextSecondary = Color.FromArgb(166, 175, 194);
     public static readonly Color TextTertiary = Color.FromArgb(112, 123, 142);
+    public static readonly Color SuccessSurface = Color.FromArgb(19, 49, 47);
+    public static readonly Color SuccessBorder = Color.FromArgb(48, 184, 130);
+    public static readonly Color SuccessText = Color.FromArgb(190, 238, 218);
 
     public static readonly Color Shell = SurfaceBase;
     public static readonly Color Header = SurfaceChrome;
@@ -509,6 +512,7 @@ internal enum BrandGlyph
 {
     Settings,
     Activity,
+    Capture,
     Gallery,
     About,
     Folder,
@@ -669,6 +673,7 @@ internal sealed class GradientButton : Button
     private Size _lastRegionSize = Size.Empty;
     public Color StartColor { get; set; } = ClipCordTheme.Coral;
     public Color EndColor { get; set; } = ClipCordTheme.Violet;
+    public FigmaIconAsset? LeadingIcon { get; set; }
 
     public GradientButton()
     {
@@ -703,13 +708,48 @@ internal sealed class GradientButton : Button
             new Rectangle(0, 0, Width, Height), 10);
         using var brush = new LinearGradientBrush(bounds, start, end, LinearGradientMode.Horizontal);
         eventArgs.Graphics.FillPath(brush, path);
-        TextRenderer.DrawText(
-            eventArgs.Graphics,
-            Text,
-            Font,
-            bounds,
-            Enabled ? ForeColor : Color.FromArgb(225, 225, 230),
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        var contentColor = Enabled ? ForeColor : Color.FromArgb(225, 225, 230);
+        if (LeadingIcon is { } leadingIcon)
+        {
+            var iconSide = Math.Max(14, Font.Height - 2);
+            var gap = Math.Max(5, (int)Math.Round(7 * DeviceDpi / 96d));
+            var textSize = TextRenderer.MeasureText(
+                Text,
+                Font,
+                Size.Empty,
+                TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            var contentWidth = iconSide + gap + textSize.Width;
+            var contentLeft = Math.Max(8, (Width - contentWidth) / 2);
+            var iconBounds = new Rectangle(
+                contentLeft,
+                (Height - iconSide) / 2,
+                iconSide,
+                iconSide);
+            FigmaIconRenderer.Draw(eventArgs.Graphics, iconBounds, leadingIcon, contentColor);
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                Text,
+                Font,
+                new Rectangle(
+                    iconBounds.Right + gap,
+                    0,
+                    Math.Max(0, Width - iconBounds.Right - gap - 6),
+                    Height),
+                contentColor,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+        }
+        else
+        {
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                Text,
+                Font,
+                bounds,
+                contentColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        }
         if (Focused && ShowFocusCues)
         {
             ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4));
@@ -730,7 +770,10 @@ internal sealed class OutlineButton : Button
 {
     private bool _accessibilitySelected;
     public BrandGlyph? LeadingGlyph { get; set; }
+    public FigmaIconAsset? LeadingIcon { get; set; }
     public FigmaIconAsset? TrailingIcon { get; set; }
+    public string SecondaryText { get; set; } = string.Empty;
+    public string SecondaryBadgeText { get; set; } = string.Empty;
     public bool AlignContentLeft { get; set; }
     public Color SurfaceColor { get; set; } = ClipCordTheme.SurfaceControl;
     public Color OutlineColor { get; set; } = ClipCordTheme.BorderDefault;
@@ -791,7 +834,7 @@ internal sealed class OutlineButton : Button
         {
             FigmaIconRenderer.Draw(eventArgs.Graphics, trailingBounds, trailingIcon, textColor);
         }
-        if (LeadingGlyph is { } glyph)
+        if (LeadingGlyph is not null || LeadingIcon is not null)
         {
             var glyphSize = Math.Max(16, Font.Height - 2);
             var gap = Math.Max(5, (int)Math.Round(6 * DeviceDpi / 96d));
@@ -804,7 +847,19 @@ internal sealed class OutlineButton : Button
                 ? Math.Max(6, (int)Math.Round(12 * DeviceDpi / 96d))
                 : Math.Max(6, (availableRight - combinedWidth) / 2);
             var glyphBounds = new Rectangle(left, (Height - glyphSize) / 2, glyphSize, glyphSize);
-            BrandGlyphControl.DrawGlyph(eventArgs.Graphics, glyphBounds, glyph, textColor, Math.Max(1.3f, glyphSize / 12f));
+            if (LeadingIcon is { } leadingIcon)
+            {
+                FigmaIconRenderer.Draw(eventArgs.Graphics, glyphBounds, leadingIcon, textColor);
+            }
+            else if (LeadingGlyph is { } glyph)
+            {
+                BrandGlyphControl.DrawGlyph(
+                    eventArgs.Graphics,
+                    glyphBounds,
+                    glyph,
+                    textColor,
+                    Math.Max(1.3f, glyphSize / 12f));
+            }
             var textBounds = new Rectangle(
                 glyphBounds.Right + gap,
                 0,
@@ -818,6 +873,60 @@ internal sealed class OutlineButton : Button
                 textColor,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
                 TextFormatFlags.NoPrefix);
+        }
+        else if (!string.IsNullOrWhiteSpace(SecondaryText))
+        {
+            var inset = Math.Max(7, (int)Math.Round(11 * DeviceDpi / 96d));
+            var primaryBounds = new Rectangle(inset, 2, Math.Max(0, Width - inset * 2), Math.Max(1, Height / 2));
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                Text,
+                Font,
+                primaryBounds,
+                textColor,
+                TextFormatFlags.Left | TextFormatFlags.Bottom | TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            var secondaryFont = ClipCordTheme.InterfaceFont(Math.Max(7f, Font.Size - 1.5f));
+            var secondaryBounds = new Rectangle(inset, Height / 2, Math.Max(0, Width - inset * 2), Math.Max(1, Height / 2 - 2));
+            TextRenderer.DrawText(
+                eventArgs.Graphics,
+                SecondaryText,
+                secondaryFont,
+                secondaryBounds,
+                Enabled ? ClipCordTheme.TextTertiary : DisabledTextColor,
+                TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            if (!string.IsNullOrWhiteSpace(SecondaryBadgeText))
+            {
+                var badgeSize = TextRenderer.MeasureText(
+                    SecondaryBadgeText,
+                    secondaryFont,
+                    Size.Empty,
+                    TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+                var dotSide = Math.Max(4, (int)Math.Round(5 * DeviceDpi / 96d));
+                var badgeRight = Width - inset;
+                var badgeTextBounds = new Rectangle(
+                    Math.Max(inset, badgeRight - badgeSize.Width),
+                    Height / 2,
+                    badgeSize.Width,
+                    Math.Max(1, Height / 2 - 2));
+                var badgeColor = Enabled ? Color.FromArgb(49, 177, 113) : DisabledTextColor;
+                TextRenderer.DrawText(
+                    eventArgs.Graphics,
+                    SecondaryBadgeText,
+                    secondaryFont,
+                    badgeTextBounds,
+                    badgeColor,
+                    TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine |
+                    TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+                using var dotBrush = new SolidBrush(badgeColor);
+                eventArgs.Graphics.FillEllipse(
+                    dotBrush,
+                    badgeTextBounds.Left - dotSide - Math.Max(3, dotSide / 2),
+                    badgeTextBounds.Top + Math.Max(2, (secondaryBounds.Height - dotSide) / 2),
+                    dotSide,
+                    dotSide);
+            }
         }
         else
         {
@@ -874,6 +983,8 @@ internal sealed class OutlineButton : Button
 
 internal sealed class ToggleSwitch : CheckBox
 {
+    public bool CompactTrackOnly { get; set; }
+
     public ToggleSwitch()
     {
         AutoSize = true;
@@ -925,6 +1036,10 @@ internal sealed class ToggleSwitch : CheckBox
 
     public override Size GetPreferredSize(Size proposedSize)
     {
+        if (CompactTrackOnly && string.IsNullOrEmpty(Text))
+        {
+            return new Size(42, 23);
+        }
         var trackHeight = Math.Max(24, Font.Height + 4);
         var trackWidth = trackHeight * 2;
         var textSize = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.SingleLine);
@@ -934,6 +1049,22 @@ internal sealed class ToggleSwitch : CheckBox
 
     internal Rectangle GetTrackBounds()
     {
+        if (CompactTrackOnly && string.IsNullOrEmpty(Text))
+        {
+            const double aspectRatio = 42d / 23d;
+            var trackWidth = Math.Max(1, Width);
+            var compactTrackHeight = Math.Max(1, (int)Math.Round(trackWidth / aspectRatio));
+            if (compactTrackHeight > Height)
+            {
+                compactTrackHeight = Math.Max(1, Height);
+                trackWidth = Math.Max(1, (int)Math.Round(compactTrackHeight * aspectRatio));
+            }
+            return new Rectangle(
+                Math.Max(0, (Width - trackWidth) / 2),
+                Math.Max(0, (Height - compactTrackHeight) / 2),
+                trackWidth,
+                compactTrackHeight);
+        }
         var trackHeight = Math.Max(24, Font.Height + 4);
         return new Rectangle(0, Math.Max(0, (Height - trackHeight) / 2), trackHeight * 2, trackHeight);
     }

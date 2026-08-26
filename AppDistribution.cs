@@ -5,6 +5,13 @@ using System.Text;
 
 namespace ClipsToDiscord;
 
+internal enum AppUpdateRoute
+{
+    None,
+    GitHub,
+    MicrosoftStore
+}
+
 internal static class AppDistribution
 {
     private const int AppModelErrorNoPackage = 15700;
@@ -12,7 +19,15 @@ internal static class AppDistribution
 
     public static bool IsPackaged { get; } = DetectPackageIdentity();
 
-    public static bool UsesStoreUpdates => IsPackaged;
+    public static bool UsesStoreUpdates =>
+        SelectUpdateRoute(IsPackaged, manual: true) == AppUpdateRoute.MicrosoftStore;
+
+    internal static AppUpdateRoute SelectUpdateRoute(bool isPackaged, bool manual) =>
+        !isPackaged
+            ? AppUpdateRoute.GitHub
+            : manual
+                ? AppUpdateRoute.MicrosoftStore
+                : AppUpdateRoute.None;
 
     internal static ProcessStartInfo CreateStoreUpdatesStartInfo() => new(
         "ms-windows-store://downloadsandupdates")

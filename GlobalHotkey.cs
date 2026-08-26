@@ -144,10 +144,14 @@ internal interface IGlobalHotkeyRegistrar
 
 internal sealed class GlobalHotkeyManager : NativeWindow, IDisposable
 {
-    internal const int HotkeyIdentifier = 0x4343;
+    internal const int ModeHotkeyIdentifier = 0x4343;
+    internal const int CaptureHotkeyIdentifier = 0x4344;
+    internal const int HotkeyIdentifier = ModeHotkeyIdentifier;
     internal const int WmHotkey = 0x0312;
     internal const uint ModNoRepeat = 0x4000;
+    internal const int HotkeyConflictError = 1409;
     private readonly IGlobalHotkeyRegistrar _registrar;
+    private readonly Dictionary<int, GlobalHotkeyBinding> _registeredBindings = [];
     private bool _disposed;
 
     public GlobalHotkeyManager()
@@ -165,37 +169,57 @@ internal sealed class GlobalHotkeyManager : NativeWindow, IDisposable
         });
     }
 
-    internal GlobalHotkeyBinding? RegisteredBinding { get; private set; }
+    internal GlobalHotkeyBinding? RegisteredBinding => GetBinding(ModeHotkeyIdentifier);
     internal event EventHandler? Pressed;
+    internal event EventHandler<GlobalHotkeyPressedEventArgs>? HotkeyPressed;
 
     internal bool TrySetBinding(GlobalHotkeyBinding? binding, out int errorCode)
+        => TrySetBinding(ModeHotkeyIdentifier, binding, out errorCode);
+
+    internal GlobalHotkeyBinding? GetBinding(int identifier) =>
+        _registeredBindings.TryGetValue(identifier, out var binding) ? binding : null;
+
+    internal bool TrySetBinding(
+        int identifier,
+        GlobalHotkeyBinding? binding,
+        out int errorCode)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!IsSupportedIdentifier(identifier))
+        {
+            throw new ArgumentOutOfRangeException(nameof(identifier));
+        }
         errorCode = 0;
-        if (RegisteredBinding == binding) return true;
+        var previous = GetBinding(identifier);
+        if (previous == binding) return true;
+        if (binding is not null && _registeredBindings.Any(pair =>
+                pair.Key != identifier && pair.Value == binding.Value))
+        {
+            errorCode = HotkeyConflictError;
+            return false;
+        }
 
-        var previous = RegisteredBinding;
         if (previous is not null)
         {
-            if (!_registrar.Unregister(Handle, HotkeyIdentifier))
+            if (!_registrar.Unregister(Handle, identifier))
             {
                 errorCode = _registrar.GetLastError();
                 return false;
             }
-            RegisteredBinding = null;
+            _registeredBindings.Remove(identifier);
         }
 
         if (binding is null) return true;
-        if (_registrar.Register(Handle, HotkeyIdentifier, binding.Value))
+        if (_registrar.Register(Handle, identifier, binding.Value))
         {
-            RegisteredBinding = binding;
+            _registeredBindings[identifier] = binding.Value;
             return true;
         }
 
         errorCode = _registrar.GetLastError();
-        if (previous is not null && _registrar.Register(Handle, HotkeyIdentifier, previous.Value))
+        if (previous is not null && _registrar.Register(Handle, identifier, previous.Value))
         {
-            RegisteredBinding = previous;
+            _registeredBindings[identifier] = previous.Value;
         }
         else if (previous is not null)
         {
@@ -206,10 +230,14 @@ internal sealed class GlobalHotkeyManager : NativeWindow, IDisposable
 
     internal bool HandleHotkeyMessage(int identifier)
     {
-        if (_disposed || RegisteredBinding is null || identifier != HotkeyIdentifier) return false;
+        if (_disposed || !_registeredBindings.TryGetValue(identifier, out var binding)) return false;
         try
         {
-            Pressed?.Invoke(this, EventArgs.Empty);
+            if (identifier == ModeHotkeyIdentifier)
+            {
+                Pressed?.Invoke(this, EventArgs.Empty);
+            }
+            HotkeyPressed?.Invoke(this, new GlobalHotkeyPressedEventArgs(identifier, binding));
         }
         catch (Exception exception)
         {
@@ -231,15 +259,22 @@ internal sealed class GlobalHotkeyManager : NativeWindow, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (RegisteredBinding is not null && Handle != IntPtr.Zero)
+        if (Handle != IntPtr.Zero)
         {
-            _registrar.Unregister(Handle, HotkeyIdentifier);
-            RegisteredBinding = null;
+            foreach (var identifier in _registeredBindings.Keys.ToArray())
+            {
+                _registrar.Unregister(Handle, identifier);
+            }
+            _registeredBindings.Clear();
         }
         if (Handle != IntPtr.Zero) DestroyHandle();
         Pressed = null;
+        HotkeyPressed = null;
         GC.SuppressFinalize(this);
     }
+
+    private static bool IsSupportedIdentifier(int identifier) =>
+        identifier is ModeHotkeyIdentifier or CaptureHotkeyIdentifier;
 
     private sealed class Win32GlobalHotkeyRegistrar : IGlobalHotkeyRegistrar
     {
@@ -267,4 +302,12 @@ internal sealed class GlobalHotkeyManager : NativeWindow, IDisposable
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool UnregisterHotKey(IntPtr windowHandle, int identifier);
     }
+}
+
+internal sealed class GlobalHotkeyPressedEventArgs(
+    int identifier,
+    GlobalHotkeyBinding binding) : EventArgs
+{
+    internal int Identifier { get; } = identifier;
+    internal GlobalHotkeyBinding Binding { get; } = binding;
 }
