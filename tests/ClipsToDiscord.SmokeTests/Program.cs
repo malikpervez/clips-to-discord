@@ -4475,12 +4475,18 @@ static void AssertCaptureViewContract(AppSettings settings)
                Math.Max(1, (int)Math.Round(18 * consentScale))),
         "Reaction Camera consent must expose the approved rounded elevated surface rather than a rectangular borderless form.");
 
-    using var scrim = new CaptureCameraConsentScrim(new Rectangle(40, 30, 1200, 760));
-    Assert(scrim.Bounds == new Rectangle(40, 30, 1200, 760) &&
+    var scrimWorkingArea = Screen.FromControl(cameraConsent).WorkingArea;
+    var scrimOwnerBounds = new Rectangle(
+        scrimWorkingArea.Left + 40,
+        scrimWorkingArea.Top + 30,
+        Math.Min(1200, Math.Max(1, scrimWorkingArea.Width - 80)),
+        Math.Min(760, Math.Max(1, scrimWorkingArea.Height - 60)));
+    using var scrim = new CaptureCameraConsentScrim(scrimOwnerBounds);
+    Assert(scrim.Bounds == scrimOwnerBounds &&
            Math.Abs(scrim.Opacity - 0.72d) < 0.001d &&
            scrim.FormBorderStyle == FormBorderStyle.None &&
            !scrim.ShowInTaskbar,
-        "Reaction Camera consent must provide the approved owner-sized 72% modal scrim.");
+        $"Reaction Camera consent must provide the approved owner-sized 72% modal scrim: requested={scrimOwnerBounds}, actual={scrim.Bounds}, workingArea={scrimWorkingArea}, maxTrack={SystemInformation.MaxWindowTrackSize}.");
 
     using var constrainedConsent = new CaptureCameraConsentDialog("Logitech StreamCam");
     constrainedConsent.CreateControl();
