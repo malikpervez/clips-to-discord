@@ -110,6 +110,7 @@ internal sealed class CaptureView : UserControl
             : _settings.InstantReplayEnabled ? CaptureViewState.Armed : CaptureViewState.Off;
 
         Name = "CaptureView";
+        AccessibleName = "ClipCord Capture";
         Dock = DockStyle.Fill;
         BackColor = ClipCordTheme.Shell;
 

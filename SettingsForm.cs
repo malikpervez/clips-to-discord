@@ -444,8 +444,8 @@ internal sealed class SettingsForm : Form
             BackColor = ClipCordTheme.Header
         };
         pageIdentity.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        pageIdentity.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
-        pageIdentity.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+        pageIdentity.RowStyles.Add(new RowStyle(SizeType.Percent, 62));
+        pageIdentity.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
         pageIdentity.Controls.Add(_pageTitleLabel, 0, 0);
         pageIdentity.Controls.Add(_pageSubtitleLabel, 0, 1);
 

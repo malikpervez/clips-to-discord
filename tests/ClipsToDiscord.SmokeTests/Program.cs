@@ -516,6 +516,38 @@ try
            AppDistribution.HasPackageIdentityForResult(122) &&
            AppDistribution.HasPackageIdentityForResult(0),
         "Distribution detection must distinguish unpackaged, buffer-query, and packaged results.");
+    Assert(
+        AppDistribution.SelectUpdateRoute(isPackaged: false, manual: false) == AppUpdateRoute.GitHub &&
+        AppDistribution.SelectUpdateRoute(isPackaged: false, manual: true) == AppUpdateRoute.GitHub &&
+        AppDistribution.SelectUpdateRoute(isPackaged: true, manual: false) == AppUpdateRoute.None &&
+        AppDistribution.SelectUpdateRoute(isPackaged: true, manual: true) == AppUpdateRoute.MicrosoftStore,
+        "Packaged ClipCord must suppress automatic GitHub checks and route manual checks to Microsoft Store; unpackaged ClipCord must use GitHub.");
+    var updateTimerStarts = 0;
+    var updateIdleSchedules = 0;
+    var storeAutomaticScheduled = TrayApplicationContext.ConfigureAutomaticUpdateChecks(
+        AppUpdateRoute.None,
+        alreadyScheduled: false,
+        () => updateTimerStarts++,
+        () => updateIdleSchedules++);
+    Assert(
+        !storeAutomaticScheduled && updateTimerStarts == 0 && updateIdleSchedules == 0,
+        "A packaged Store build must not start or schedule the automatic GitHub updater.");
+    var githubAutomaticScheduled = TrayApplicationContext.ConfigureAutomaticUpdateChecks(
+        AppUpdateRoute.GitHub,
+        alreadyScheduled: false,
+        () => updateTimerStarts++,
+        () => updateIdleSchedules++);
+    Assert(
+        githubAutomaticScheduled && updateTimerStarts == 1 && updateIdleSchedules == 1,
+        "An unpackaged build must start its GitHub update timer and schedule its initial idle check exactly once.");
+    var githubAlreadyScheduled = TrayApplicationContext.ConfigureAutomaticUpdateChecks(
+        AppUpdateRoute.GitHub,
+        alreadyScheduled: true,
+        () => updateTimerStarts++,
+        () => updateIdleSchedules++);
+    Assert(
+        githubAlreadyScheduled && updateTimerStarts == 2 && updateIdleSchedules == 1,
+        "Restarting an unpackaged controller may restart its timer but must not register a duplicate idle update check.");
     var storeUpdatesStartInfo = AppDistribution.CreateStoreUpdatesStartInfo();
     Assert(storeUpdatesStartInfo.UseShellExecute &&
            storeUpdatesStartInfo.FileName == "ms-windows-store://downloadsandupdates" &&
@@ -2876,6 +2908,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertCaptureScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Capture 200% scaling");
             AssertCaptureScaledLayout(settings, 2f);
+            TraceSmokeStep("Settings layout: Silhouette editor 150% scaling");
+            AssertSilhouetteScaledLayout(settings, 1.5f);
+            TraceSmokeStep("Settings layout: Silhouette editor 200% scaling");
+            AssertSilhouetteScaledLayout(settings, 2f);
             TraceSmokeStep("Settings layout: Gallery 150% scaling");
             AssertGalleryScaledLayout(settings, 1.5f);
             TraceSmokeStep("Settings layout: Gallery 200% scaling");
@@ -4955,6 +4991,119 @@ static void AssertCaptureScaledLayout(AppSettings settings, float scale)
     finally
     {
         foreach (var font in scaledFonts.Values) font.Dispose();
+    }
+}
+
+static void AssertSilhouetteScaledLayout(AppSettings settings, float scale)
+{
+    var scaledFonts = new Dictionary<(string Family, float Size, FontStyle Style), Font>();
+    var settingsDirectory = Path.Combine(
+        Path.GetTempPath(),
+        "ClipsToDiscordTests",
+        "silhouette-scaled-layout-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        using var form = new SettingsForm(
+            settings,
+            checkForUpdatesAsync: _ => Task.CompletedTask,
+            initialPage: SettingsPage.SilhouetteLayouts,
+            captureSettings: CaptureSettings.Default with
+            {
+                ReactionCameraConsentGranted = true,
+                IncludeReactionCamera = true,
+                SilhouetteLandscapeEnabled = true,
+                SilhouettePortraitEnabled = true
+            },
+            captureEngineAvailable: true,
+            silhouetteSettingsDirectory: settingsDirectory);
+        var logicalDesignedOpeningSize = SettingsForm.GetDesignedOpeningSize(
+            SettingsPage.SilhouetteLayouts,
+            96);
+        var scaledDesignedOpeningSize = new Size(
+            (int)Math.Round(logicalDesignedOpeningSize.Width * scale),
+            (int)Math.Round(logicalDesignedOpeningSize.Height * scale));
+        form.CreateControl();
+        var relativeScale = scale / GetDpiScale(form);
+        form.Scale(new SizeF(relativeScale, relativeScale));
+        foreach (var control in new[] { (Control)form }.Concat(EnumerateControls(form)))
+        {
+            var source = control.Font;
+            var key = (source.FontFamily.Name, source.Size * relativeScale, source.Style);
+            if (!scaledFonts.TryGetValue(key, out var scaledFont))
+            {
+                scaledFont = new Font(source.FontFamily, key.Item2, source.Style, GraphicsUnit.Point);
+                scaledFonts.Add(key, scaledFont);
+            }
+            control.Font = scaledFont;
+        }
+
+        form.AutoScroll = true;
+        var rootLayout = form.Controls.Cast<Control>().Single(control => control.Name == "RootLayout");
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = scaledDesignedOpeningSize;
+        rootLayout.PerformLayout();
+        form.PerformLayout();
+        var editor = EnumerateControls(form).OfType<SilhouetteLayoutEditorView>().Single();
+        editor.SelectOrientation(CompositionOrientationIds.Portrait);
+        editor.RefreshViewport();
+        Application.DoEvents();
+
+        AssertControlsFit(form);
+        var footer = EnumerateControls(editor).Single(control => control.Name == "SilhouetteLayoutFooter");
+        var saveStatus = EnumerateControls(footer).Single(control =>
+            control.Name == "SilhouetteLayoutSaveStatusLabel");
+        var resetButton = EnumerateControls(footer).Single(control =>
+            control.Name == "SilhouetteResetCurrentLayoutButton");
+        var saveButton = EnumerateControls(footer).Single(control =>
+            control.Name == "SilhouetteSaveDefaultLayoutButton");
+        var effectiveLayoutScale = Math.Max(GetDpiScale(form), GetDpiScale(form) * relativeScale);
+        var footerChildBounds = new[] { saveStatus, resetButton, saveButton }
+            .Select(control => GetBoundsRelativeTo(control, footer))
+            .ToArray();
+        Assert(
+            Math.Abs(footer.Height / effectiveLayoutScale - 58) <= 1 &&
+            footerChildBounds.All(bounds =>
+                bounds.Width > 0 && bounds.Height > 0 &&
+                bounds.Left >= -1 && bounds.Top >= -1 &&
+                bounds.Right <= footer.ClientSize.Width + 1 &&
+                bounds.Bottom <= footer.ClientSize.Height + 1),
+            $"The Silhouette footer must retain its 58px logical height and three usable actions at {scale:F1}x: " +
+            $"footer={footer.Size}, scale={effectiveLayoutScale:F2}, status={saveStatus.Size}, " +
+            $"reset={resetButton.Size}, save={saveButton.Size}, bounds=[{string.Join(", ", footerChildBounds)}].");
+
+        var portraitModes = new[]
+        {
+            "PortraitContextModeButton",
+            "PortraitFocusCropModeButton",
+            "PortraitCustomModeButton"
+        }.Select(name => EnumerateControls(editor).Single(control => control.Name == name)).ToArray();
+        Assert(
+            portraitModes.All(button => button.Width > 0 && button.Height > 0 &&
+                button.Right <= button.Parent!.ClientSize.Width + 1 &&
+                button.Bottom <= button.Parent.ClientSize.Height + 1),
+            $"All Portrait layout modes must fit their selector at {scale:F1}x: " +
+            string.Join(", ", portraitModes.Select(button => $"{button.Name}={button.Bounds}")));
+
+        var scrollHost = EnumerateControls(editor).OfType<BrandedScrollHost>()
+            .Single(control => control.Name == "SilhouetteLayoutEditorScrollHost");
+        scrollHost.EnsureControlVisible(saveButton);
+        Application.DoEvents();
+        var saveBounds = scrollHost.RectangleToClient(
+            saveButton.RectangleToScreen(saveButton.ClientRectangle));
+        Assert(
+            saveBounds.Top >= -1 && saveBounds.Bottom <= scrollHost.ClientSize.Height + 1,
+            $"The Silhouette save action must remain reachable through branded scrolling at {scale:F1}x: " +
+            $"save={saveBounds}, viewport={scrollHost.ClientSize}.");
+
+        editor.SelectOrientation(CompositionOrientationIds.Landscape);
+        editor.RefreshViewport();
+        Application.DoEvents();
+        AssertControlsFit(form);
+    }
+    finally
+    {
+        foreach (var font in scaledFonts.Values) font.Dispose();
+        if (Directory.Exists(settingsDirectory)) Directory.Delete(settingsDirectory, recursive: true);
     }
 }
 
@@ -7942,10 +8091,21 @@ static void AssertSharedShellLayout(SettingsForm form)
     Assert(watcherDot.AccessibleRole == AccessibleRole.None && !watcherDot.TabStop &&
            watcherDot.Bounds.Bottom <= watcherDot.Parent!.ClientSize.Height,
         "The rail watcher state must use a silent painted dot that cannot inherit font-dependent clipping.");
+    var pageTitle = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "PageTitleLabel");
+    var measuredPageTitle = TextRenderer.MeasureText(
+        pageTitle.Text,
+        pageTitle.Font,
+        Size.Empty,
+        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
     Assert(EnumerateControls(form).OfType<TitleBarButton>().Count() == 3 &&
-           EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageTitleLabel").Visible &&
+           pageTitle.Visible &&
+           measuredPageTitle.Height <= pageTitle.ClientSize.Height &&
            EnumerateControls(form).OfType<Label>().Single(label => label.Name == "PageSubtitleLabel").Visible,
         "The shared header must retain page identity and all three custom window actions.");
+    Assert(
+        EnumerateControls(form).OfType<CaptureView>().Single().AccessibleName == "ClipCord Capture",
+        "The Capture page container must expose its approved accessible name to assistive technology.");
 
     var expectedNavigationGlyphSide = (int)Math.Round(16 * logicalScale);
     var navigationGlyphs = EnumerateControls(navigation).OfType<BrandGlyphControl>()

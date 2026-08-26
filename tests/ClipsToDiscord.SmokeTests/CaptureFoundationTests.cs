@@ -232,7 +232,7 @@ internal static class CaptureFoundationTests
                 CaptureLibraryLayout.CreateGameIdentity("Battlefield-6") &&
             CaptureLibraryLayout.CreateGameIdentity("bf6") !=
                 CaptureLibraryLayout.CreateGameIdentity("Battlefield-6") &&
-            CaptureLibraryLayout.GetRecordingDirectory(root, "Battlefield-6") == established.FullName,
+            CaptureLibraryLayout.GetRecordingDirectory(root, "Battlefield 6") == established.FullName,
             "A captured game must reuse its oldest equivalent human-facing library folder instead of creating a punctuation or trademark duplicate.");
 
         var legacyRoot = Path.Combine(testRoot, "legacy-tm-library-root");
@@ -244,7 +244,7 @@ internal static class CaptureFoundationTests
             legacyGameRoot,
             "Battlefield 6 TM"));
         Assert(
-            CaptureLibraryLayout.GetRecordingDirectory(legacyRoot, "Battlefield-6") ==
+            CaptureLibraryLayout.GetRecordingDirectory(legacyRoot, "Battlefield 6") ==
             legacyBattlefield.FullName,
             "A legacy Battlefield 6 TM folder must be reused instead of creating another Battlefield spelling.");
 
@@ -1783,51 +1783,137 @@ internal static class CaptureFoundationTests
 
     private static void AssertAudioSessionTrackPlans(string testRoot)
     {
-        var voiceOnly = CaptureSettings.Default with
+        var allEnabled = CaptureSettings.Default with
         {
-            RecordGameAudio = false,
-            IncludeMicrophone = false,
+            RecordGameAudio = true,
+            GameAudioDevice = "Synthetic game endpoint",
+            IncludeMicrophone = true,
+            MicrophoneDevice = "Synthetic microphone endpoint",
             IncludeVoiceChat = true,
             VoiceChatDevice = "Synthetic voice-chat endpoint"
         };
-        var manualVoice = CaptureAudioSession.CreateTrackPlan(
-            voiceOnly,
+        var manual = CaptureAudioSession.CreateTrackPlan(
+            allEnabled,
             testRoot,
             "audio-plan");
+        var manualGame = manual.Where(track => track.Kind == CaptureAudioSourceKind.Game).ToArray();
         Assert(
-            manualVoice is
+            manualGame is
             [
                 {
-                    Kind: CaptureAudioSourceKind.VoiceChat,
+                    SelectedDevice: "Synthetic game endpoint",
+                    Flow: DataFlow.Render,
+                    DefaultRole: Role.Multimedia
+                }
+            ] &&
+            manualGame[0].Path == Path.Combine(testRoot, "manual-capture-audio-plan.game.wav"),
+            "Manual game audio must use the selected render/multimedia endpoint and its private staging file.");
+        var manualMicrophone = manual.Where(track => track.Kind == CaptureAudioSourceKind.Microphone).ToArray();
+        Assert(
+            manualMicrophone is
+            [
+                {
+                    SelectedDevice: "Synthetic microphone endpoint",
+                    Flow: DataFlow.Capture,
+                    DefaultRole: Role.Multimedia
+                }
+            ] &&
+            manualMicrophone[0].Path == Path.Combine(testRoot, "manual-capture-audio-plan.microphone.wav"),
+            "Manual microphone audio must use the selected capture/multimedia endpoint and its private staging file.");
+        var manualVoiceChat = manual.Where(track => track.Kind == CaptureAudioSourceKind.VoiceChat).ToArray();
+        Assert(
+            manualVoiceChat is
+            [
+                {
                     SelectedDevice: "Synthetic voice-chat endpoint",
                     Flow: DataFlow.Render,
                     DefaultRole: Role.Communications
                 }
             ] &&
-            manualVoice[0].Path == Path.Combine(
+            manualVoiceChat[0].Path == Path.Combine(
                 testRoot,
                 "manual-capture-audio-plan.chat.wav"),
             "Manual audio capture must plan an enabled voice-chat render/communications source and its private staging file.");
-
-        var replayVoice = ReplayAudioSession.CreateTrackPlan(voiceOnly);
         Assert(
-            replayVoice is
+            manual.Count == 3,
+            "Manual audio capture must plan exactly one track for each enabled game, microphone, and voice-chat source.");
+
+        var replay = ReplayAudioSession.CreateTrackPlan(allEnabled);
+        var replayGame = replay.Where(track => track.Kind == CaptureAudioSourceKind.Game).ToArray();
+        Assert(
+            replayGame is
             [
                 {
-                    Kind: CaptureAudioSourceKind.VoiceChat,
+                    SelectedDevice: "Synthetic game endpoint",
+                    Flow: DataFlow.Render,
+                    DefaultRole: Role.Multimedia
+                }
+            ],
+            "Instant Replay game audio must use the selected render/multimedia endpoint.");
+        var replayMicrophone = replay.Where(track => track.Kind == CaptureAudioSourceKind.Microphone).ToArray();
+        Assert(
+            replayMicrophone is
+            [
+                {
+                    SelectedDevice: "Synthetic microphone endpoint",
+                    Flow: DataFlow.Capture,
+                    DefaultRole: Role.Multimedia
+                }
+            ],
+            "Instant Replay microphone audio must use the selected capture/multimedia endpoint.");
+        var replayVoiceChat = replay.Where(track => track.Kind == CaptureAudioSourceKind.VoiceChat).ToArray();
+        Assert(
+            replayVoiceChat is
+            [
+                {
                     SelectedDevice: "Synthetic voice-chat endpoint",
                     Flow: DataFlow.Render,
                     DefaultRole: Role.Communications
                 }
             ],
-            "Instant Replay audio must plan an enabled voice-chat render/communications source.");
+            "Instant Replay voice-chat audio must use the selected render/communications endpoint.");
+        Assert(
+            replay.Count == 3,
+            "Instant Replay audio must plan exactly one track for each enabled game, microphone, and voice-chat source.");
 
-        var voiceDisabled = voiceOnly with { IncludeVoiceChat = false };
+        var withoutGame = allEnabled with { RecordGameAudio = false };
+        var withoutMicrophone = allEnabled with { IncludeMicrophone = false };
+        var withoutVoiceChat = allEnabled with { IncludeVoiceChat = false };
+        var manualWithoutGame = CaptureAudioSession.CreateTrackPlan(withoutGame, testRoot, "audio-plan");
         Assert(
-            CaptureAudioSession.CreateTrackPlan(voiceDisabled, testRoot, "audio-plan").Count == 0,
+            manualWithoutGame.Select(track => track.Kind).SequenceEqual(
+                [CaptureAudioSourceKind.Microphone, CaptureAudioSourceKind.VoiceChat]),
+            "Manual audio capture must omit game audio when its independent source is disabled.");
+        var manualWithoutMicrophone = CaptureAudioSession.CreateTrackPlan(
+            withoutMicrophone,
+            testRoot,
+            "audio-plan");
+        Assert(
+            manualWithoutMicrophone.Select(track => track.Kind).SequenceEqual(
+                [CaptureAudioSourceKind.Game, CaptureAudioSourceKind.VoiceChat]),
+            "Manual audio capture must omit microphone audio when its independent source is disabled.");
+        var manualWithoutVoiceChat = CaptureAudioSession.CreateTrackPlan(
+            withoutVoiceChat,
+            testRoot,
+            "audio-plan");
+        Assert(
+            manualWithoutVoiceChat.Select(track => track.Kind).SequenceEqual(
+                [CaptureAudioSourceKind.Game, CaptureAudioSourceKind.Microphone]),
             "Manual audio capture must omit voice chat when its independent input is disabled.");
+        var replayWithoutGame = ReplayAudioSession.CreateTrackPlan(withoutGame);
         Assert(
-            ReplayAudioSession.CreateTrackPlan(voiceDisabled).Count == 0,
+            replayWithoutGame.Select(track => track.Kind).SequenceEqual(
+                [CaptureAudioSourceKind.Microphone, CaptureAudioSourceKind.VoiceChat]),
+            "Instant Replay audio must omit game audio when its independent source is disabled.");
+        var replayWithoutMicrophone = ReplayAudioSession.CreateTrackPlan(withoutMicrophone);
+        Assert(
+            replayWithoutMicrophone.Select(track => track.Kind).SequenceEqual(
+                [CaptureAudioSourceKind.Game, CaptureAudioSourceKind.VoiceChat]),
+            "Instant Replay audio must omit microphone audio when its independent source is disabled.");
+        var replayWithoutVoiceChat = ReplayAudioSession.CreateTrackPlan(withoutVoiceChat);
+        Assert(
+            replayWithoutVoiceChat.Select(track => track.Kind).SequenceEqual(
+                [CaptureAudioSourceKind.Game, CaptureAudioSourceKind.Microphone]),
             "Instant Replay audio must omit voice chat when its independent input is disabled.");
     }
 
@@ -1911,7 +1997,7 @@ internal static class CaptureFoundationTests
             Environment.ProcessId);
         Assert(
             protectedFishing?.DisplayName == "Fishing" &&
-            protectedBattlefield?.DisplayName == "Battlefield-6",
+            protectedBattlefield?.DisplayName == "Battlefield 6",
             "Protected games must use a canonical human-facing window title for library naming, never their abbreviated process name.");
 
         foreach (var rejected in new[]
@@ -1986,7 +2072,7 @@ internal static class CaptureFoundationTests
         _ = gameSwitchMonitor.Observe(protectedBattlefield, now + TimeSpan.FromMilliseconds(400));
         Assert(
             gameSwitchMonitor.Observe(protectedBattlefield, now + TimeSpan.FromMilliseconds(800))?.DisplayName ==
-            "Battlefield-6",
+            "Battlefield 6",
             "Battlefield must become the stable replay target after the required foreground observations.");
         gameSwitchMonitor.Invalidate(protectedBattlefield!.WindowHandle, protectedBattlefield.ProcessId);
         Assert(gameSwitchMonitor.Current(now + TimeSpan.FromSeconds(1)) is null,
@@ -2007,7 +2093,7 @@ internal static class CaptureFoundationTests
             _ = targetTracker.Observe(protectedBattlefield, now + TimeSpan.FromMilliseconds(400));
             Assert(
                 targetTracker.Observe(protectedBattlefield, now + TimeSpan.FromMilliseconds(800))?.DisplayName ==
-                "Battlefield-6" &&
+                "Battlefield 6" &&
                 targetSource.SubscriberCount == 1,
                 "The capture host target tracker must subscribe to replay target-lifetime notifications and retain a live Battlefield target.");
             targetSource.Raise(protectedBattlefield!);

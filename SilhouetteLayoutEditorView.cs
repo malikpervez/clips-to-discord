@@ -2168,7 +2168,9 @@ internal sealed class SilhouetteEditorContentLayout : Panel
     {
         if (factor.Height > 0 && float.IsFinite(factor.Height))
         {
-            _syntheticScale = Math.Max(1f, factor.Height);
+            _syntheticScale = Math.Max(
+                _syntheticScale,
+                Math.Max(1f, DeviceDpi / 96f) * factor.Height);
         }
         base.ScaleControl(factor, specified);
         PerformLayout();

@@ -114,7 +114,7 @@ internal static class GameWindowCandidatePolicy
         {
             if (char.IsLetterOrDigit(character))
             {
-                if (separatorPending && canonical.Length > 0) canonical.Append('-');
+                if (separatorPending && canonical.Length > 0) canonical.Append(' ');
                 canonical.Append(character);
                 separatorPending = false;
             }
@@ -124,7 +124,7 @@ internal static class GameWindowCandidatePolicy
             }
         }
         var result = canonical.ToString();
-        return result.Length > 80 ? result[..80].TrimEnd('-') : result;
+        return result.Length > 80 ? result[..80].TrimEnd(' ') : result;
     }
 }
 

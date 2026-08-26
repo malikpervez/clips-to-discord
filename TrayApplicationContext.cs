@@ -816,14 +816,30 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _modeFeedbackOverlay.ShowFeedback(presentation);
     }
 
+    internal static bool ConfigureAutomaticUpdateChecks(
+        AppUpdateRoute route,
+        bool alreadyScheduled,
+        Action startTimer,
+        Action scheduleOnIdle)
+    {
+        ArgumentNullException.ThrowIfNull(startTimer);
+        ArgumentNullException.ThrowIfNull(scheduleOnIdle);
+        if (route != AppUpdateRoute.GitHub) return false;
+
+        startTimer();
+        if (alreadyScheduled) return true;
+
+        scheduleOnIdle();
+        return true;
+    }
+
     private void StartUpdateChecks()
     {
-        if (AppDistribution.UsesStoreUpdates) return;
-        _updateTimer.Start();
-        if (_automaticUpdateCheckScheduled) return;
-
-        _automaticUpdateCheckScheduled = true;
-        Application.Idle += CheckForUpdatesOnIdle;
+        _automaticUpdateCheckScheduled = ConfigureAutomaticUpdateChecks(
+            AppDistribution.SelectUpdateRoute(AppDistribution.IsPackaged, manual: false),
+            _automaticUpdateCheckScheduled,
+            _updateTimer.Start,
+            () => Application.Idle += CheckForUpdatesOnIdle);
     }
 
     private async void CheckForUpdatesOnIdle(object? sender, EventArgs eventArgs)
@@ -861,10 +877,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private async Task CheckForUpdatesManuallyAsync(IWin32Window owner)
     {
-        if (AppDistribution.UsesStoreUpdates)
+        var route = AppDistribution.SelectUpdateRoute(AppDistribution.IsPackaged, manual: true);
+        if (route == AppUpdateRoute.MicrosoftStore)
         {
             OpenStoreUpdates(GetUsableOwner(owner));
             return;
+        }
+        if (route != AppUpdateRoute.GitHub)
+        {
+            throw new InvalidOperationException("Manual update checks require a trusted update route.");
         }
 
         var result = await _updateCoordinator.CheckAsync(
