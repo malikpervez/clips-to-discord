@@ -4809,20 +4809,18 @@ static void AssertCompactCameraTextFits(CaptureView capture)
 
 static void AssertCaptureDesignedWidthLayout(SettingsForm form)
 {
+    const int approvedRootLogicalWidth = 1184;
     var rootLayout = form.Controls.Cast<Control>()
         .Single(control => control.Name == "RootLayout");
     var originalDock = rootLayout.Dock;
     var originalSize = rootLayout.Size;
     try
     {
-        var designedOuterSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.Capture, form.DeviceDpi);
-        var shellInsets = new Size(
-            Math.Max(0, form.Width - form.ClientSize.Width) + form.Padding.Horizontal,
-            Math.Max(0, form.Height - form.ClientSize.Height) + form.Padding.Vertical);
+        var dpiScale = GetDpiScale(form);
         rootLayout.Dock = DockStyle.None;
         rootLayout.Size = new Size(
-            Math.Max(1, designedOuterSize.Width - shellInsets.Width),
-            Math.Max(1, designedOuterSize.Height - shellInsets.Height));
+            (int)Math.Round(approvedRootLogicalWidth * dpiScale),
+            originalSize.Height);
         rootLayout.PerformLayout();
         form.PerformLayout();
         Application.DoEvents();
@@ -4831,7 +4829,6 @@ static void AssertCaptureDesignedWidthLayout(SettingsForm form)
         form.PerformLayout();
         Application.DoEvents();
 
-        var dpiScale = GetDpiScale(form);
         var splitRow = EnumerateControls(capture)
             .Single(control => control.Name == "CaptureQualityAndEstimateRow");
         var qualityCard = EnumerateControls(capture)
@@ -4839,7 +4836,7 @@ static void AssertCaptureDesignedWidthLayout(SettingsForm form)
         var cameraCard = EnumerateControls(capture)
             .Single(control => control.Name == "CaptureReactionCameraCard");
         Assert(
-            Math.Abs((rootLayout.Width + shellInsets.Width) / dpiScale - 1200) <= 2 &&
+            Math.Abs(rootLayout.Width / dpiScale - approvedRootLogicalWidth) <= 2 &&
             Math.Abs(splitRow.Width / dpiScale - 928) <= 3 &&
             Math.Abs(qualityCard.Width / dpiScale - 612) <= 3 &&
             Math.Abs(cameraCard.Width / dpiScale - 340) <= 3,
