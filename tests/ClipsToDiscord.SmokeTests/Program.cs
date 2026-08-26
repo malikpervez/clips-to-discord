@@ -4810,6 +4810,7 @@ static void AssertCompactCameraTextFits(CaptureView capture)
 static void AssertCaptureDesignedWidthLayout(SettingsForm form)
 {
     const int approvedRootLogicalWidth = 1184;
+    const int approvedRootLogicalHeight = 736;
     var rootLayout = form.Controls.Cast<Control>()
         .Single(control => control.Name == "RootLayout");
     var originalDock = rootLayout.Dock;
@@ -4820,7 +4821,7 @@ static void AssertCaptureDesignedWidthLayout(SettingsForm form)
         rootLayout.Dock = DockStyle.None;
         rootLayout.Size = new Size(
             (int)Math.Round(approvedRootLogicalWidth * dpiScale),
-            originalSize.Height);
+            (int)Math.Round(approvedRootLogicalHeight * dpiScale));
         rootLayout.PerformLayout();
         form.PerformLayout();
         Application.DoEvents();
