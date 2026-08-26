@@ -4809,10 +4809,21 @@ static void AssertCompactCameraTextFits(CaptureView capture)
 
 static void AssertCaptureDesignedWidthLayout(SettingsForm form)
 {
-    var originalSize = form.Size;
+    var rootLayout = form.Controls.Cast<Control>()
+        .Single(control => control.Name == "RootLayout");
+    var originalDock = rootLayout.Dock;
+    var originalSize = rootLayout.Size;
     try
     {
-        form.Size = SettingsForm.GetDesignedOpeningSize(SettingsPage.Capture, form.DeviceDpi);
+        var designedOuterSize = SettingsForm.GetDesignedOpeningSize(SettingsPage.Capture, form.DeviceDpi);
+        var shellInsets = new Size(
+            Math.Max(0, form.Width - form.ClientSize.Width) + form.Padding.Horizontal,
+            Math.Max(0, form.Height - form.ClientSize.Height) + form.Padding.Vertical);
+        rootLayout.Dock = DockStyle.None;
+        rootLayout.Size = new Size(
+            Math.Max(1, designedOuterSize.Width - shellInsets.Width),
+            Math.Max(1, designedOuterSize.Height - shellInsets.Height));
+        rootLayout.PerformLayout();
         form.PerformLayout();
         Application.DoEvents();
         var capture = EnumerateControls(form).OfType<CaptureView>().Single();
@@ -4828,12 +4839,12 @@ static void AssertCaptureDesignedWidthLayout(SettingsForm form)
         var cameraCard = EnumerateControls(capture)
             .Single(control => control.Name == "CaptureReactionCameraCard");
         Assert(
-            Math.Abs(form.Width / dpiScale - 1200) <= 2 &&
+            Math.Abs((rootLayout.Width + shellInsets.Width) / dpiScale - 1200) <= 2 &&
             Math.Abs(splitRow.Width / dpiScale - 928) <= 3 &&
             Math.Abs(qualityCard.Width / dpiScale - 612) <= 3 &&
             Math.Abs(cameraCard.Width / dpiScale - 340) <= 3,
             $"Capture's unconstrained opening must retain the approved Figma geometry: " +
-            $"form={form.Size}, row={splitRow.Size}, quality={qualityCard.Size}, camera={cameraCard.Size}, scale={dpiScale:F2}.");
+            $"root={rootLayout.Size}, row={splitRow.Size}, quality={qualityCard.Size}, camera={cameraCard.Size}, scale={dpiScale:F2}.");
 
         var labels = EnumerateControls(capture).OfType<Label>().ToArray();
         var range = labels.Single(label => label.Name == "CaptureEstimatedSizeRange");
@@ -4853,7 +4864,9 @@ static void AssertCaptureDesignedWidthLayout(SettingsForm form)
     }
     finally
     {
-        form.Size = originalSize;
+        rootLayout.Dock = originalDock;
+        rootLayout.Size = originalSize;
+        rootLayout.PerformLayout();
         form.PerformLayout();
         Application.DoEvents();
         EnumerateControls(form).OfType<CaptureView>().Single().RefreshViewport();
