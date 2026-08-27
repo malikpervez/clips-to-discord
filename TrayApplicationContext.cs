@@ -206,6 +206,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly IManualCaptureRecorder? _manualCaptureRecorder;
     private readonly ICaptureProjectCompletionSource? _captureProjectCompletionSource;
     private readonly SilhouetteProcessingCoordinator _silhouetteProcessingCoordinator;
+    private readonly ClipProcessingOwnershipCoordinator _processingOwnership = new();
+    // Anything created at or after this process boundary may still be completing in the
+    // isolated capture host while startup reconciliation scans the shared library.
+    private readonly DateTimeOffset _captureRecoveryCutoffUtc = DateTimeOffset.UtcNow;
     private volatile CaptureSettings _captureSettings;
     private string _baseTrayStatus = "Starting…";
     private ManualCaptureState _manualCaptureState = ManualCaptureState.NoTarget;
@@ -265,12 +269,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     exception),
                 _lifetimeCancellation.Token);
         }
-        var recoveredCaptureFiles = CaptureStagingRecovery.RemoveOrphanedManualCaptures(
-            _captureSettings.LibraryRoot);
-        if (recoveredCaptureFiles > 0)
-        {
-            Log.Info($"Removed {recoveredCaptureFiles} abandoned capture staging file(s).");
-        }
         var recoveredCameraProjects = CaptureStagingRecovery.RemoveOrphanedReactionCameraProjects(
             _captureSettings.LibraryRoot);
         if (recoveredCameraProjects > 0)
@@ -285,6 +283,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         _silhouetteProcessingCoordinator = new SilhouetteProcessingCoordinator(
             _captureSettings.LibraryRoot);
+        _silhouetteProcessingCoordinator.ProjectSettled += SilhouetteProjectSettled;
+        _ = RecoverCaptureJournalsAsync(_captureSettings.LibraryRoot);
         _captureProjectCompletionSource =
             _manualCaptureRecorder as ICaptureProjectCompletionSource;
         if (_captureProjectCompletionSource is not null)
@@ -680,7 +680,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         _uploadToDiscordItem.Checked = settings.UploadToDiscord;
         _uploadToDiscordItem.Enabled = settings.IsValid;
-        _controller = new DiscordAwareController(settings, SetStatus, _activityHistory, _favorites);
+        if (!_processingOwnership.TryAcquire(
+                ClipProcessingRuntimeOwner.Legacy,
+                out var legacyOwnership) || legacyOwnership is null)
+        {
+            throw new InvalidOperationException(
+                "Another ClipCord pipeline still owns clip processing.");
+        }
+        try
+        {
+            _controller = new DiscordAwareController(
+                settings,
+                SetStatus,
+                legacyOwnership,
+                _activityHistory,
+                _favorites);
+        }
+        catch
+        {
+            legacyOwnership.Dispose();
+            throw;
+        }
         StartUpdateChecks();
     }
 
@@ -1098,6 +1118,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             CaptureSettingsStore.Save(settings);
             _captureSettings = settings;
             _silhouetteProcessingCoordinator.UpdateLibraryRoot(settings.LibraryRoot);
+            _ = RecoverCaptureJournalsAsync(settings.LibraryRoot);
             if (settings.InstantReplayEnabled)
             {
                 _ = StartConfiguredReplayWhenGameAppearsAsync();
@@ -1120,6 +1141,59 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _ = _silhouetteProcessingCoordinator.TryEnqueue(
             eventArgs.LibraryRoot,
             eventArgs.ProjectId);
+    }
+
+    private async void SilhouetteProjectSettled(
+        object? sender,
+        SilhouetteProjectSettledEventArgs eventArgs)
+    {
+        try
+        {
+            _ = await CaptureJournalCaptureCommit.ReconcileRenditionsAsync(
+                    eventArgs.LibraryRoot,
+                    eventArgs.ProjectId,
+                    _lifetimeCancellation.Token,
+                    processingSettled: true)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            // The silhouette rendition state remains durable and will be projected by startup
+            // reconciliation. Do not turn an optional post-processing notification into a
+            // capture or shutdown failure.
+            Log.Error(
+                $"ClipCord could not reconcile silhouette outputs for project {eventArgs.ProjectId}.",
+                exception);
+        }
+    }
+
+    private async Task RecoverCaptureJournalsAsync(string libraryRoot)
+    {
+        try
+        {
+            await CaptureJournalStartupRecovery.RecoverAsync(
+                    libraryRoot,
+                    _captureRecoveryCutoffUtc,
+                    _lifetimeCancellation.Token)
+                .ConfigureAwait(false);
+            // Promotion recovery must run first: an old staged MP4 can still be owned by a
+            // durable move-before-journal intent and must not be mistaken for an orphan.
+            var removed = CaptureStagingRecovery.RemoveOrphanedManualCaptures(libraryRoot);
+            if (removed > 0)
+            {
+                Log.Info($"Removed {removed} abandoned capture staging file(s).");
+            }
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            Log.Error("ClipCord could not finish capture-journal startup recovery.", exception);
+        }
     }
 
     private async void GalleryRenditionRetryRequested(
@@ -1509,6 +1583,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _captureProjectCompletionSource.ProjectCommitted -= CaptureProjectCommitted;
         }
+        _silhouetteProcessingCoordinator.ProjectSettled -= SilhouetteProjectSettled;
         _silhouetteProcessingCoordinator.Dispose();
         if (_manualCaptureRecorder is not null)
         {

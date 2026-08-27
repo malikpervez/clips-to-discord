@@ -84,7 +84,20 @@ internal static class ReplaySnapshotMaterializer
                 cancellationToken).ConfigureAwait(false);
             EnsureNonEmptyFile(completedPath, "ClipCord could not finalize the buffered replay.");
 
-            CaptureOutputPolicy.MoveCompletedFile(completedPath, finalPath);
+            var dimensions = CaptureProfileCatalog.GetDimensions(settings.Resolution);
+            var journal = await CaptureJournalCaptureCommit.PromoteOriginalAsync(
+                    settings.LibraryRoot,
+                    completedPath,
+                    finalPath,
+                    CaptureJournalSourceKind.InstantReplay,
+                    gameName,
+                    capturedAt,
+                    snapshot.ActualDuration,
+                    dimensions.Width,
+                    dimensions.Height,
+                    settings,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
             CaptureProjectSaveResult? cameraLayer = null;
             if (reactionCameraSnapshot is not null)
             {
@@ -166,6 +179,25 @@ internal static class ReplaySnapshotMaterializer
                 reactionCameraWarning =
                     "The replay was saved without a Reaction Camera layer because no camera segment was available.";
             }
+            try
+            {
+                _ = await CaptureJournalCaptureCommit.FinalizeCameraAsync(
+                        settings.LibraryRoot,
+                        journal.Clip.ClipId,
+                        cameraLayer,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                // The replay and source journal are already durable. Optional camera projection
+                // is recoverable and must not turn a successful hotkey save into a failure.
+                Log.Error(
+                    "ClipCord saved the replay but could not update its camera journal state.",
+                    exception);
+                reactionCameraWarning ??=
+                    "The replay was saved, but Reaction Camera processing needs attention.";
+            }
             return new ManualCaptureResult(
                 finalPath,
                 gameName,
@@ -176,7 +208,12 @@ internal static class ReplaySnapshotMaterializer
         }
         catch
         {
-            TryDelete(completedPath);
+            if (!CaptureJournalPromotionIntentStore.IsOriginalStageProtected(
+                    settings.LibraryRoot,
+                    completedPath))
+            {
+                TryDelete(completedPath);
+            }
             throw;
         }
         finally

@@ -141,9 +141,14 @@ internal sealed class RoutingEvaluatorRuntimePlanner : IRoutingRuntimePlanner
 internal enum RoutingRuntimeGateState
 {
     DisabledByDefault,
+    OwnershipUnavailable,
     MigrationMarkerMissing,
     MigrationMarkerNotCommitted,
+    LegacyStateUnavailable,
     LegacyQueuesPending,
+    MigrationEvidenceMismatch,
+    RoutingSnapshotUnavailable,
+    MigrationRouteMismatch,
     Enabled
 }
 
@@ -156,22 +161,30 @@ internal sealed class RoutingRuntimeFeatureGate
 {
     private readonly bool _requestedEnabled;
     private readonly LegacyRoutingMigrationMarkerStore? _migrationMarkers;
-    private readonly WatchState? _legacyState;
+    private readonly RoutingSnapshotStore? _routingSnapshots;
+    private readonly ILegacyRoutingActivationEvidenceSource? _activationEvidence;
+    private readonly ClipProcessingOwnershipLease? _ownership;
 
     private RoutingRuntimeFeatureGate(
         bool requestedEnabled,
         LegacyRoutingMigrationMarkerStore? migrationMarkers,
-        WatchState? legacyState)
+        RoutingSnapshotStore? routingSnapshots,
+        ILegacyRoutingActivationEvidenceSource? activationEvidence,
+        ClipProcessingOwnershipLease? ownership)
     {
         _requestedEnabled = requestedEnabled;
         _migrationMarkers = migrationMarkers;
-        _legacyState = legacyState;
+        _routingSnapshots = routingSnapshots;
+        _activationEvidence = activationEvidence;
+        _ownership = ownership;
     }
 
     internal static RoutingRuntimeFeatureGate Disabled { get; } = new(
         requestedEnabled: false,
         migrationMarkers: null,
-        legacyState: null);
+        routingSnapshots: null,
+        activationEvidence: null,
+        ownership: null);
 
     internal RoutingRuntimeGateState State => Inspect().State;
     internal int PendingLegacyMoves => Inspect().PendingLegacyMoves;
@@ -183,84 +196,125 @@ internal sealed class RoutingRuntimeFeatureGate
     internal static RoutingRuntimeFeatureGate Evaluate(
         bool requestedEnabled,
         LegacyRoutingMigrationMarkerStore migrationMarkers,
-        WatchState legacyState)
+        RoutingSnapshotStore routingSnapshots,
+        ILegacyRoutingActivationEvidenceSource activationEvidence,
+        ClipProcessingOwnershipLease ownership)
     {
         ArgumentNullException.ThrowIfNull(migrationMarkers);
-        ArgumentNullException.ThrowIfNull(legacyState);
+        ArgumentNullException.ThrowIfNull(routingSnapshots);
+        ArgumentNullException.ThrowIfNull(activationEvidence);
+        ArgumentNullException.ThrowIfNull(ownership);
         return new RoutingRuntimeFeatureGate(
             requestedEnabled,
             migrationMarkers,
-            legacyState);
+            routingSnapshots,
+            activationEvidence,
+            ownership);
     }
 
     internal RoutingRuntimeGateInspection Inspect()
     {
         if (!_requestedEnabled)
         {
-            return new RoutingRuntimeGateInspection(
-                RoutingRuntimeGateState.DisabledByDefault,
-                0,
-                0,
-                0,
-                0);
+            return Inspection(RoutingRuntimeGateState.DisabledByDefault);
         }
 
-        var legacyState = _legacyState;
-        if (legacyState is null)
+        var ownership = _ownership;
+        if (ownership is null ||
+            ownership.Owner != ClipProcessingRuntimeOwner.Routing ||
+            !ownership.IsCurrent)
         {
-            return new RoutingRuntimeGateInspection(
-                RoutingRuntimeGateState.LegacyQueuesPending,
-                0,
-                0,
-                0,
-                0);
-        }
-
-        var pendingMoves = legacyState.PendingMoves?.Count ?? -1;
-        var pendingLocalOnlyMoves = legacyState.PendingLocalOnlyMoves?.Count ?? -1;
-        var pendingEditedUploads = legacyState.PendingEditedUploads?.Count ?? -1;
-        var ignoredFileKeys = legacyState.IgnoredFileKeys?.Count ?? -1;
-        if (pendingMoves != 0 || pendingLocalOnlyMoves != 0 || pendingEditedUploads != 0 ||
-            ignoredFileKeys != 0)
-        {
-            return new RoutingRuntimeGateInspection(
-                RoutingRuntimeGateState.LegacyQueuesPending,
-                Math.Max(0, pendingMoves),
-                Math.Max(0, pendingLocalOnlyMoves),
-                Math.Max(0, pendingEditedUploads),
-                Math.Max(0, ignoredFileKeys));
+            return Inspection(RoutingRuntimeGateState.OwnershipUnavailable);
         }
 
         var markerStore = _migrationMarkers;
         if (markerStore is null)
         {
-            return new RoutingRuntimeGateInspection(
-                RoutingRuntimeGateState.MigrationMarkerMissing,
-                0,
-                0,
-                0,
-                0);
+            return Inspection(RoutingRuntimeGateState.MigrationMarkerMissing, ownership.Epoch);
         }
 
         var marker = markerStore.Load();
         if (marker.Status == RoutingDocumentLoadStatus.Missing)
         {
-            return new RoutingRuntimeGateInspection(
-                RoutingRuntimeGateState.MigrationMarkerMissing,
-                0,
-                0,
-                0,
-                0);
+            return Inspection(RoutingRuntimeGateState.MigrationMarkerMissing, ownership.Epoch);
         }
         if (!marker.LoadedFromDisk || marker.Document is null ||
             marker.Document.Phase != LegacyRoutingMigrationMarkerPhase.Committed)
         {
-            return new RoutingRuntimeGateInspection(
+            return Inspection(
                 RoutingRuntimeGateState.MigrationMarkerNotCommitted,
-                0,
-                0,
-                0,
-                0);
+                ownership.Epoch);
+        }
+
+        var evidence = _activationEvidence?.Inspect();
+        if (evidence is null || !evidence.Loaded)
+        {
+            return Inspection(
+                evidence?.Status == LegacyRoutingActivationEvidenceStatus.LegacyStateUnavailable
+                    ? RoutingRuntimeGateState.LegacyStateUnavailable
+                    : RoutingRuntimeGateState.MigrationEvidenceMismatch,
+                ownership.Epoch,
+                marker.Document.PayloadFingerprint);
+        }
+
+        var legacyState = evidence.LegacyState;
+        var pendingMoves = legacyState.PendingMoves;
+        var pendingLocalOnlyMoves = legacyState.PendingLocalOnlyMoves;
+        var pendingEditedUploads = legacyState.PendingEditedUploads;
+        var ignoredFileKeys = legacyState.IgnoredFileKeys;
+        if (pendingMoves != 0 || pendingLocalOnlyMoves != 0 || pendingEditedUploads != 0 ||
+            ignoredFileKeys != 0)
+        {
+            return new RoutingRuntimeGateInspection(
+                RoutingRuntimeGateState.LegacyQueuesPending,
+                pendingMoves,
+                pendingLocalOnlyMoves,
+                pendingEditedUploads,
+                ignoredFileKeys,
+                null,
+                marker.Document.PayloadFingerprint,
+                ownership.Epoch);
+        }
+
+        var readiness = evidence.Readiness!;
+        var plan = readiness.Plan;
+        if (!readiness.CanCommit || plan is null ||
+            plan.MigrationId != marker.Document.MigrationId ||
+            plan.Mode != marker.Document.Mode || plan.Scope != marker.Document.Scope ||
+            !plan.SourceFingerprint.Equals(
+                marker.Document.SourceFingerprint,
+                StringComparison.Ordinal) ||
+            plan.ContentHashExclusions != marker.Document.ContentHashExclusions ||
+            !LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
+                plan.Route,
+                marker.Document.Route))
+        {
+            return Inspection(
+                RoutingRuntimeGateState.MigrationEvidenceMismatch,
+                ownership.Epoch,
+                marker.Document.PayloadFingerprint);
+        }
+
+        var snapshot = _routingSnapshots?.Load();
+        if (snapshot is null || !snapshot.LoadedFromDisk || snapshot.Document is null)
+        {
+            return Inspection(
+                RoutingRuntimeGateState.RoutingSnapshotUnavailable,
+                ownership.Epoch,
+                marker.Document.PayloadFingerprint);
+        }
+        var migrationRoute = snapshot.Document.Routes.SingleOrDefault(route =>
+            route.RouteId == marker.Document.Route.RouteId);
+        if (migrationRoute is null ||
+            !LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
+                migrationRoute,
+                marker.Document.Route))
+        {
+            return Inspection(
+                RoutingRuntimeGateState.MigrationRouteMismatch,
+                ownership.Epoch,
+                marker.Document.PayloadFingerprint,
+                snapshot.Document.Generation);
         }
 
         return new RoutingRuntimeGateInspection(
@@ -268,9 +322,25 @@ internal sealed class RoutingRuntimeFeatureGate
             0,
             0,
             0,
-            0);
+            0,
+            snapshot.Document.Generation,
+            marker.Document.PayloadFingerprint,
+            ownership.Epoch);
     }
 
+    private static RoutingRuntimeGateInspection Inspection(
+        RoutingRuntimeGateState state,
+        long? ownershipEpoch = null,
+        string? markerPayloadFingerprint = null,
+        long? routingGeneration = null) => new(
+        state,
+        0,
+        0,
+        0,
+        0,
+        routingGeneration,
+        markerPayloadFingerprint,
+        ownershipEpoch);
 }
 
 internal sealed record RoutingRuntimeGateInspection(
@@ -278,7 +348,21 @@ internal sealed record RoutingRuntimeGateInspection(
     int PendingLegacyMoves,
     int PendingLegacyLocalOnlyMoves,
     int PendingLegacyEditedUploads,
-    int IgnoredLegacyFileKeys);
+    int IgnoredLegacyFileKeys,
+    long? RoutingGeneration,
+    string? MarkerPayloadFingerprint,
+    long? OwnershipEpoch)
+{
+    internal bool Enabled => State == RoutingRuntimeGateState.Enabled;
+
+    internal bool SamePermit(RoutingRuntimeGateInspection other) =>
+        SameAuthority(other) && RoutingGeneration == other.RoutingGeneration;
+
+    internal bool SameAuthority(RoutingRuntimeGateInspection other) =>
+        other.Enabled &&
+        MarkerPayloadFingerprint == other.MarkerPayloadFingerprint &&
+        OwnershipEpoch == other.OwnershipEpoch;
+}
 
 internal enum RoutingRuntimePlanStatus
 {
@@ -335,12 +419,22 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
     {
         ArgumentNullException.ThrowIfNull(item);
         if (!item.CanPlanDeliveries) return;
-        _ = await PlanAsync(
+        var result = await PlanAsync(
                 new RoutingRuntimeSourceEvent(
                     RoutingRuntimeSourceEventKind.CaptureJournalReconciled,
                     item),
                 cancellationToken)
             .ConfigureAwait(false);
+        if ((result.Status is RoutingRuntimePlanStatus.Planned or
+                RoutingRuntimePlanStatus.AlreadyPlanned) &&
+            result.PlanId is { } planId && item.Document is not null)
+        {
+            await ReconcileExistingPlanArtifactsAsync(
+                    item.Document,
+                    planId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     internal async Task<RoutingRuntimePlanResult> PlanAsync(
@@ -348,7 +442,8 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(sourceEvent);
-        if (!_featureGate.Enabled)
+        var activationPermit = _featureGate.Inspect();
+        if (!activationPermit.Enabled)
         {
             return new RoutingRuntimePlanResult(
                 RoutingRuntimePlanStatus.Disabled,
@@ -370,6 +465,17 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
         var item = await ValidateSourceEventAsync(sourceEvent, cancellationToken)
             .ConfigureAwait(false);
         var sourceClipId = item.Document!.Clip.ClipId;
+        var loadedSnapshot = _snapshotStore.Load(cancellationToken);
+        if (!loadedSnapshot.LoadedFromDisk || loadedSnapshot.Document is null ||
+            loadedSnapshot.Document.Generation != activationPermit.RoutingGeneration)
+        {
+            return new RoutingRuntimePlanResult(
+                RoutingRuntimePlanStatus.Disabled,
+                sourceClipId,
+                null,
+                null);
+        }
+        var snapshot = loadedSnapshot.Document;
         var current = await _outboxStore.LoadOrCreateAsync(
                 _utcNow(),
                 cancellationToken)
@@ -383,10 +489,6 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
                 current.Generation);
         }
 
-        var snapshot = await _snapshotStore.LoadOrCreateAsync(
-                _utcNow(),
-                cancellationToken)
-            .ConfigureAwait(false);
         var plannedUtc = RoutingValidation.Utc(_utcNow());
         var context = new RoutingRuntimePlanningContext(
             snapshot,
@@ -400,7 +502,7 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
         for (var attempt = 0; attempt < MaximumSaveAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!_featureGate.Enabled)
+            if (!activationPermit.SamePermit(_featureGate.Inspect()))
             {
                 return new RoutingRuntimePlanResult(
                     RoutingRuntimePlanStatus.Disabled,
@@ -426,7 +528,7 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
                 appendUtc);
             try
             {
-                if (!_featureGate.Enabled)
+                if (!activationPermit.SamePermit(_featureGate.Inspect()))
                 {
                     return new RoutingRuntimePlanResult(
                         RoutingRuntimePlanStatus.Disabled,
@@ -460,6 +562,100 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
         throw new RoutingConcurrencyException(
             "The routing outbox kept changing while a source plan was appended.");
     }
+
+    private async Task ReconcileExistingPlanArtifactsAsync(
+        CaptureJournalDocument journal,
+        Guid planId,
+        CancellationToken cancellationToken)
+    {
+        var authority = _featureGate.Inspect();
+        if (!authority.Enabled) return;
+
+        var outputs = BuildOutputInventory(journal).Values
+            .Where(output => output.Reference.Kind != RoutingOutputKind.Original)
+            .ToArray();
+        var readyOutputs = outputs
+            .Where(output => output.Readiness == RoutingRuntimeArtifactReadiness.Ready)
+            .Select(output => output.Reference)
+            .ToArray();
+        var failedOutputs = new Dictionary<RoutingOutputReference, string>();
+        if (journal.State == CaptureJournalState.RenditionsFailed)
+        {
+            foreach (var output in outputs.Where(output =>
+                         output.Readiness == RoutingRuntimeArtifactReadiness.Unavailable &&
+                         IsRequestedRendition(journal, output.Reference.Kind)))
+            {
+                failedOutputs.Add(
+                    output.Reference,
+                    journal.FailureCode ?? throw new InvalidDataException(
+                        "A failed rendition journal has no durable failure code."));
+            }
+        }
+
+        var load = _outboxStore.Load(cancellationToken);
+        if (!load.LoadedFromDisk || load.Document is null)
+        {
+            throw new InvalidDataException(
+                $"The routing outbox could not be loaded for artifact reconciliation ({load.Status}).");
+        }
+        var current = load.Document;
+        for (var attempt = 0; attempt < MaximumSaveAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var plan = current.Plans.SingleOrDefault(candidate => candidate.PlanId == planId) ??
+                       throw new InvalidDataException(
+                           "The frozen routing plan disappeared before artifact reconciliation.");
+            if (!plan.SourceClipId.Equals(journal.Clip.ClipId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "The capture journal does not belong to the frozen routing plan.");
+            }
+
+            var updateUtc = RoutingValidation.Utc(_utcNow());
+            if (updateUtc < current.UpdatedUtc) updateUtc = current.UpdatedUtc;
+            var candidate = RoutingOutboxModel.ReconcilePlanArtifactAvailability(
+                current,
+                planId,
+                readyOutputs,
+                failedOutputs,
+                updateUtc);
+            if (ReferenceEquals(candidate, current)) return;
+            if (!authority.SameAuthority(_featureGate.Inspect())) return;
+            try
+            {
+                _ = await _outboxStore.SaveAsync(
+                        candidate,
+                        current.Generation,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (RoutingConcurrencyException) when (attempt < MaximumSaveAttempts - 1)
+            {
+                var reloaded = _outboxStore.Load(cancellationToken);
+                if (!reloaded.LoadedFromDisk || reloaded.Document is null)
+                {
+                    throw new InvalidDataException(
+                        $"The routing outbox could not be reloaded after a concurrent artifact save ({reloaded.Status}).");
+                }
+                current = reloaded.Document;
+            }
+        }
+
+        throw new RoutingConcurrencyException(
+            "The routing outbox kept changing while artifact availability was reconciled.");
+    }
+
+    private static bool IsRequestedRendition(
+        CaptureJournalDocument journal,
+        RoutingOutputKind kind) => kind switch
+        {
+            RoutingOutputKind.Landscape => journal.Clip.RequestedRenditions.Contains(
+                CaptureJournalArtifactKinds.Landscape, StringComparer.Ordinal),
+            RoutingOutputKind.Portrait => journal.Clip.RequestedRenditions.Contains(
+                CaptureJournalArtifactKinds.Portrait, StringComparer.Ordinal),
+            _ => false
+        };
 
     private async Task<CaptureJournalReconciliationItem> ValidateSourceEventAsync(
         RoutingRuntimeSourceEvent sourceEvent,

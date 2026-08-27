@@ -383,6 +383,55 @@ internal static class CaptureJournalPromotionIntentStore
             hasMore);
     }
 
+    /// <summary>
+    /// Deletion guard for capture staging cleanup. A prepared original-promotion intent owns its
+    /// exact staged MP4 until promotion and journal commit finish. If intent evidence cannot be
+    /// read safely, fail closed and preserve the candidate rather than destroying recoverable
+    /// media.
+    /// </summary>
+    internal static bool IsOriginalStageProtected(
+        string libraryRoot,
+        string stagedPath)
+    {
+        try
+        {
+            var root = NormalizeRoot(libraryRoot);
+            var candidate = Path.GetFullPath(stagedPath);
+            CaptureJournalStore.EnsurePathIsInside(
+                root,
+                candidate,
+                "original promotion staging cleanup candidate");
+            string? cursor = null;
+            do
+            {
+                var page = ReadOriginalClipIdPage(
+                    root,
+                    maximumEntries: 256,
+                    afterClipId: cursor,
+                    CancellationToken.None);
+                foreach (var clipId in page.ClipIds)
+                {
+                    var intent = LoadOriginal(root, clipId);
+                    if (intent is null) continue;
+                    ValidateOriginalIntent(root, intent);
+                    var protectedPath = ResolveRelative(root, intent.StagedRelativePath);
+                    if (protectedPath.Equals(candidate, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                cursor = page.HasMore ? page.NextCursor : null;
+            } while (cursor is not null);
+            return false;
+        }
+        catch
+        {
+            // Cleanup is optional; preserving an unrelated orphan is safer than deleting the
+            // only copy referenced by an unreadable or temporarily unavailable durable intent.
+            return true;
+        }
+    }
+
     internal static async Task<CaptureJournalOriginalPromotionIntent> PrepareOriginalAsync(
         string libraryRoot,
         string stagedPath,

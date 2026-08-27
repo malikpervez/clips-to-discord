@@ -720,6 +720,9 @@ try
     RoutingMigrationTests.Run(Path.Combine(temporaryRoot, "routing-migration"));
     TraceSmokeStep("ClipCord 2.0 routing runtime bridge");
     RoutingRuntimeBridgeTests.Run(Path.Combine(temporaryRoot, "routing-runtime-bridge"));
+    RoutingExecutorTests.Run(Path.Combine(temporaryRoot, "routing-executor"));
+    await DiscordRoutingProviderTests.RunAsync(
+        Path.Combine(temporaryRoot, "discord-routing-provider"));
 
     TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
@@ -1076,12 +1079,18 @@ try
         TimeSpan.FromMilliseconds(5),
         3,
         TimeSpan.FromSeconds(1));
+    var firstProcessingOwnership = new ClipProcessingOwnershipCoordinator();
+    Assert(firstProcessingOwnership.TryAcquire(
+               ClipProcessingRuntimeOwner.Legacy,
+               out var firstLegacyOwnership) && firstLegacyOwnership is not null,
+        "The watcher lifecycle test must acquire legacy processing ownership.");
     var controller = new DiscordAwareController(
         AppSettings.Empty,
         _ => { },
         SimulatedDiscordDetector,
         SimulatedWatcher,
-        controllerOptions);
+        controllerOptions,
+        firstLegacyOwnership!);
     await WaitUntilAsync(
         () => Volatile.Read(ref watcherCancellations) >= 1,
         TimeSpan.FromSeconds(2),
@@ -1117,19 +1126,33 @@ try
         }
     }
 
+    var processingOwnership = new ClipProcessingOwnershipCoordinator();
+    Assert(processingOwnership.TryAcquire(
+               ClipProcessingRuntimeOwner.Legacy,
+               out var legacyOwnership) && legacyOwnership is not null,
+        "The legacy watcher test must acquire the clip-processing lease.");
     var delayedCleanupController = new DiscordAwareController(
         AppSettings.Empty,
         _ => { },
         () => true,
         DelayedCleanupWatcher,
-        controllerOptions);
+        controllerOptions,
+        legacyOwnership!);
     await delayedWatcherStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
     var stopTask = delayedCleanupController.StopAsync();
     await cleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-    Assert(!stopTask.IsCompleted,
-        "Awaitable controller shutdown must not finish while the old watcher is still cleaning up.");
+    Assert(!stopTask.IsCompleted &&
+           !processingOwnership.TryAcquire(
+               ClipProcessingRuntimeOwner.Routing,
+               out _),
+        "The legacy lease must remain held while the old watcher is still cleaning up.");
     releaseCleanup.TrySetResult();
     await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+    Assert(processingOwnership.TryAcquire(
+               ClipProcessingRuntimeOwner.Routing,
+               out var routingOwnership) && routingOwnership is not null,
+        "Routing may acquire clip processing only after legacy shutdown fully completes.");
+    routingOwnership!.Dispose();
     delayedCleanupController.Dispose();
 
     TraceSmokeStep("Local-only worker lifecycle");

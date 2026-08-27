@@ -13,10 +13,14 @@ internal static class RoutingRuntimeBridgeTests
         Directory.CreateDirectory(root);
         try
         {
+            AssertOwnershipLeaseIsExclusive();
+            await AssertActiveLegacyControllerCannotBeRevokedAsync(
+                Path.Combine(root, "active-legacy-owner"));
             AssertCutoverGateFailsClosed(Path.Combine(root, "gate"));
+            AssertDiscordConnectionEvidenceIsFresh(Path.Combine(root, "connection-evidence"));
             await AssertDefaultBridgeIsInertAsync(Path.Combine(root, "disabled"));
+            await AssertRouteSnapshotLossFailsClosedAsync(Path.Combine(root, "snapshot-loss"));
             await AssertPlanIsFrozenOnceAndSurvivesRestartAsync(Path.Combine(root, "restart"));
-            await AssertNoOpPlanIsFrozenAcrossRestartAsync(Path.Combine(root, "no-op-restart"));
             await AssertEveryJournalStatePlansWithStableOutputsAsync(Path.Combine(root, "states"));
             await AssertReconciliationSkipsUnreadableBeforeValidAsync(Path.Combine(root, "reconcile-skip"));
             await AssertGateRevocationDuringPlanningPreventsAppendAsync(Path.Combine(root, "gate-revoke"));
@@ -24,6 +28,10 @@ internal static class RoutingRuntimeBridgeTests
             await AssertNonSourceEventsCannotCreatePlansAsync(Path.Combine(root, "non-source"));
             await AssertInvalidMediaAndPlannerLiesAreRejectedAsync(Path.Combine(root, "validation"));
             await AssertConcurrentSourceArrivalsAppendOnePlanAsync(Path.Combine(root, "concurrent"));
+            await AssertExistingPlanReconcilesReadyArtifactsAtomicallyAsync(
+                Path.Combine(root, "artifact-ready"));
+            await AssertExistingPlanReconcilesFailedArtifactsIdempotentlyAsync(
+                Path.Combine(root, "artifact-failed"));
         }
         finally
         {
@@ -35,109 +43,336 @@ internal static class RoutingRuntimeBridgeTests
     private static void AssertCutoverGateFailsClosed(string root)
     {
         Directory.CreateDirectory(root);
+        var drained = CreateLegacyState(root);
+        var stateStore = CreateLegacyStateStore(root, drained);
+        var currentSettings = CreateLegacySettings(root);
+        IReadOnlyList<string> connectionIds = [];
+        var evidence = new LegacyRoutingActivationEvidenceSource(
+            stateStore,
+            () => currentSettings,
+            () => connectionIds);
+        var migrationPlan = CreateMigrationPlan(currentSettings, drained, connectionIds);
+        var migrationRoute = migrationPlan.Route;
+        var snapshotStore = CreateSnapshotStore(root, migrationRoute);
         var marker = new LegacyRoutingMigrationMarkerStore(
             Path.Combine(root, LegacyRoutingMigrationMarkerStore.FileName));
-        var drained = new WatchState();
+        var ownership = new ClipProcessingOwnershipCoordinator();
+        Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var routingLease) &&
+               routingLease is not null,
+            "The gate fixture must acquire routing ownership.");
+        using var owned = routingLease ?? throw new InvalidOperationException(
+            "The gate fixture routing lease is missing.");
 
         Assert(!RoutingRuntimeFeatureGate.Disabled.Enabled &&
                RoutingRuntimeFeatureGate.Disabled.State ==
                RoutingRuntimeGateState.DisabledByDefault,
             "The routing runtime feature gate must be disabled by default.");
-        Assert(RoutingRuntimeFeatureGate.Evaluate(false, marker, drained).State ==
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   false, marker, snapshotStore, evidence, owned).State ==
                RoutingRuntimeGateState.DisabledByDefault,
             "A committed marker must not override the explicit disabled default.");
-        Assert(RoutingRuntimeFeatureGate.Evaluate(true, marker, drained).State ==
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   true, marker, snapshotStore, evidence, owned).State ==
                RoutingRuntimeGateState.MigrationMarkerMissing,
             "A requested cutover without a committed marker must fail closed.");
 
         File.WriteAllText(marker.Path, "status=committed");
-        Assert(RoutingRuntimeFeatureGate.Evaluate(true, marker, drained).State ==
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   true, marker, snapshotStore, evidence, owned).State ==
                RoutingRuntimeGateState.MigrationMarkerNotCommitted,
             "A lookalike or old migration marker must not activate routing.");
 
         File.Delete(marker.Path);
-        marker = CreateMarkerStore(root, CreateMigrationRoute(priority: 1), commit: false);
-        Assert(RoutingRuntimeFeatureGate.Evaluate(true, marker, drained).State ==
+        marker = CreateMarkerStore(root, migrationPlan, commit: false);
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   true, marker, snapshotStore, evidence, owned).State ==
                RoutingRuntimeGateState.MigrationMarkerNotCommitted,
             "A valid but merely prepared migration marker must not activate routing.");
         var prepared = marker.Load().Document!;
         _ = marker.SaveAsync(
             LegacyRoutingMigrationMarkerModel.Commit(prepared, Now.AddSeconds(1)),
             prepared.Generation).GetAwaiter().GetResult();
-        var pending = new WatchState();
-        pending.PendingMoves.Add("pending-uploaded.mp4");
-        pending.PendingLocalOnlyMoves.Add("pending-local.mp4");
+        var pending = CreateLegacyState(root);
+        pending.PendingMoves.Add(Path.Combine(root, "pending-uploaded.mp4"));
+        pending.PendingLocalOnlyMoves.Add(Path.Combine(root, "pending-local.mp4"));
         pending.PendingEditedUploads.Add(new PendingEditedClipDisposition
         {
             Id = Guid.NewGuid()
         });
-        var blocked = RoutingRuntimeFeatureGate.Evaluate(true, marker, pending);
+        stateStore.Save(pending);
+        var blocked = RoutingRuntimeFeatureGate.Evaluate(
+            true, marker, snapshotStore, evidence, owned);
         Assert(blocked.State == RoutingRuntimeGateState.LegacyQueuesPending &&
                blocked.PendingLegacyMoves == 1 &&
                blocked.PendingLegacyLocalOnlyMoves == 1 &&
                blocked.PendingLegacyEditedUploads == 1,
             "Every legacy WatchState pending queue must drain before routing can activate.");
 
-        var malformed = new WatchState
-        {
-            PendingMoves = null!,
-            PendingLocalOnlyMoves = null!,
-            PendingEditedUploads = null!
-        };
-        Assert(RoutingRuntimeFeatureGate.Evaluate(true, marker, malformed).State ==
-               RoutingRuntimeGateState.LegacyQueuesPending,
-            "Missing legacy queue state must be treated as unsafe, not empty.");
+        File.WriteAllText(stateStore.StatePath, "{\"version\":4}");
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   true, marker, snapshotStore, evidence, owned).State ==
+               RoutingRuntimeGateState.LegacyStateUnavailable,
+            "Missing legacy queue state must fail closed rather than being treated as empty.");
 
-        var enabled = RoutingRuntimeFeatureGate.Evaluate(true, marker, drained);
+        stateStore.Save(drained);
+        var enabled = RoutingRuntimeFeatureGate.Evaluate(
+            true, marker, snapshotStore, evidence, owned);
         Assert(enabled.Enabled,
             "Only an exact committed marker plus fully drained legacy queues may enable the gate.");
-        drained.PendingMoves.Add("late-legacy-work.mp4");
+        drained.KnownContentHashes.Add(new string('B', 64));
+        stateStore.Save(drained);
+        Assert(enabled.State == RoutingRuntimeGateState.MigrationEvidenceMismatch,
+            "Changing durable legacy exclusions after cutover must invalidate the marker fingerprint.");
+        drained.KnownContentHashes.Clear();
+        stateStore.Save(drained);
+        currentSettings = currentSettings with { CaptureSource = ClipCaptureSource.Nvidia };
+        Assert(enabled.State == RoutingRuntimeGateState.MigrationEvidenceMismatch,
+            "Changing the configured legacy capture source must invalidate activation evidence.");
+        currentSettings = CreateLegacySettings(root);
+        Assert(enabled.Enabled,
+            "Restoring exact settings and exclusions must restore the same committed evidence.");
+        drained.PendingMoves.Add(Path.Combine(root, "late-legacy-work.mp4"));
+        stateStore.Save(drained);
         Assert(enabled.State == RoutingRuntimeGateState.LegacyQueuesPending,
-            "A gate must revoke activation if legacy pending work appears after evaluation.");
+            "A gate must reload disk and revoke activation if legacy pending work appears later.");
         drained.PendingMoves.Clear();
         drained.IgnoredFileKeys.Add("legacy-baseline-key");
+        stateStore.Save(drained);
         Assert(enabled.State == RoutingRuntimeGateState.LegacyQueuesPending &&
                enabled.IgnoredLegacyFileKeys == 1,
             "A live ignored-file baseline must revoke routing activation.");
         drained.IgnoredFileKeys.Clear();
+        stateStore.Save(drained);
         File.Delete(marker.Path);
         Assert(enabled.State == RoutingRuntimeGateState.MigrationMarkerMissing,
             "A gate must revoke activation if its committed migration marker disappears.");
+
+        owned.Dispose();
+        Assert(enabled.State == RoutingRuntimeGateState.OwnershipUnavailable,
+            "A released routing lease must revoke activation immediately.");
     }
 
-    private static async Task AssertNoOpPlanIsFrozenAcrossRestartAsync(string root)
+    private static void AssertOwnershipLeaseIsExclusive()
     {
-        var fixture = await CreateFixtureAsync(root, reactionCamera: false);
-        var emptySnapshot = RoutingSnapshotModel.ReplaceRoutes(
-            fixture.Snapshot, [], Now.AddMinutes(1));
-        await fixture.SnapshotStore.SaveAsync(emptySnapshot, fixture.Snapshot.Generation);
-        var planner = new RecordingPlanner();
-        var first = await fixture.CreateBridge(planner).PlanAsync(SourceEvent(fixture.Item));
-        var persisted = fixture.OutboxStore.Load().Document!;
-        Assert(first.Status == RoutingRuntimePlanStatus.Planned && planner.Calls == 1 &&
-               persisted.Plans.Count == 1 && persisted.Deliveries.Count == 0 &&
-               persisted.FileDispositions.Count == 0 &&
-               persisted.Plans[0].RoutingGeneration == emptySnapshot.Generation &&
-               persisted.Plans[0].MatchedRouteIds.Count == 0,
-            "A no-match source must persist one generation-pinned no-op decision.");
+        var coordinator = new ClipProcessingOwnershipCoordinator();
+        Assert(coordinator.TryAcquire(ClipProcessingRuntimeOwner.Legacy, out var legacy) &&
+               legacy is { IsCurrent: true },
+            "The first legacy runtime must acquire clip-processing ownership.");
+        var legacyLease = legacy ?? throw new InvalidOperationException(
+            "The legacy ownership lease is missing.");
+        Assert(!coordinator.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var blocked) &&
+               blocked is null,
+            "Routing must not acquire ownership while the legacy runtime owns it.");
+        Assert(coordinator.TryTransfer(
+                   legacyLease, ClipProcessingRuntimeOwner.Transition, out var transition) &&
+               transition is { IsCurrent: true } && !legacyLease.IsCurrent,
+            "A cutover reservation must atomically invalidate the legacy lease.");
+        legacyLease.Dispose();
+        var transitionLease = transition ?? throw new InvalidOperationException(
+            "The transition ownership lease is missing.");
+        Assert(transitionLease.IsCurrent,
+            "Disposing a stale legacy lease must not release the transition owner.");
+        Assert(coordinator.TryTransfer(
+                   transitionLease, ClipProcessingRuntimeOwner.Routing, out var routing) &&
+               routing is { IsCurrent: true } && !transitionLease.IsCurrent,
+            "A completed cutover must atomically transfer authority to routing.");
+        var routingLease = routing ?? throw new InvalidOperationException(
+            "The routing ownership lease is missing.");
+        routingLease.Dispose();
+        ClipProcessingOwnershipLease? restarted = null;
+        Assert(coordinator.Owner is null && coordinator.TryAcquire(
+                   ClipProcessingRuntimeOwner.Legacy, out restarted),
+            "Releasing routing must permit exactly one later owner.");
+        (restarted ?? throw new InvalidOperationException(
+            "The restarted legacy ownership lease is missing.")).Dispose();
 
-        var route = fixture.Snapshot.Routes.First(candidate =>
-            candidate.Source == RoutingRouteSource.User) with
+        var concurrent = new ClipProcessingOwnershipCoordinator();
+        var winners = new System.Collections.Concurrent.ConcurrentBag<ClipProcessingOwnershipLease>();
+        Parallel.For(0, 32, _ =>
         {
-            Revision = 1,
-            CreatedUtc = Now.AddMinutes(2),
-            ModifiedUtc = Now.AddMinutes(2)
-        };
-        var later = RoutingSnapshotModel.ReplaceRoutes(
-            emptySnapshot, [route], Now.AddMinutes(2));
-        await fixture.SnapshotStore.SaveAsync(later, emptySnapshot.Generation);
-        var restartPlanner = new RecordingPlanner();
-        var restarted = await fixture.CreateBridge(restartPlanner).PlanAsync(SourceEvent(fixture.Item));
-        Assert(restarted.Status == RoutingRuntimePlanStatus.AlreadyPlanned &&
-               restarted.PlanId == first.PlanId && restartPlanner.Calls == 0 &&
-               fixture.OutboxStore.Load().Document!.Plans[0].RoutingGeneration ==
-                   emptySnapshot.Generation,
-            "Restart after route edits must find the no-op plan header and never re-evaluate.");
+            if (concurrent.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var lease))
+            {
+                winners.Add(lease!);
+            }
+        });
+        Assert(winners.Count == 1,
+            "Concurrent runtime starts must produce exactly one ownership winner.");
+        foreach (var winner in winners) winner.Dispose();
+
+        var left = new ClipProcessingOwnershipCoordinator();
+        var right = new ClipProcessingOwnershipCoordinator();
+        var leftAcquired = left.TryAcquire(
+            ClipProcessingRuntimeOwner.Legacy, out var leftLeaseCandidate);
+        var rightAcquired = right.TryAcquire(
+            ClipProcessingRuntimeOwner.Legacy, out var rightLeaseCandidate);
+        Assert(leftAcquired && rightAcquired &&
+               leftLeaseCandidate is not null && rightLeaseCandidate is not null,
+            "Independent ownership coordinators must create their own leases.");
+        var leftLease = leftLeaseCandidate ?? throw new InvalidOperationException(
+            "The left ownership lease is missing.");
+        var rightLease = rightLeaseCandidate ?? throw new InvalidOperationException(
+            "The right ownership lease is missing.");
+        Assert(!left.TryTransfer(
+                   rightLease, ClipProcessingRuntimeOwner.Routing, out var foreignTransfer) &&
+               foreignTransfer is null && leftLease.IsCurrent && rightLease.IsCurrent,
+            "A coincident epoch from another coordinator must never authorize a transfer.");
+        leftLease.Dispose();
+        rightLease.Dispose();
+    }
+
+    private static async Task AssertActiveLegacyControllerCannotBeRevokedAsync(string root)
+    {
+        Directory.CreateDirectory(root);
+        var state = CreateLegacyState(root);
+        var stateStore = CreateLegacyStateStore(root, state);
+        var settings = CreateLegacySettings(root);
+        IReadOnlyList<string> connectionIds = [];
+        var migrationPlan = CreateMigrationPlan(settings, state, connectionIds);
+        var marker = CreateMarkerStore(root, migrationPlan, commit: true);
+        var snapshotStore = CreateSnapshotStore(root, migrationPlan.Route);
+        var evidence = new LegacyRoutingActivationEvidenceSource(
+            stateStore,
+            () => settings,
+            () => connectionIds);
+        var ownership = new ClipProcessingOwnershipCoordinator();
+        Assert(ownership.TryAcquire(
+                   ClipProcessingRuntimeOwner.Legacy,
+                   out var callerLeaseCandidate) && callerLeaseCandidate is not null,
+            "The active-watcher fixture must acquire legacy ownership.");
+        var callerLease = callerLeaseCandidate ?? throw new InvalidOperationException(
+            "The active-watcher fixture legacy lease is missing.");
+
+        var watcherStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanupStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCleanup = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task BlockingWatcher(
+            AppSettings ignoredSettings,
+            Action<string> ignoredStatus,
+            CancellationToken cancellationToken)
+        {
+            watcherStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                cleanupStarted.TrySetResult();
+                await releaseCleanup.Task;
+                throw;
+            }
+        }
+
+        var options = new DiscordControllerOptions(
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(5),
+            AbsentPollThreshold: 2,
+            DisposeWaitTimeout: TimeSpan.FromSeconds(1));
+        var controller = new DiscordAwareController(
+            AppSettings.Empty,
+            _ => { },
+            () => true,
+            BlockingWatcher,
+            options,
+            callerLease);
+        Task? stopTask = null;
+        try
+        {
+            await watcherStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert(!callerLease.IsCurrent &&
+                   ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
+                "The controller must atomically replace the caller's legacy handle with its own private lease.");
+
+            callerLease.Dispose();
+            Assert(!ownership.TryTransfer(
+                       callerLease,
+                       ClipProcessingRuntimeOwner.Transition,
+                       out var stolenTransition) && stolenTransition is null &&
+                   !ownership.TryAcquire(
+                       ClipProcessingRuntimeOwner.Routing,
+                       out var overlappingRouting) && overlappingRouting is null,
+                "A stale caller handle must not revoke or transfer ownership while its watcher is active.");
+            var blockedGate = RoutingRuntimeFeatureGate.Evaluate(
+                requestedEnabled: true,
+                marker,
+                snapshotStore,
+                evidence,
+                callerLease);
+            Assert(blockedGate.State == RoutingRuntimeGateState.OwnershipUnavailable,
+                "Direct caller-handle revocation must not enable routing while the legacy watcher continues.");
+
+            stopTask = controller.StopAsync();
+            await cleanupStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert(!stopTask.IsCompleted &&
+                   !ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out _),
+                "Routing ownership must remain unavailable throughout legacy watcher cleanup.");
+            releaseCleanup.TrySetResult();
+            await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert(ownership.TryAcquire(
+                       ClipProcessingRuntimeOwner.Routing,
+                       out var routingLeaseCandidate) && routingLeaseCandidate is not null,
+                "Routing may acquire ownership only after the legacy watcher fully stops.");
+            using var routingLease = routingLeaseCandidate ?? throw new InvalidOperationException(
+                "The post-shutdown routing lease is missing.");
+            var enabledGate = RoutingRuntimeFeatureGate.Evaluate(
+                requestedEnabled: true,
+                marker,
+                snapshotStore,
+                evidence,
+                routingLease);
+            Assert(enabledGate.Enabled,
+                "Exact cutover evidence may enable routing after legacy shutdown releases ownership.");
+        }
+        finally
+        {
+            releaseCleanup.TrySetResult();
+            if (stopTask is null)
+            {
+                stopTask = controller.StopAsync();
+            }
+            try { await stopTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch { }
+            controller.Dispose();
+            callerLease.Dispose();
+        }
+    }
+
+    private static void AssertDiscordConnectionEvidenceIsFresh(string root)
+    {
+        Directory.CreateDirectory(root);
+        var state = CreateLegacyState(root);
+        var stateStore = CreateLegacyStateStore(root, state);
+        var settings = CreateLegacySettings(root, uploadToDiscord: true);
+        IReadOnlyList<string> connectionIds = ["discord.connection.original"];
+        var plan = CreateMigrationPlan(settings, state, connectionIds);
+        var routes = CreateSnapshotStore(root, plan.Route);
+        var markers = CreateMarkerStore(root, plan, commit: true);
+        var evidence = new LegacyRoutingActivationEvidenceSource(
+            stateStore,
+            () => settings,
+            () => connectionIds);
+        var ownership = new ClipProcessingOwnershipCoordinator();
+        Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var lease) &&
+               lease is not null,
+            "The Discord evidence fixture must acquire routing ownership.");
+        using var owned = lease ?? throw new InvalidOperationException(
+            "The Discord evidence fixture routing lease is missing.");
+        var gate = RoutingRuntimeFeatureGate.Evaluate(
+            true,
+            markers,
+            routes,
+            evidence,
+            owned);
+        Assert(gate.Enabled,
+            "Exact current Discord connection evidence must authorize its committed marker.");
+        connectionIds = ["discord.connection.changed"];
+        Assert(gate.State == RoutingRuntimeGateState.MigrationEvidenceMismatch,
+            "Changing the opaque Discord connection id must invalidate the committed source fingerprint.");
     }
 
     private static async Task AssertReconciliationSkipsUnreadableBeforeValidAsync(string root)
@@ -177,6 +412,84 @@ internal static class RoutingRuntimeBridgeTests
                planner.Calls == 0 &&
                !File.Exists(snapshotPath) && !File.Exists(outboxPath),
             "The default bridge must return before validation, planning, or persistence.");
+    }
+
+    private static async Task AssertRouteSnapshotLossFailsClosedAsync(string root)
+    {
+        var missing = await CreateFixtureAsync(Path.Combine(root, "missing"), reactionCamera: false);
+        File.Delete(missing.SnapshotStore.Path);
+        var missingPlanner = new RecordingPlanner();
+        var missingResult = await missing.CreateBridge(missingPlanner)
+            .PlanAsync(SourceEvent(missing.Item));
+        Assert(missingResult.Status == RoutingRuntimePlanStatus.Disabled &&
+               missingPlanner.Calls == 0 &&
+               !File.Exists(missing.SnapshotStore.Path) &&
+               !File.Exists(missing.OutboxStore.Path),
+            "A missing committed route snapshot must pause routing without creating an empty snapshot or outbox.");
+
+        var corrupt = await CreateFixtureAsync(Path.Combine(root, "corrupt"), reactionCamera: false);
+        File.WriteAllText(corrupt.SnapshotStore.Path, "not-json");
+        var corruptPlanner = new RecordingPlanner();
+        var corruptResult = await corrupt.CreateBridge(corruptPlanner)
+            .PlanAsync(SourceEvent(corrupt.Item));
+        Assert(corruptResult.Status == RoutingRuntimePlanStatus.Disabled &&
+               corruptPlanner.Calls == 0 &&
+               corrupt.Gate.State == RoutingRuntimeGateState.RoutingSnapshotUnavailable &&
+               !File.Exists(corrupt.OutboxStore.Path),
+            "A corrupt route snapshot must pause before planning or outbox initialization.");
+
+        var mismatch = await CreateFixtureAsync(Path.Combine(root, "mismatch"), reactionCamera: false);
+        var migration = mismatch.Snapshot.Routes.Single(route =>
+            route.Source == RoutingRouteSource.Migration);
+        var changedMigration = migration with
+        {
+            Name = "Changed migration fallback",
+            Revision = checked(migration.Revision + 1),
+            ModifiedUtc = Now.AddMinutes(1)
+        };
+        var mismatchedSnapshot = RoutingSnapshotModel.ReplaceRoutes(
+            mismatch.Snapshot,
+            mismatch.Snapshot.Routes.Select(route =>
+                route.RouteId == migration.RouteId ? changedMigration : route).ToArray(),
+            Now.AddMinutes(1));
+        await mismatch.SnapshotStore.SaveAsync(
+            mismatchedSnapshot,
+            mismatch.Snapshot.Generation);
+        Assert(mismatch.Gate.State == RoutingRuntimeGateState.MigrationRouteMismatch,
+            "A committed marker must not authorize a changed migration route.");
+
+        var edited = await CreateFixtureAsync(Path.Combine(root, "edited"), reactionCamera: false);
+        var user = edited.Snapshot.Routes.Single(route => route.Source == RoutingRouteSource.User);
+        var next = RoutingSnapshotModel.ReplaceRoutes(
+            edited.Snapshot,
+            edited.Snapshot.Routes.Select(route => route.RouteId == user.RouteId
+                ? route with
+                {
+                    Name = "Edited while planning",
+                    Revision = checked(route.Revision + 1),
+                    ModifiedUtc = Now.AddMinutes(1)
+                }
+                : route).ToArray(),
+            Now.AddMinutes(1));
+        var editPlanner = new MutatingPlanner(() =>
+            edited.SnapshotStore.SaveAsync(next, edited.Snapshot.Generation)
+                .GetAwaiter().GetResult());
+        var editedResult = await edited.CreateBridge(editPlanner)
+            .PlanAsync(SourceEvent(edited.Item));
+        var editedOutbox = edited.OutboxStore.Load();
+        Assert(editedResult.Status == RoutingRuntimePlanStatus.Disabled &&
+               editPlanner.Calls == 1 && editedOutbox.LoadedFromDisk &&
+               editedOutbox.Document!.Plans.Count == 0,
+            "A route-generation change during evaluation must invalidate the planning permit before CAS.");
+
+        var deleted = await CreateFixtureAsync(Path.Combine(root, "deleted"), reactionCamera: false);
+        var deletePlanner = new MutatingPlanner(() => File.Delete(deleted.SnapshotStore.Path));
+        var deletedResult = await deleted.CreateBridge(deletePlanner)
+            .PlanAsync(SourceEvent(deleted.Item));
+        Assert(deletedResult.Status == RoutingRuntimePlanStatus.Disabled &&
+               deletePlanner.Calls == 1 &&
+               deleted.OutboxStore.Load().Document!.Plans.Count == 0,
+            "Route loss after evaluation starts must still block the outbox append.");
     }
 
     private static async Task AssertPlanIsFrozenOnceAndSurvivesRestartAsync(string root)
@@ -314,7 +627,10 @@ internal static class RoutingRuntimeBridgeTests
     {
         var fixture = await CreateFixtureAsync(root, reactionCamera: false);
         var planner = new MutatingPlanner(() =>
-            fixture.LegacyState.IgnoredFileKeys.Add("appeared-during-planning"));
+        {
+            fixture.LegacyState.IgnoredFileKeys.Add("appeared-during-planning");
+            fixture.LegacyStateStore.Save(fixture.LegacyState);
+        });
         var result = await fixture.CreateBridge(planner).PlanAsync(SourceEvent(fixture.Item));
         var persisted = fixture.OutboxStore.Load();
         Assert(result.Status == RoutingRuntimePlanStatus.Disabled && planner.Calls == 1 &&
@@ -432,6 +748,195 @@ internal static class RoutingRuntimeBridgeTests
             "Concurrent source arrivals must converge on one atomically persisted plan.");
     }
 
+    private static async Task AssertExistingPlanReconcilesReadyArtifactsAtomicallyAsync(
+        string root)
+    {
+        var fixture = await CreateFixtureAsync(root, reactionCamera: true);
+        var user = fixture.Snapshot.Routes.Single(route =>
+            route.Source == RoutingRouteSource.User);
+        var firstDelivery = user.Actions.Single(action =>
+            action.Kind == RoutingActionKind.Deliver);
+        var fileAction = user.Actions.Single(action =>
+            action.Kind == RoutingActionKind.FileIntoLibrary);
+        var secondDelivery = firstDelivery with
+        {
+            ActionId = Guid.NewGuid(),
+            Destination = RoutingDestinationKind.YouTube,
+            ConnectionId = "youtube.primary"
+        };
+        var changedUser = user with
+        {
+            Revision = checked(user.Revision + 1),
+            Actions = [firstDelivery, secondDelivery, fileAction],
+            ModifiedUtc = Now.AddMilliseconds(500)
+        };
+        var changedSnapshot = RoutingSnapshotModel.ReplaceRoutes(
+            fixture.Snapshot,
+            fixture.Snapshot.Routes.Select(route => route.RouteId == user.RouteId
+                ? changedUser
+                : route).ToArray(),
+            Now.AddMilliseconds(500));
+        await fixture.SnapshotStore.SaveAsync(
+            changedSnapshot,
+            fixture.Snapshot.Generation);
+
+        var planner = new RecordingPlanner();
+        var bridge = fixture.CreateBridge(planner);
+        await bridge.ReconcileAsync(fixture.Item, CancellationToken.None);
+        var waiting = fixture.OutboxStore.Load().Document ??
+                      throw new InvalidOperationException(
+                          "The pending artifact plan was not persisted.");
+        var frozenPlan = waiting.Plans.Single();
+        var frozenIds = waiting.Deliveries.Select(delivery => delivery.DeliveryId)
+            .Order()
+            .ToArray();
+        Assert(planner.Calls == 1 && waiting.Deliveries.Count == 2 &&
+               waiting.Deliveries.All(delivery =>
+                   delivery.State == PlannedDeliveryState.WaitingForArtifact),
+            "The initial source reconciliation must freeze both rendition deliveries as waiting.");
+
+        var readyItem = await AdvanceJournalToReadyAsync(
+            fixture.LibraryRoot,
+            fixture.Item.Document ?? throw new InvalidOperationException(
+                "The initial journal fixture is missing."));
+        await bridge.ReconcileAsync(readyItem, CancellationToken.None);
+        var ready = fixture.OutboxStore.Load().Document ??
+                    throw new InvalidOperationException(
+                        "The ready artifact plan was not persisted.");
+        Assert(planner.Calls == 1 && ready.Generation == waiting.Generation + 1 &&
+               ready.Plans.Single() == frozenPlan &&
+               ready.Deliveries.Select(delivery => delivery.DeliveryId).Order()
+                   .SequenceEqual(frozenIds) &&
+               ready.Deliveries.All(delivery =>
+                   delivery.State == PlannedDeliveryState.Ready &&
+                   delivery.ArtifactOutcome == RoutingMissingArtifactOutcome.RequestedOutput &&
+                   delivery.Output == delivery.RequestedOutput),
+            "One ready journal snapshot must advance every matching frozen delivery atomically without re-planning.");
+
+        await fixture.CreateBridge(new ThrowingPlanner())
+            .ReconcileAsync(readyItem, CancellationToken.None);
+        var replayed = fixture.OutboxStore.Load().Document ??
+                       throw new InvalidOperationException(
+                           "The replayed artifact plan could not be loaded.");
+        Assert(replayed.Generation == ready.Generation && replayed == ready,
+            "Replaying identical ready evidence must be an exact no-op without a new generation.");
+    }
+
+    private static async Task AssertExistingPlanReconcilesFailedArtifactsIdempotentlyAsync(
+        string root)
+    {
+        var fixture = await CreateFixtureAsync(root, reactionCamera: true);
+        var planner = new RecordingPlanner();
+        var bridge = fixture.CreateBridge(planner);
+        await bridge.ReconcileAsync(fixture.Item, CancellationToken.None);
+        var waiting = fixture.OutboxStore.Load().Document ??
+                      throw new InvalidOperationException(
+                          "The pending failure plan was not persisted.");
+        var frozen = waiting.Deliveries.Single();
+
+        var original = fixture.Item.Document ?? throw new InvalidOperationException(
+            "The failure journal fixture is missing.");
+        var pending = await CaptureJournalStore.BeginCameraAsync(
+            fixture.LibraryRoot,
+            original.Clip.ClipId,
+            original.Generation,
+            now: Now.AddSeconds(2));
+        var failed = await CaptureJournalStore.FailRenditionsAsync(
+            fixture.LibraryRoot,
+            pending.Clip.ClipId,
+            pending.Generation,
+            "camera-layer-unavailable",
+            now: Now.AddSeconds(3));
+        var failedItem = await CreateReconciliationItemAsync(fixture.LibraryRoot, failed);
+
+        await bridge.ReconcileAsync(failedItem, CancellationToken.None);
+        var resolved = fixture.OutboxStore.Load().Document ??
+                       throw new InvalidOperationException(
+                           "The failed artifact plan was not persisted.");
+        var delivery = resolved.Deliveries.Single();
+        Assert(planner.Calls == 1 && resolved.Generation == waiting.Generation + 1 &&
+               delivery.DeliveryId == frozen.DeliveryId && delivery.PlanId == frozen.PlanId &&
+               delivery.State == PlannedDeliveryState.Ready &&
+               delivery.RequestedOutput == frozen.RequestedOutput &&
+               delivery.Output == delivery.OriginalOutput &&
+               delivery.ArtifactOutcome == RoutingMissingArtifactOutcome.OriginalFallback &&
+               delivery.ArtifactErrorCode == "camera-layer-unavailable",
+            "A durable rendition failure must apply the frozen fallback without changing delivery identity or re-planning.");
+
+        await bridge.ReconcileAsync(failedItem, CancellationToken.None);
+        var replayed = fixture.OutboxStore.Load().Document ??
+                       throw new InvalidOperationException(
+                           "The replayed failure plan could not be loaded.");
+        Assert(replayed.Generation == resolved.Generation && replayed == resolved,
+            "Replaying identical failed evidence must not apply fallback or advance generation twice.");
+    }
+
+    private static async Task<CaptureJournalReconciliationItem> AdvanceJournalToReadyAsync(
+        string libraryRoot,
+        CaptureJournalDocument original)
+    {
+        var pending = await CaptureJournalStore.BeginCameraAsync(
+            libraryRoot,
+            original.Clip.ClipId,
+            original.Generation,
+            now: Now.AddSeconds(2));
+        var cameraPath = CaptureProjectStore.GetCameraLayerPath(
+            libraryRoot,
+            original.Clip.ClipId);
+        Directory.CreateDirectory(Path.GetDirectoryName(cameraPath)!);
+        await File.WriteAllBytesAsync(cameraPath, [22, 24, 26, 28]);
+        var camera = await CaptureJournalStore.CreateArtifactAsync(
+            libraryRoot,
+            original.Clip.ClipId,
+            CaptureJournalArtifactKinds.ReactionCamera,
+            cameraPath);
+        pending = await CaptureJournalStore.AttachCameraAsync(
+            libraryRoot,
+            original.Clip.ClipId,
+            pending.Generation,
+            camera,
+            now: Now.AddSeconds(3));
+        var landscapePath = CaptureJournalStore.GetCanonicalArtifactPath(
+            libraryRoot,
+            original.Clip,
+            CaptureJournalArtifactKinds.Landscape);
+        await File.WriteAllBytesAsync(landscapePath, [30, 32, 34, 36]);
+        var landscape = await CaptureJournalStore.CreateArtifactAsync(
+            libraryRoot,
+            original.Clip.ClipId,
+            CaptureJournalArtifactKinds.Landscape,
+            landscapePath);
+        var ready = await CaptureJournalStore.AttachRenditionAsync(
+            libraryRoot,
+            original.Clip.ClipId,
+            pending.Generation,
+            landscape,
+            now: Now.AddSeconds(4));
+        return await CreateReconciliationItemAsync(libraryRoot, ready);
+    }
+
+    private static async Task<CaptureJournalReconciliationItem> CreateReconciliationItemAsync(
+        string libraryRoot,
+        CaptureJournalDocument journal)
+    {
+        var statuses = new Dictionary<string, CaptureJournalArtifactValidationStatus>(
+            StringComparer.Ordinal);
+        foreach (var artifact in new[] { journal.Clip.Original }.Concat(journal.Artifacts))
+        {
+            var validation = await CaptureJournalStore.ValidateArtifactAsync(
+                libraryRoot,
+                artifact);
+            Assert(validation.Status == CaptureJournalArtifactValidationStatus.Valid,
+                "Every changed journal artifact must validate before routing reconciliation.");
+            statuses.Add(artifact.Kind, validation.Status);
+        }
+        return new CaptureJournalReconciliationItem(
+            journal.Clip.ClipId,
+            CaptureJournalLoadStatus.Loaded,
+            journal,
+            statuses);
+    }
+
     private static async Task<Fixture> CreateFixtureAsync(
         string root,
         bool reactionCamera,
@@ -539,7 +1044,7 @@ internal static class RoutingRuntimeBridgeTests
             Guid.NewGuid(),
             "Runtime Test Game highlights",
             Enabled: true,
-            Priority: 0,
+            Priority: 1,
             Revision: 1,
             RoutingRouteSource.User,
             RoutingRouteKind.Specific,
@@ -559,46 +1064,126 @@ internal static class RoutingRuntimeBridgeTests
             Actions: [delivery, file],
             CreatedUtc: Now,
             ModifiedUtc: Now);
+        var stateDirectory = Path.Combine(root, "runtime-state");
+        var legacyState = CreateLegacyState(stateDirectory);
+        var legacyStateStore = CreateLegacyStateStore(stateDirectory, legacyState);
+        var legacySettings = CreateLegacySettings(stateDirectory);
+        IReadOnlyList<string> connectionIds = [];
+        var migrationPlan = CreateMigrationPlan(
+            legacySettings,
+            legacyState,
+            connectionIds);
         var snapshot = new RoutingSnapshotDocument(
             RoutingSnapshotStore.CurrentSchemaVersion,
             Generation: 1,
-            Routes: [route, CreateMigrationRoute(priority: 1)],
+            Routes: [route, migrationPlan.Route],
             CreatedUtc: Now,
             UpdatedUtc: Now);
-        var stateDirectory = Path.Combine(root, "runtime-state");
         var snapshotStore = new RoutingSnapshotStore(Path.Combine(stateDirectory, "routes.json"));
         var outboxStore = new RoutingOutboxStore(Path.Combine(stateDirectory, "outbox.json"));
         await snapshotStore.SaveAsync(snapshot, expectedGeneration: 0);
-        var marker = CreateMarkerStore(
-            stateDirectory,
-            snapshot.Routes.Single(candidate => candidate.Source == RoutingRouteSource.Migration),
-            commit: true);
+        var marker = CreateMarkerStore(stateDirectory, migrationPlan, commit: true);
+        var evidence = new LegacyRoutingActivationEvidenceSource(
+            legacyStateStore,
+            () => legacySettings,
+            () => connectionIds);
+        var ownership = new ClipProcessingOwnershipCoordinator();
+        if (!ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var routingLease) ||
+            routingLease is null)
+        {
+            throw new InvalidOperationException(
+                "The focused runtime fixture could not acquire routing ownership.");
+        }
         var gate = RoutingRuntimeFeatureGate.Evaluate(
             requestedEnabled: true,
             marker,
-            new WatchState());
+            snapshotStore,
+            evidence,
+            routingLease);
         Assert(gate.Enabled, "The focused runtime fixture must carry explicit safe cutover evidence.");
-        var legacyState = new WatchState();
-        gate = RoutingRuntimeFeatureGate.Evaluate(requestedEnabled: true, marker, legacyState);
-        return new Fixture(root, item, snapshot, snapshotStore, outboxStore, gate, legacyState);
+        return new Fixture(
+            root,
+            item,
+            snapshot,
+            snapshotStore,
+            outboxStore,
+            gate,
+            legacyState,
+            legacyStateStore,
+            ownership,
+            routingLease);
+    }
+
+    private static RoutingSnapshotStore CreateSnapshotStore(
+        string root,
+        RoutingRoute migrationRoute)
+    {
+        var store = new RoutingSnapshotStore(Path.Combine(root, RoutingSnapshotStore.FileName));
+        var snapshot = new RoutingSnapshotDocument(
+            RoutingSnapshotStore.CurrentSchemaVersion,
+            Generation: 1,
+            Routes: [migrationRoute],
+            CreatedUtc: migrationRoute.CreatedUtc,
+            UpdatedUtc: migrationRoute.ModifiedUtc);
+        _ = store.SaveAsync(snapshot, expectedGeneration: 0).GetAwaiter().GetResult();
+        return store;
+    }
+
+    private static WatchState CreateLegacyState(string root) => new()
+    {
+        Version = 4,
+        ClipsFolder = Path.GetFullPath(root),
+        CaptureSource = ClipCaptureSource.SteelSeriesGg
+    };
+
+    private static WatchStateStore CreateLegacyStateStore(string root, WatchState state)
+    {
+        var directory = Path.Combine(root, "legacy-state");
+        var store = new WatchStateStore(
+            Path.Combine(directory, "state.json"),
+            Path.Combine(directory, ".safe-baseline-required"));
+        store.Save(state);
+        return store;
+    }
+
+    private static AppSettings CreateLegacySettings(
+        string root,
+        bool uploadToDiscord = false) => new(
+        Path.GetFullPath(root),
+        uploadToDiscord
+            ? "https://discord.com/api/webhooks/123456789012345678/test-token"
+            : string.Empty,
+        StartWithWindows: false,
+        AppSettings.DefaultCompressionTargetMb,
+        "Routing Test",
+        uploadToDiscord,
+        ModeToggleHotkey: string.Empty,
+        ClipCaptureSource.SteelSeriesGg);
+
+    private static LegacyRoutingMigrationPlan CreateMigrationPlan(
+        AppSettings settings,
+        WatchState state,
+        IReadOnlyList<string> connectionIds)
+    {
+        var readiness = LegacyRoutingMigrationPlanner.Evaluate(
+            new LegacyRoutingMigrationInput(
+                settings,
+                state,
+                LegacyWorkerQuiesced: true,
+                connectionIds),
+            Now);
+        return readiness.Plan ?? throw new InvalidOperationException(
+            $"The activation fixture migration plan is unavailable ({readiness.Status}).");
     }
 
     private static LegacyRoutingMigrationMarkerStore CreateMarkerStore(
         string root,
-        RoutingRoute migrationRoute,
+        LegacyRoutingMigrationPlan plan,
         bool commit)
     {
         Directory.CreateDirectory(root);
         var store = new LegacyRoutingMigrationMarkerStore(
             Path.Combine(root, LegacyRoutingMigrationMarkerStore.FileName));
-        var fingerprint = new string('A', 64);
-        var plan = new LegacyRoutingMigrationPlan(
-            LegacyRoutingMigrationPlanner.DeterministicGuid(fingerprint, "migration"),
-            LegacyRoutingMode.LocalOnly,
-            LegacyRoutingCutoverScope.FutureClipsOnly,
-            fingerprint,
-            migrationRoute,
-            new LegacyContentHashExclusions([], [], []));
         var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(plan, Now);
         _ = store.SaveAsync(prepared, expectedGeneration: 0).GetAwaiter().GetResult();
         if (commit)
@@ -608,38 +1193,6 @@ internal static class RoutingRuntimeBridgeTests
                 prepared.Generation).GetAwaiter().GetResult();
         }
         return store;
-    }
-
-    private static RoutingRoute CreateMigrationRoute(int priority)
-    {
-        var fingerprint = new string('A', 64);
-        return new RoutingRoute(
-            LegacyRoutingMigrationPlanner.DeterministicGuid(fingerprint, "route"),
-            "Everything else → Local only",
-            Enabled: true,
-            priority,
-            Revision: 1,
-            RoutingRouteSource.Migration,
-            RoutingRouteKind.Fallback,
-            RoutingTriggerKind.AnyNewSourceClip,
-            new RoutingPrepareSettings(false, false, RoutingMissingOutputBehavior.UseOriginal),
-            Conditions: [],
-            Actions:
-            [
-                new RoutingAction(
-                    LegacyRoutingMigrationPlanner.DeterministicGuid(fingerprint, "file-action"),
-                    Enabled: true,
-                    RoutingActionKind.FileIntoLibrary,
-                    Destination: null,
-                    ConnectionId: null,
-                    OutputRef: null,
-                    OnMissingOutput: null,
-                    RoutingDeliveryMode.Automatic,
-                    RoutingLibraryArea.LocalOnly,
-                    DeliverySettings: null)
-            ],
-            CreatedUtc: Now,
-            ModifiedUtc: Now);
     }
 
     private static RoutingRuntimeSourceEvent SourceEvent(
@@ -654,7 +1207,10 @@ internal static class RoutingRuntimeBridgeTests
         RoutingSnapshotStore SnapshotStore,
         RoutingOutboxStore OutboxStore,
         RoutingRuntimeFeatureGate Gate,
-        WatchState LegacyState)
+        WatchState LegacyState,
+        WatchStateStore LegacyStateStore,
+        ClipProcessingOwnershipCoordinator Ownership,
+        ClipProcessingOwnershipLease RoutingLease)
     {
         internal RoutingRuntimeBridge CreateBridge(IRoutingRuntimePlanner planner) => new(
             LibraryRoot,

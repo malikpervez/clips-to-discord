@@ -4,10 +4,32 @@ using System.Text.Json.Serialization;
 
 namespace ClipsToDiscord;
 
+internal enum WatchStateRoutingProbeStatus
+{
+    Missing,
+    Loaded,
+    Corrupt,
+    UnsupportedVersion,
+    Invalid,
+    Unavailable
+}
+
+internal sealed record WatchStateRoutingProbe(
+    WatchStateRoutingProbeStatus Status,
+    int PendingMoves,
+    int PendingLocalOnlyMoves,
+    int PendingEditedUploads,
+    int IgnoredFileKeys,
+    WatchState? State)
+{
+    internal bool Loaded => Status == WatchStateRoutingProbeStatus.Loaded;
+}
+
 internal sealed class WatchStateStore
 {
     private const int CurrentVersion = 4;
     private const int MinimumCompatibleVersion = 2;
+    private const int MaximumStateBytes = 8 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _statePath;
     private readonly string _safeBaselineMarkerPath;
@@ -21,8 +43,69 @@ internal sealed class WatchStateStore
 
     internal WatchStateStore(string statePath, string safeBaselineMarkerPath)
     {
-        _statePath = statePath;
-        _safeBaselineMarkerPath = safeBaselineMarkerPath;
+        _statePath = Path.GetFullPath(statePath);
+        _safeBaselineMarkerPath = Path.GetFullPath(safeBaselineMarkerPath);
+    }
+
+    internal string StatePath => _statePath;
+
+    /// <summary>
+    /// Strict, read-only evidence for routing activation. Unlike LoadOrInitializeAsync this probe
+    /// never creates, upgrades, normalizes, or saves state: missing, malformed, redirected, or
+    /// future-version state must pause cutover rather than being interpreted as empty queues.
+    /// </summary>
+    internal WatchStateRoutingProbe ProbeForRoutingActivation(
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            EnsureNoReparsePointsInExistingPath(_statePath);
+            if (!File.Exists(_statePath)) return Probe(WatchStateRoutingProbeStatus.Missing);
+            var info = new FileInfo(_statePath);
+            if (info.Length is <= 0 or > MaximumStateBytes ||
+                info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                return Probe(WatchStateRoutingProbeStatus.Invalid);
+            }
+
+            var bytes = File.ReadAllBytes(_statePath);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (bytes.Length is <= 0 or > MaximumStateBytes)
+            {
+                return Probe(WatchStateRoutingProbeStatus.Invalid);
+            }
+
+            var state = JsonSerializer.Deserialize<WatchState>(bytes, JsonOptions);
+            if (state is null) return Probe(WatchStateRoutingProbeStatus.Corrupt);
+            if (state.Version != CurrentVersion)
+            {
+                return Probe(WatchStateRoutingProbeStatus.UnsupportedVersion);
+            }
+            ValidateRoutingProbeState(state);
+            return new WatchStateRoutingProbe(
+                WatchStateRoutingProbeStatus.Loaded,
+                state.PendingMoves.Count,
+                state.PendingLocalOnlyMoves.Count,
+                state.PendingEditedUploads.Count,
+                state.IgnoredFileKeys.Count,
+                state);
+        }
+        catch (JsonException)
+        {
+            return Probe(WatchStateRoutingProbeStatus.Corrupt);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or ArgumentException or
+                NullReferenceException or OverflowException)
+        {
+            return Probe(WatchStateRoutingProbeStatus.Invalid);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            return Probe(WatchStateRoutingProbeStatus.Unavailable);
+        }
     }
 
     public async Task<WatchState> LoadOrInitializeAsync(
@@ -284,6 +367,73 @@ internal sealed class WatchStateStore
             .Select(group => group.First())
             .ToList();
         state.KnownSignatures = null;
+    }
+
+    private static WatchStateRoutingProbe Probe(WatchStateRoutingProbeStatus status) =>
+        new(status, 0, 0, 0, 0, null);
+
+    private static void ValidateRoutingProbeState(WatchState state)
+    {
+        if (string.IsNullOrWhiteSpace(state.ClipsFolder) ||
+            !Path.IsPathFullyQualified(state.ClipsFolder) ||
+            !Enum.IsDefined(state.CaptureSource) ||
+            state.KnownContentHashes is null || state.UploadedContentHashes is null ||
+            state.LocalOnlyContentHashes is null || state.IgnoredFileKeys is null ||
+            state.PendingMoves is null || state.PendingLocalOnlyMoves is null ||
+            state.PendingEditedUploads is null)
+        {
+            throw new InvalidDataException("The legacy watcher state is incomplete.");
+        }
+
+        ValidateHashes(state.KnownContentHashes);
+        ValidateHashes(state.UploadedContentHashes);
+        ValidateHashes(state.LocalOnlyContentHashes);
+        var known = state.KnownContentHashes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!state.UploadedContentHashes.All(known.Contains) ||
+            !state.LocalOnlyContentHashes.All(known.Contains) ||
+            state.UploadedContentHashes.Intersect(
+                state.LocalOnlyContentHashes,
+                StringComparer.OrdinalIgnoreCase).Any() ||
+            state.IgnoredFileKeys.Any(string.IsNullOrWhiteSpace) ||
+            state.PendingMoves.Any(path => string.IsNullOrWhiteSpace(path) ||
+                                           !Path.IsPathFullyQualified(path)) ||
+            state.PendingLocalOnlyMoves.Any(path => string.IsNullOrWhiteSpace(path) ||
+                                                    !Path.IsPathFullyQualified(path)) ||
+            state.PendingEditedUploads.Any(pending => pending is null || pending.Id == Guid.Empty))
+        {
+            throw new InvalidDataException("The legacy watcher state is inconsistent.");
+        }
+    }
+
+    private static void ValidateHashes(IEnumerable<string> hashes)
+    {
+        foreach (var hash in hashes)
+        {
+            if (hash is null || hash.Length != 64 || !hash.All(Uri.IsHexDigit))
+            {
+                throw new InvalidDataException("The legacy watcher state contains an invalid hash.");
+            }
+        }
+    }
+
+    private static void EnsureNoReparsePointsInExistingPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath) ??
+                   throw new IOException("The watcher state path has no filesystem root.");
+        var current = root;
+        foreach (var component in fullPath[root.Length..].Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, component);
+            if (!File.Exists(current) && !Directory.Exists(current)) break;
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException(
+                    "Watcher state cannot traverse a symbolic link, mount point, or junction.");
+            }
+        }
     }
 
     private void TryDeleteSafeBaselineMarker()

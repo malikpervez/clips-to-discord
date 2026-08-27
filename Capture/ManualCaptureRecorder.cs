@@ -174,6 +174,7 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
     private string? _gameName;
     private DateTimeOffset _capturedAt;
     private DateTimeOffset _startedAt;
+    private SizeInt32 _outputSize;
     private CaptureSettings? _activeSettings;
     private string? _cameraWarning;
     private bool _cameraIsActive;
@@ -361,6 +362,7 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
                 if (!_cameraSuppressedForCapture) _cameraWarning = null;
 
                 var outputSize = FitOutputSize(item.Size, settings.Resolution);
+                _outputSize = outputSize;
                 encoder = new WgcVideoFileEncoder(
                     item,
                     outputSize,
@@ -636,7 +638,22 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
                 throw new IOException("Windows completed the recording without producing a playable MP4.");
             }
 
-            CaptureOutputPolicy.MoveCompletedFile(stagingPath, finalPath);
+            var captureSettings = activeSettings ??
+                throw new InvalidOperationException("The active capture settings are unavailable.");
+            var duration = DateTimeOffset.Now - startedAt;
+            var journal = await CaptureJournalCaptureCommit.PromoteOriginalAsync(
+                    captureSettings.LibraryRoot,
+                    stagingPath,
+                    finalPath,
+                    CaptureJournalSourceKind.ManualCapture,
+                    gameName,
+                    capturedAt,
+                    duration,
+                    _outputSize.Width,
+                    _outputSize.Height,
+                    captureSettings,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
             cameraEncoder = null;
             lock (_gate) cameraWarning = _cameraWarning;
             try
@@ -675,7 +692,6 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
                     cameraEnd,
                     gameplayStart,
                     cameraStagingPath) &&
-                activeSettings is not null &&
                 cameraStart is not null &&
                 cameraEnd is not null &&
                 gameplayStart is not null)
@@ -696,12 +712,12 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
                         // when this capture started. The fallback is only for direct in-process
                         // callers that bypass the capture-host boundary.
                         var compositionSnapshot = CaptureCompositionSnapshotFactory.Create(
-                            activeSettings,
+                            captureSettings,
                             finalPath,
                             mirrorCamera: true,
                             capturedAt);
                         var persistenceTask = CaptureProjectStore.SaveReactionCameraLayerAsync(
-                            activeSettings.LibraryRoot,
+                            captureSettings.LibraryRoot,
                             finalPath,
                             cameraStagingPath!,
                             gameplayStart.Value,
@@ -758,11 +774,30 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
             {
                 cameraWarning = "The gameplay recording was saved, but the Reaction Camera did not produce a usable segment.";
             }
+            try
+            {
+                _ = await CaptureJournalCaptureCommit.FinalizeCameraAsync(
+                        captureSettings.LibraryRoot,
+                        journal.Clip.ClipId,
+                        cameraLayer,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                // Gameplay and its source journal are already committed. Camera projection is
+                // optional and startup reconciliation can safely repeat it.
+                Log.Error(
+                    "ClipCord saved gameplay but could not update its camera journal state.",
+                    exception);
+                cameraWarning ??=
+                    "The gameplay recording was saved, but Reaction Camera processing needs attention.";
+            }
             var result = new ManualCaptureResult(
                 finalPath,
                 gameName,
                 capturedAt,
-                DateTimeOffset.Now - startedAt,
+                duration,
                 cameraLayer,
                 cameraWarning);
             lock (_gate)
@@ -998,8 +1033,15 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
                     ? exception.Message
                     : publicMessage;
             var stagingPath = _stagingPath;
+            var libraryRoot = _activeSettings?.LibraryRoot;
+            var preservePromotedStage =
+                !string.IsNullOrWhiteSpace(stagingPath) &&
+                !string.IsNullOrWhiteSpace(libraryRoot) &&
+                CaptureJournalPromotionIntentStore.IsOriginalStageProtected(
+                    libraryRoot,
+                    stagingPath);
             CleanupRecordingState();
-            TryDelete(stagingPath);
+            if (!preservePromotedStage) TryDelete(stagingPath);
             State = _disposed ? ManualCaptureState.NoTarget : ManualCaptureState.Failed;
         }
         RaiseStateChanged();
@@ -1022,6 +1064,7 @@ internal sealed class WindowsManualCaptureRecorder : IManualCaptureRecorder
         _cameraStagingPath = null;
         _finalPath = null;
         _gameName = null;
+        _outputSize = default;
         _activeSettings = null;
         _cameraSuppressedForCapture = false;
         if (!_cameraReleaseNeedsAttention)

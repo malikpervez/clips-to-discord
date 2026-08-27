@@ -56,7 +56,10 @@ internal static class CaptureStagingRecovery
             try
             {
                 if (!IsOwnedCaptureStage(candidate) ||
-                    candidate.LastWriteTimeUtc > cutoffUtc)
+                    candidate.LastWriteTimeUtc > cutoffUtc ||
+                    CaptureJournalPromotionIntentStore.IsOriginalStageProtected(
+                        libraryRoot,
+                        candidate.FullName))
                 {
                     continue;
                 }

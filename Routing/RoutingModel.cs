@@ -620,6 +620,69 @@ internal static class RoutingOutboxModel
         }, now);
 
     /// <summary>
+    /// Applies one validated capture-journal artifact snapshot to an already frozen plan. Every
+    /// delivery waiting on the same ready or failed logical output advances in one outbox
+    /// generation, so an executor can never observe only part of a rendition update. Replaying
+    /// the same snapshot is an exact no-op and does not manufacture another generation.
+    /// </summary>
+    internal static RoutingOutboxDocument ReconcilePlanArtifactAvailability(
+        RoutingOutboxDocument current,
+        Guid planId,
+        IReadOnlyList<RoutingOutputReference> readyOutputs,
+        IReadOnlyDictionary<RoutingOutputReference, string> failedOutputs,
+        DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(readyOutputs);
+        ArgumentNullException.ThrowIfNull(failedOutputs);
+        Validate(current);
+        RoutingValidation.Require(planId != Guid.Empty, "A routing plan id is missing.");
+        var plan = current.Plans.SingleOrDefault(item => item.PlanId == planId) ??
+                   throw new InvalidDataException("The routing plan decision does not exist.");
+        RoutingValidation.Require(
+            readyOutputs.All(output => output is not null) &&
+            readyOutputs.Distinct().Count() == readyOutputs.Count,
+            "Ready artifact evidence must contain unique output references.");
+        var readySet = readyOutputs.ToHashSet();
+        RoutingValidation.Require(
+            failedOutputs.Keys.All(output => output is not null) &&
+            !failedOutputs.Keys.Any(readySet.Contains),
+            "An output cannot be both ready and permanently missing.");
+        foreach (var output in readyOutputs.Concat(failedOutputs.Keys))
+        {
+            ValidateOutputReference(output);
+            RoutingValidation.Require(
+                output.ClipId.Equals(plan.SourceClipId, StringComparison.Ordinal),
+                "Artifact evidence belongs to a different source clip.");
+        }
+        foreach (var failed in failedOutputs)
+        {
+            RoutingValidation.Require(failed.Key.Kind != RoutingOutputKind.Original,
+                "A missing source original cannot use a rendition fallback policy.");
+            RoutingValidation.RequireErrorCode(failed.Value);
+        }
+
+        if (current.Deliveries.All(item => item.PlanId != planId)) return current;
+        var utcNow = RoutingValidation.Utc(now);
+        return UpdatePlanArtifactStates(current, planId, delivery =>
+        {
+            if (delivery.State != PlannedDeliveryState.WaitingForArtifact) return delivery;
+            if (readySet.Contains(delivery.RequestedOutput))
+            {
+                return delivery with
+                {
+                    State = delivery.Mode == RoutingDeliveryMode.Approval
+                        ? PlannedDeliveryState.WaitingForApproval
+                        : PlannedDeliveryState.Ready,
+                    UpdatedUtc = utcNow
+                };
+            }
+            return failedOutputs.TryGetValue(delivery.RequestedOutput, out var errorCode)
+                ? ResolveMissingArtifact(delivery, errorCode, utcNow)
+                : delivery;
+        }, requireChange: false, utcNow);
+    }
+
+    /// <summary>
     /// Persists the route's selected missing-output policy after a requested rendition fails.
     /// The decision is part of the outbox and therefore survives restart without re-evaluation.
     /// </summary>
@@ -647,39 +710,49 @@ internal static class RoutingOutboxModel
         {
             if (delivery.State != PlannedDeliveryState.WaitingForArtifact ||
                 !failedSet.Contains(delivery.RequestedOutput)) return delivery;
-            RoutingValidation.Require(delivery.RequestedOutput.Kind != RoutingOutputKind.Original,
-                "A missing source original cannot use a rendition fallback policy.");
-            var utcNow = RoutingValidation.Utc(now);
-            return delivery.OnMissingOutput switch
-            {
-                RoutingMissingOutputBehavior.UseOriginal => delivery with
-                {
-                    Output = delivery.OriginalOutput,
-                    ArtifactOutcome = RoutingMissingArtifactOutcome.OriginalFallback,
-                    ArtifactErrorCode = errorCode,
-                    State = delivery.Mode == RoutingDeliveryMode.Approval
-                        ? PlannedDeliveryState.WaitingForApproval
-                        : PlannedDeliveryState.Ready,
-                    UpdatedUtc = utcNow
-                },
-                RoutingMissingOutputBehavior.Skip => delivery with
-                {
-                    ArtifactOutcome = RoutingMissingArtifactOutcome.Skipped,
-                    ArtifactErrorCode = errorCode,
-                    State = PlannedDeliveryState.Skipped,
-                    CompletedUtc = utcNow,
-                    UpdatedUtc = utcNow
-                },
-                RoutingMissingOutputBehavior.NeedsAttention => delivery with
-                {
-                    ArtifactOutcome = RoutingMissingArtifactOutcome.NeedsAttention,
-                    ArtifactErrorCode = errorCode,
-                    State = PlannedDeliveryState.NeedsAttention,
-                    UpdatedUtc = utcNow
-                },
-                _ => throw new InvalidDataException("The missing-output behavior is unsupported.")
-            };
+            return ResolveMissingArtifact(
+                delivery,
+                errorCode,
+                RoutingValidation.Utc(now));
         }, requireChange: true, now);
+    }
+
+    private static PlannedDelivery ResolveMissingArtifact(
+        PlannedDelivery delivery,
+        string errorCode,
+        DateTimeOffset utcNow)
+    {
+        RoutingValidation.Require(delivery.RequestedOutput.Kind != RoutingOutputKind.Original,
+            "A missing source original cannot use a rendition fallback policy.");
+        return delivery.OnMissingOutput switch
+        {
+            RoutingMissingOutputBehavior.UseOriginal => delivery with
+            {
+                Output = delivery.OriginalOutput,
+                ArtifactOutcome = RoutingMissingArtifactOutcome.OriginalFallback,
+                ArtifactErrorCode = errorCode,
+                State = delivery.Mode == RoutingDeliveryMode.Approval
+                    ? PlannedDeliveryState.WaitingForApproval
+                    : PlannedDeliveryState.Ready,
+                UpdatedUtc = utcNow
+            },
+            RoutingMissingOutputBehavior.Skip => delivery with
+            {
+                ArtifactOutcome = RoutingMissingArtifactOutcome.Skipped,
+                ArtifactErrorCode = errorCode,
+                State = PlannedDeliveryState.Skipped,
+                CompletedUtc = utcNow,
+                UpdatedUtc = utcNow
+            },
+            RoutingMissingOutputBehavior.NeedsAttention => delivery with
+            {
+                ArtifactOutcome = RoutingMissingArtifactOutcome.NeedsAttention,
+                ArtifactErrorCode = errorCode,
+                State = PlannedDeliveryState.NeedsAttention,
+                UpdatedUtc = utcNow
+            },
+            _ => throw new InvalidDataException("The missing-output behavior is unsupported.")
+        };
     }
 
     internal static RoutingOutboxDocument ResolveNeedsAttention(
@@ -773,6 +846,32 @@ internal static class RoutingOutboxModel
             };
         }, now);
 
+    /// <summary>
+    /// Records a definite local artifact-resolution failure before any provider request starts.
+    /// This is intentionally not a delivery attempt: retry remains safe and the attempt counter
+    /// continues to describe only requests that reached a provider boundary.
+    /// </summary>
+    internal static RoutingOutboxDocument FailDeliveryBeforeProvider(
+        RoutingOutboxDocument current,
+        Guid deliveryId,
+        string errorCode,
+        DateTimeOffset now) =>
+        UpdateDelivery(current, deliveryId, delivery =>
+        {
+            RoutingValidation.Require(delivery.State == PlannedDeliveryState.Ready,
+                "Only a ready delivery can fail before provider entry.");
+            RoutingValidation.Require(delivery.CurrentAttemptId is null &&
+                                      delivery.AttemptStartedUtc is null,
+                "A pre-provider failure cannot replace an active attempt.");
+            RoutingValidation.RequireErrorCode(errorCode);
+            return delivery with
+            {
+                State = PlannedDeliveryState.Failed,
+                ErrorCode = errorCode,
+                UpdatedUtc = RoutingValidation.Utc(now)
+            };
+        }, now);
+
     internal static RoutingOutboxDocument CompleteDelivery(
         RoutingOutboxDocument current,
         Guid deliveryId,
@@ -813,6 +912,28 @@ internal static class RoutingOutboxModel
             {
                 State = PlannedDeliveryState.Failed,
                 ProviderResumeReference = providerResumeReference,
+                ErrorCode = errorCode,
+                UpdatedUtc = RoutingValidation.Utc(now)
+            };
+        }, now);
+
+    /// <summary>
+    /// Records an attempt whose provider result is ambiguous. Unlike an ordinary failure, this
+    /// state can never retry without an explicit duplicate-risk decision from the user.
+    /// </summary>
+    internal static RoutingOutboxDocument MarkDeliveryUnknown(
+        RoutingOutboxDocument current,
+        Guid deliveryId,
+        Guid attemptId,
+        string errorCode,
+        DateTimeOffset now) =>
+        UpdateDelivery(current, deliveryId, delivery =>
+        {
+            RequireCurrentAttempt(delivery, attemptId);
+            RoutingValidation.RequireErrorCode(errorCode);
+            return delivery with
+            {
+                State = PlannedDeliveryState.DeliveryUnknown,
                 ErrorCode = errorCode,
                 UpdatedUtc = RoutingValidation.Utc(now)
             };
@@ -997,6 +1118,28 @@ internal static class RoutingOutboxModel
             return disposition with
             {
                 State = PlannedFileDispositionState.Failed,
+                ErrorCode = errorCode,
+                UpdatedUtc = RoutingValidation.Utc(now)
+            };
+        }, now);
+
+    /// <summary>
+    /// Records a file operation whose result must be reconciled by exact library identity before
+    /// retrying. This prevents an ambiguous move from selecting a second destination.
+    /// </summary>
+    internal static RoutingOutboxDocument MarkFileDispositionRecoveryPending(
+        RoutingOutboxDocument current,
+        Guid dispositionId,
+        Guid attemptId,
+        string errorCode,
+        DateTimeOffset now) =>
+        UpdateDisposition(current, dispositionId, disposition =>
+        {
+            RequireCurrentAttempt(disposition, attemptId);
+            RoutingValidation.RequireErrorCode(errorCode);
+            return disposition with
+            {
+                State = PlannedFileDispositionState.RecoveryPending,
                 ErrorCode = errorCode,
                 UpdatedUtc = RoutingValidation.Utc(now)
             };
@@ -1328,6 +1471,7 @@ internal static class RoutingOutboxModel
         }).ToArray();
         RoutingValidation.Require(!requireChange || changed,
             "The routing plan has no matching artifact state to resolve.");
+        if (!changed) return current;
 
         var planDecision = current.Plans.Single(item => item.PlanId == planId);
         updatedPlan = ReconcilePlanDuplicateKeys(
@@ -1596,10 +1740,16 @@ internal static class RoutingOutboxModel
                     "A delivered item requires one completed attempt and durable receipt.");
                 break;
             case PlannedDeliveryState.Failed:
+                RoutingValidation.Require(noReceiptOrCompletion &&
+                                           delivery.ErrorCode is not null &&
+                                           (hasAttempt || delivery.CurrentAttemptId is null &&
+                                               delivery.AttemptStartedUtc is null),
+                    "A failed delivery requires a safe error and either an attempted send or a definite pre-provider failure.");
+                break;
             case PlannedDeliveryState.DeliveryUnknown:
                 RoutingValidation.Require(hasAttempt && noReceiptOrCompletion &&
-                                          delivery.ErrorCode is not null,
-                    "A failed or unknown delivery requires an attempted send and safe error.");
+                                           delivery.ErrorCode is not null,
+                    "An unknown delivery requires an attempted send and safe error.");
                 break;
             case PlannedDeliveryState.Cancelled:
             case PlannedDeliveryState.Expired:
@@ -2103,7 +2253,10 @@ internal static class RoutingOutboxModel
             "A delivery transition changed completion evidence incorrectly.");
         var failing = previous.State == PlannedDeliveryState.Sending &&
                       next.State is PlannedDeliveryState.Failed or
-                          PlannedDeliveryState.DeliveryUnknown;
+                          PlannedDeliveryState.DeliveryUnknown ||
+                      previous.State == PlannedDeliveryState.Ready &&
+                      next.State == PlannedDeliveryState.Failed &&
+                      next.Attempts == previous.Attempts;
         var clearingFailure = previous.State is PlannedDeliveryState.Failed or
                                   PlannedDeliveryState.DeliveryUnknown &&
                               next.State is PlannedDeliveryState.Ready or
@@ -2208,6 +2361,7 @@ internal static class RoutingOutboxModel
                 PlannedDeliveryState.Skipped or PlannedDeliveryState.Cancelled or
                 PlannedDeliveryState.Expired,
             PlannedDeliveryState.Ready => next is PlannedDeliveryState.Sending or
+                PlannedDeliveryState.Failed or
                 PlannedDeliveryState.Skipped or PlannedDeliveryState.Cancelled or
                 PlannedDeliveryState.Expired,
             PlannedDeliveryState.Sending => next is PlannedDeliveryState.Delivered or

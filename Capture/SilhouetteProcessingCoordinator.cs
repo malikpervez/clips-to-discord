@@ -3,6 +3,20 @@ using System.Threading.Channels;
 
 namespace ClipsToDiscord;
 
+internal sealed class SilhouetteProjectSettledEventArgs : EventArgs
+{
+    internal SilhouetteProjectSettledEventArgs(string libraryRoot, string projectId, int exitCode)
+    {
+        LibraryRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(libraryRoot));
+        ProjectId = projectId;
+        ExitCode = exitCode;
+    }
+
+    internal string LibraryRoot { get; }
+    internal string ProjectId { get; }
+    internal int ExitCode { get; }
+}
+
 /// <summary>
 /// Bridges committed capture projects to the isolated silhouette worker. The committed
 /// project directory is the durable queue; the in-memory channel is only a low-latency,
@@ -36,6 +50,8 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
     private Process? _activeWorker;
     private int _disposeStarted;
     private int _cleanupStarted;
+
+    internal event EventHandler<SilhouetteProjectSettledEventArgs>? ProjectSettled;
 
     internal SilhouetteProcessingCoordinator(string libraryRoot)
     {
@@ -298,6 +314,10 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
                     Log.Error(
                         $"The isolated silhouette worker could not process project {workItem.ProjectId}.",
                         exception);
+                    // A launch failure is just as terminal for this attempt as a non-zero worker
+                    // exit. ProjectSettled lets the journal record a stable failure instead of
+                    // leaving routing work in CameraPending forever.
+                    RaiseProjectSettled(workItem, exitCode: -1);
                 }
                 finally
                 {
@@ -344,6 +364,7 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
                 Log.Error(
                     $"The isolated silhouette worker exited with code {process.ExitCode} for project {workItem.ProjectId}.");
             }
+            RaiseProjectSettled(workItem, process.ExitCode);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -651,9 +672,34 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
         if (process is not null) TryTerminate(process);
     }
 
+    private void RaiseProjectSettled(SilhouetteProjectWorkItem workItem, int exitCode)
+    {
+        var handlers = ProjectSettled;
+        if (handlers is null) return;
+        var eventArgs = new SilhouetteProjectSettledEventArgs(
+            workItem.LibraryRoot,
+            workItem.ProjectId,
+            exitCode);
+        foreach (EventHandler<SilhouetteProjectSettledEventArgs> handler in
+                 handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, eventArgs);
+            }
+            catch (Exception exception)
+            {
+                // Worker state and output fingerprints are already durable. Subscribers are
+                // latency accelerators only; startup reconciliation remains authoritative.
+                Log.Error("ClipCord could not notify a settled silhouette subscriber.", exception);
+            }
+        }
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposeStarted, 1) != 0) return;
+        ProjectSettled = null;
         _queue.Writer.TryComplete();
         _shutdown.Cancel();
         RequestReconciliation();

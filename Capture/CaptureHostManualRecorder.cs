@@ -19,8 +19,38 @@ internal interface ICaptureProjectCompletionSource
     event EventHandler<CaptureProjectCommittedEventArgs>? ProjectCommitted;
 }
 
+internal sealed class CaptureJournalChangedEventArgs : EventArgs
+{
+    internal CaptureJournalChangedEventArgs(
+        string libraryRoot,
+        string clipId,
+        long generation,
+        CaptureJournalState state)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(libraryRoot);
+        if (!CaptureJournalModel.IsClipId(clipId))
+            throw new ArgumentException("The capture journal clip id is invalid.", nameof(clipId));
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        LibraryRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(libraryRoot));
+        ClipId = clipId;
+        Generation = generation;
+        State = state;
+    }
+
+    internal string LibraryRoot { get; }
+    internal string ClipId { get; }
+    internal long Generation { get; }
+    internal CaptureJournalState State { get; }
+}
+
+internal interface ICaptureJournalChangeSource
+{
+    event EventHandler<CaptureJournalChangedEventArgs>? JournalChanged;
+}
+
 internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutomaticCaptureTargetRecorder,
-    IReplayCaptureController, IReactionCameraController, ICaptureProjectCompletionSource
+    IReplayCaptureController, IReactionCameraController, ICaptureProjectCompletionSource,
+    ICaptureJournalChangeSource
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
     private readonly ICaptureHostRecorderClient _client;
@@ -61,6 +91,7 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
     public event EventHandler? ReplayStateChanged;
     public event EventHandler? ReactionCameraStateChanged;
     public event EventHandler<CaptureProjectCommittedEventArgs>? ProjectCommitted;
+    public event EventHandler<CaptureJournalChangedEventArgs>? JournalChanged;
     public ReplayCaptureStatus ReplayStatus { get { lock (_gate) return _replayStatus; } }
     public ReactionCameraRuntimeStatus ReactionCameraStatus
     {
@@ -276,6 +307,7 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
             string? libraryRoot;
             lock (_gate) libraryRoot = _replayCaptureLibraryRoot;
             Apply(snapshot);
+            RaiseJournalChanged(libraryRoot, snapshot.Result);
             RaiseProjectCommitted(libraryRoot, snapshot.Result);
             return snapshot.Result;
         }
@@ -337,6 +369,7 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
                 _manualCaptureLibraryRoot = null;
             }
             Apply(snapshot);
+            RaiseJournalChanged(libraryRoot, snapshot.Result);
             RaiseProjectCommitted(libraryRoot, snapshot.Result);
             return snapshot.Result;
         }
@@ -474,6 +507,47 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
         }
     }
 
+    private void RaiseJournalChanged(string? libraryRoot, ManualCaptureResult? result)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRoot) || result is null) return;
+        try
+        {
+            var clipId = CaptureProjectStore.CreateProjectId(libraryRoot, result.FilePath);
+            var load = CaptureJournalStore.Load(libraryRoot, clipId);
+            if (!load.LoadedFromDisk || load.Document is null)
+            {
+                Log.Error("ClipCord could not load the journal for a completed capture notification.");
+                return;
+            }
+            var eventArgs = new CaptureJournalChangedEventArgs(
+                libraryRoot,
+                clipId,
+                load.Document.Generation,
+                load.Document.State);
+            var handlers = JournalChanged;
+            if (handlers is null) return;
+            foreach (EventHandler<CaptureJournalChangedEventArgs> handler in
+                     handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(this, eventArgs);
+                }
+                catch (Exception exception)
+                {
+                    // Capture is already committed. Durable startup scanning remains the fallback.
+                    Log.Error("ClipCord could not notify a capture-journal subscriber.", exception);
+                }
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or ArgumentException or InvalidDataException or
+                NotSupportedException or PathTooLongException)
+        {
+            Log.Error("ClipCord could not prepare a capture-journal notification.", exception);
+        }
+    }
+
     private CaptureSettings SnapshotSilhouettePreferencesForStart(
         CaptureSettings settings)
     {
@@ -582,6 +656,7 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
             _replayCaptureLibraryRoot = null;
         }
         ProjectCommitted = null;
+        JournalChanged = null;
         ReplayStateChanged = null;
         ReactionCameraStateChanged = null;
         StateChanged = null;
