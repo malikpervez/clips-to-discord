@@ -712,6 +712,9 @@ try
     await AssertCaptureSourceDiscoveryAsync(Path.Combine(temporaryRoot, "capture-sources"));
     TraceSmokeStep("ClipCord 2.0 capture foundation");
     CaptureFoundationTests.Run(Path.Combine(temporaryRoot, "capture-foundation"));
+    TraceSmokeStep("ClipCord 2.0 routing foundation");
+    RoutingFoundationTests.Run(Path.Combine(temporaryRoot, "routing-foundation"));
+    RoutingCaptureJournalTests.Run(Path.Combine(temporaryRoot, "routing-journal"));
 
     TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
