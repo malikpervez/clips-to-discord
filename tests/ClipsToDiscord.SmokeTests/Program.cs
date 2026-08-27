@@ -715,6 +715,11 @@ try
     TraceSmokeStep("ClipCord 2.0 routing foundation");
     RoutingFoundationTests.Run(Path.Combine(temporaryRoot, "routing-foundation"));
     RoutingCaptureJournalTests.Run(Path.Combine(temporaryRoot, "routing-journal"));
+    RoutingEvaluatorTests.Run(Path.Combine(temporaryRoot, "routing-evaluator"));
+    TraceSmokeStep("ClipCord 2.0 routing migration");
+    RoutingMigrationTests.Run(Path.Combine(temporaryRoot, "routing-migration"));
+    TraceSmokeStep("ClipCord 2.0 routing runtime bridge");
+    RoutingRuntimeBridgeTests.Run(Path.Combine(temporaryRoot, "routing-runtime-bridge"));
 
     TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");

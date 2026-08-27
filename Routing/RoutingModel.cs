@@ -280,6 +280,7 @@ internal static class RoutingSnapshotModel
 
 internal static class RoutingOutboxModel
 {
+    internal const int MaximumPlans = 10_000;
     internal const int MaximumDeliveries = 10_000;
     internal const int MaximumFileDispositions = 10_000;
 
@@ -289,6 +290,7 @@ internal static class RoutingOutboxModel
         return new RoutingOutboxDocument(
             RoutingOutboxStore.CurrentSchemaVersion,
             Generation: 1,
+            Plans: [],
             Deliveries: [],
             FileDispositions: [],
             CreatedUtc: utcNow,
@@ -399,7 +401,8 @@ internal static class RoutingOutboxModel
         ArgumentNullException.ThrowIfNull(dispositions);
         RoutingValidation.Require(deliveries.Count > 0 || dispositions.Count > 0,
             "A routing plan must contain work.");
-        RoutingValidation.Require(current.Deliveries.All(item => item.PlanId != planId) &&
+        RoutingValidation.Require(current.Plans.All(item => item.PlanId != planId) &&
+                                  current.Deliveries.All(item => item.PlanId != planId) &&
                                   current.FileDispositions.All(item => item.PlanId != planId),
             "A routing plan is append-only and can be planned only once.");
         foreach (var delivery in deliveries)
@@ -423,7 +426,9 @@ internal static class RoutingOutboxModel
                                   deliveries.All(item =>
                                       item.Output.ClipId.Equals(sourceIds[0], StringComparison.Ordinal)),
             "One planning operation must bind one plan id, one source clip, and its own outputs.");
-        RoutingValidation.Require(current.Deliveries.All(item =>
+        RoutingValidation.Require(current.Plans.All(item =>
+                                      !item.SourceClipId.Equals(sourceIds[0], StringComparison.Ordinal)) &&
+                                  current.Deliveries.All(item =>
                                       !item.SourceClipId.Equals(sourceIds[0], StringComparison.Ordinal)) &&
                                   current.FileDispositions.All(item =>
                                       !item.SourceClipId.Equals(sourceIds[0], StringComparison.Ordinal)),
@@ -448,12 +453,149 @@ internal static class RoutingOutboxModel
         }
 
         var utcNow = RoutingValidation.Utc(now);
+        var planDecision = new RoutingPlanDecision(
+            planId,
+            sourceIds[0],
+            routeReferences[0].RoutingGeneration,
+            routeReferences.OrderBy(item => item.Priority).ThenBy(item => item.Order)
+                .Select(item => item.RouteId).Distinct().ToArray(),
+            [],
+            deliveries.Select(item => item.IntentionalDuplicate)
+                .Where(item => item is not null).Cast<IntentionalDuplicateProvenance>()
+                .Distinct().ToArray(),
+            utcNow);
         var candidate = current with
         {
             Generation = RoutingValidation.NextGeneration(current.Generation),
+            Plans = current.Plans.Concat([planDecision]).ToArray(),
             Deliveries = current.Deliveries.Concat(deliveries).ToArray(),
             FileDispositions = current.FileDispositions.Concat(dispositions).ToArray(),
             UpdatedUtc = utcNow
+        };
+        Validate(candidate);
+        ValidateSuccessor(current, candidate);
+        return candidate;
+    }
+
+    /// <summary>
+    /// Appends one evaluator-produced plan in one durable generation. Unlike the ordinary
+    /// AppendPlan seam, this accepts only the exact, explicitly-described results of applying a
+    /// route's missing-output policy before the plan becomes visible. That prevents a crash from
+    /// exposing a transient WaitingForArtifact item for an output Capture will never produce.
+    /// </summary>
+    internal static RoutingOutboxDocument AppendEvaluatedPlan(
+        RoutingOutboxDocument current,
+        RoutingPlanProposal proposal,
+        DateTimeOffset now)
+    {
+        Validate(current);
+        ArgumentNullException.ThrowIfNull(proposal);
+        RoutingValidation.Require(proposal.PlanId != Guid.Empty,
+            "An evaluated routing plan id is missing.");
+        RoutingValidation.RequireOpaqueId(proposal.SourceClipId, 256,
+            "evaluated source clip id");
+        RoutingValidation.Require(proposal.RoutingGeneration > 0,
+            "An evaluated routing generation is invalid.");
+        var deliveries = proposal.Deliveries ??
+            throw new InvalidDataException("Evaluated plan deliveries are missing.");
+        var dispositions = proposal.FileDisposition is null
+            ? Array.Empty<PlannedFileDisposition>()
+            : new[] { proposal.FileDisposition };
+        var resolutions = proposal.ImmediateMissingResolutions ??
+            throw new InvalidDataException("Evaluated missing-output evidence is missing.");
+        var matchedRouteIds = proposal.MatchedRouteIds ??
+            throw new InvalidDataException("Evaluated matched-route evidence is missing.");
+        var latentAuthorizations = proposal.LatentDuplicateAuthorizations ??
+            throw new InvalidDataException("Evaluated duplicate authorization evidence is missing.");
+        RoutingValidation.Require(matchedRouteIds.All(id => id != Guid.Empty) &&
+                                  matchedRouteIds.Distinct().Count() == matchedRouteIds.Count,
+            "Evaluated matched-route evidence is invalid.");
+        RoutingValidation.Require(
+            proposal.RequiresAtomicResolvedAppend == (resolutions.Count > 0),
+            "The evaluated plan's atomic missing-output marker is inconsistent.");
+
+        var resolutionByDelivery = new Dictionary<Guid, RoutingImmediateMissingResolution>();
+        foreach (var resolution in resolutions)
+        {
+            if (resolution is null || resolution.DeliveryId == Guid.Empty ||
+                !resolutionByDelivery.TryAdd(resolution.DeliveryId, resolution))
+            {
+                throw new InvalidDataException(
+                    "Evaluated missing-output evidence is incomplete or duplicated.");
+            }
+        }
+        foreach (var authorization in latentAuthorizations)
+        {
+            ValidateDuplicate(authorization);
+            RoutingValidation.Require(
+                authorization.DeliveryKey.OutputRef.ClipId.Equals(
+                    proposal.SourceClipId, StringComparison.Ordinal) &&
+                matchedRouteIds.Contains(authorization.FirstRouteId) &&
+                matchedRouteIds.Contains(authorization.SecondRouteId),
+                "Evaluated duplicate authorization is outside the frozen plan.");
+        }
+        RoutingValidation.Require(
+            latentAuthorizations.Select(item => item.GroupId).Distinct().Count() ==
+            latentAuthorizations.Count,
+            "Evaluated duplicate authorization ids must be unique.");
+
+        foreach (var delivery in deliveries)
+        {
+            RoutingValidation.Require(delivery.PlanId == proposal.PlanId &&
+                                      delivery.SourceClipId.Equals(
+                                          proposal.SourceClipId, StringComparison.Ordinal) &&
+                                      delivery.Route.RoutingGeneration ==
+                                          proposal.RoutingGeneration &&
+                                      matchedRouteIds.Contains(delivery.Route.RouteId),
+                "An evaluated delivery does not belong to its frozen plan.");
+            if (resolutionByDelivery.TryGetValue(delivery.DeliveryId, out var resolution))
+            {
+                ValidateImmediateMissingResolution(delivery, resolution);
+            }
+            else
+            {
+                ValidateInitialDelivery(delivery);
+            }
+        }
+        RoutingValidation.Require(
+            resolutionByDelivery.Keys.All(id =>
+                deliveries.Any(delivery => delivery.DeliveryId == id)),
+            "Missing-output evidence names a delivery outside the evaluated plan.");
+
+        foreach (var disposition in dispositions)
+        {
+            RoutingValidation.Require(disposition.PlanId == proposal.PlanId &&
+                                      disposition.SourceClipId.Equals(
+                                          proposal.SourceClipId, StringComparison.Ordinal) &&
+                                      disposition.Route.RoutingGeneration ==
+                                          proposal.RoutingGeneration &&
+                                      matchedRouteIds.Contains(disposition.Route.RouteId),
+                "An evaluated file disposition does not belong to its frozen plan.");
+            ValidateInitialDisposition(disposition);
+        }
+        ValidateAppendEnvelope(
+            current,
+            proposal.PlanId,
+            proposal.SourceClipId,
+            deliveries,
+            dispositions);
+        ValidateInitialDuplicateSuppression(deliveries);
+
+        var planDecision = new RoutingPlanDecision(
+            proposal.PlanId,
+            proposal.SourceClipId,
+            proposal.RoutingGeneration,
+            matchedRouteIds.ToArray(),
+            resolutions.ToArray(),
+            latentAuthorizations.ToArray(),
+            RoutingValidation.Utc(now));
+        var candidate = current with
+        {
+            Generation = RoutingValidation.NextGeneration(current.Generation),
+            Plans = current.Plans.Concat([planDecision]).ToArray(),
+            Deliveries = current.Deliveries.Concat(deliveries).ToArray(),
+            FileDispositions = current.FileDispositions.Concat(dispositions).ToArray(),
+            UpdatedUtc = RoutingValidation.Utc(now)
         };
         Validate(candidate);
         ValidateSuccessor(current, candidate);
@@ -755,7 +897,7 @@ internal static class RoutingOutboxModel
                             PlannedDeliveryState.Failed or PlannedDeliveryState.Cancelled or
                             PlannedDeliveryState.Expired)),
                 disposition.LibraryArea == RoutingLibraryArea.Uploaded
-                    ? "Uploaded filing requires every sibling delivery to be confirmed delivered."
+                    ? "Uploaded filing requires every sibling to be delivered or deliberately skipped."
                     : "The terminal file disposition still has active delivery dependencies.");
             if (disposition.LibraryArea == RoutingLibraryArea.Uploaded)
             {
@@ -937,6 +1079,10 @@ internal static class RoutingOutboxModel
             throw new InvalidDataException("The planned delivery collection is missing.");
         var dispositions = document.FileDispositions ??
             throw new InvalidDataException("The file disposition collection is missing.");
+        var plans = document.Plans ??
+            throw new InvalidDataException("The routing plan decision collection is missing.");
+        RoutingValidation.Require(plans.Count <= MaximumPlans,
+            "The routing outbox contains too many plan decisions.");
         RoutingValidation.Require(deliveries.Count <= MaximumDeliveries,
             "The routing outbox contains too many deliveries.");
         RoutingValidation.Require(dispositions.Count <= MaximumFileDispositions,
@@ -945,6 +1091,18 @@ internal static class RoutingOutboxModel
         RoutingValidation.RequireUtc(document.UpdatedUtc, "outbox update timestamp");
         RoutingValidation.Require(document.UpdatedUtc >= document.CreatedUtc,
             "The outbox timestamps are inconsistent.");
+
+        var planIds = new HashSet<Guid>();
+        var planSources = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var plan in plans)
+        {
+            if (plan is null) throw new InvalidDataException("A routing plan decision is missing.");
+            ValidatePlanDecision(plan);
+            RoutingValidation.Require(planIds.Add(plan.PlanId),
+                "Routing plan decision ids must be unique.");
+            RoutingValidation.Require(planSources.Add(plan.SourceClipId),
+                "A source clip can have only one durable routing decision.");
+        }
 
         var deliveryIds = new HashSet<Guid>();
         foreach (var delivery in deliveries)
@@ -974,29 +1132,42 @@ internal static class RoutingOutboxModel
         }
 
 
-        foreach (var plan in deliveries.Cast<object>()
-                     .Concat(dispositions)
-                     .GroupBy(item => item switch
-                     {
-                         PlannedDelivery delivery => delivery.PlanId,
-                         PlannedFileDisposition disposition => disposition.PlanId,
-                         _ => Guid.Empty
-                     }))
+        RoutingValidation.Require(deliveries.All(item => planIds.Contains(item.PlanId)) &&
+                                  dispositions.All(item => planIds.Contains(item.PlanId)),
+            "Every persisted plan member requires a durable plan decision header.");
+
+        foreach (var plan in plans)
         {
-            var planDeliveries = deliveries.Where(item => item.PlanId == plan.Key).ToArray();
-            var planDispositions = dispositions.Where(item => item.PlanId == plan.Key).ToArray();
+            var planDeliveries = deliveries.Where(item => item.PlanId == plan.PlanId).ToArray();
+            var planDispositions = dispositions.Where(item => item.PlanId == plan.PlanId).ToArray();
+            var duplicateAuthorizations = plan.LatentDuplicateAuthorizations.ToHashSet();
+            RoutingValidation.Require(planDeliveries.All(delivery =>
+                    delivery.IntentionalDuplicate is null ||
+                    duplicateAuthorizations.Contains(delivery.IntentionalDuplicate)),
+                "A delivery duplicate proof is not retained by its immutable plan decision.");
             var sources = planDeliveries.Select(item => item.SourceClipId)
                 .Concat(planDispositions.Select(item => item.SourceClipId))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
-            RoutingValidation.Require(sources.Length == 1 && planDeliveries.All(item =>
-                    item.Output.ClipId.Equals(sources[0], StringComparison.Ordinal)),
+            RoutingValidation.Require((sources.Length == 0 ||
+                                      sources.Length == 1 && sources[0].Equals(
+                                          plan.SourceClipId, StringComparison.Ordinal)) &&
+                                      planDeliveries.All(item =>
+                    item.Output.ClipId.Equals(plan.SourceClipId, StringComparison.Ordinal)),
                 "Each outbox plan must describe one coherent source and its outputs.");
+            foreach (var resolution in plan.InitialMissingResolutions)
+            {
+                RoutingValidation.Require(planDeliveries.Any(delivery =>
+                        delivery.DeliveryId == resolution.DeliveryId &&
+                        delivery.RequestedOutput == resolution.RequestedOutput),
+                    "Initial missing-output evidence does not name its immutable plan delivery.");
+            }
             var routeReferences = planDeliveries.Select(item => item.Route)
                 .Concat(planDispositions.Select(item => item.Route))
                 .ToArray();
-            RoutingValidation.Require(routeReferences.Select(item => item.RoutingGeneration)
-                                          .Distinct().Count() == 1,
+            RoutingValidation.Require(routeReferences.All(item =>
+                                          item.RoutingGeneration == plan.RoutingGeneration &&
+                                          plan.MatchedRouteIds.Contains(item.RouteId)),
                 "Every persisted plan member must share one frozen routing generation.");
             RoutingValidation.Require(routeReferences.Select(item => (item.RouteId, item.ActionId))
                                           .Distinct().Count() == routeReferences.Length,
@@ -1024,16 +1195,9 @@ internal static class RoutingOutboxModel
                     RoutingValidation.Require(planDeliveries.All(IsUploadedDependencySettled) &&
                                               planDeliveries.Any(item =>
                                                   item.State == PlannedDeliveryState.Delivered),
-                        "Uploaded filing requires all siblings settled and at least one delivery.");
+                        "Uploaded filing requires all siblings settled and at least one confirmed delivery.");
                 }
             }
-        }
-        foreach (var sourceGroup in deliveries.Select(item => (item.SourceClipId, item.PlanId))
-                     .Concat(dispositions.Select(item => (item.SourceClipId, item.PlanId)))
-                     .GroupBy(item => item.SourceClipId, StringComparer.Ordinal))
-        {
-            RoutingValidation.Require(sourceGroup.Select(item => item.PlanId).Distinct().Count() == 1,
-                "A source clip can belong to exactly one frozen routing plan.");
         }
     }
 
@@ -1048,9 +1212,23 @@ internal static class RoutingOutboxModel
         RoutingValidation.Require(candidate.CreatedUtc == current.CreatedUtc &&
                                   candidate.UpdatedUtc >= current.UpdatedUtc,
             "The routing outbox changed immutable timestamps.");
-        RoutingValidation.Require(candidate.Deliveries.Count >= current.Deliveries.Count &&
+        RoutingValidation.Require(candidate.Plans.Count >= current.Plans.Count &&
+                                  candidate.Deliveries.Count >= current.Deliveries.Count &&
                                   candidate.FileDispositions.Count >= current.FileDispositions.Count,
             "Routing outbox history cannot be removed by an ordinary transition.");
+
+        var candidatePlans = candidate.Plans.ToDictionary(item => item.PlanId);
+        foreach (var previous in current.Plans)
+        {
+            RoutingValidation.Require(candidatePlans.TryGetValue(previous.PlanId, out var next) &&
+                                      next == previous,
+                "A durable routing plan decision changed or disappeared.");
+        }
+        var addedPlans = candidate.Plans.Where(item =>
+                current.Plans.All(previous => previous.PlanId != item.PlanId))
+            .ToArray();
+        RoutingValidation.Require(addedPlans.Length <= 1,
+            "At most one new source routing decision may be appended per generation.");
 
         var candidateDeliveries = candidate.Deliveries.ToDictionary(item => item.DeliveryId);
         foreach (var previous in current.Deliveries)
@@ -1059,11 +1237,9 @@ internal static class RoutingOutboxModel
                 "A planned delivery disappeared.");
             ValidateDeliverySuccessor(previous, next!);
         }
-        foreach (var added in candidate.Deliveries.Where(item =>
-                     current.Deliveries.All(previous => previous.DeliveryId != item.DeliveryId)))
-        {
-            ValidateInitialDelivery(added);
-        }
+        var addedDeliveries = candidate.Deliveries.Where(item =>
+                current.Deliveries.All(previous => previous.DeliveryId != item.DeliveryId))
+            .ToArray();
 
         var candidateDispositions = candidate.FileDispositions.ToDictionary(item => item.DispositionId);
         foreach (var previous in current.FileDispositions)
@@ -1072,24 +1248,35 @@ internal static class RoutingOutboxModel
                 "A file disposition disappeared.");
             ValidateDispositionSuccessor(previous, next!);
         }
-        foreach (var added in candidate.FileDispositions.Where(item =>
-                     current.FileDispositions.All(previous => previous.DispositionId != item.DispositionId)))
-        {
-            ValidateInitialDisposition(added);
-        }
-        var currentPlans = current.Deliveries.Select(item => item.PlanId)
-            .Concat(current.FileDispositions.Select(item => item.PlanId))
-            .ToHashSet();
-        var addedItems = candidate.Deliveries
-            .Where(item => current.Deliveries.All(previous => previous.DeliveryId != item.DeliveryId))
-            .Select(item => (item.PlanId, item.SourceClipId))
-            .Concat(candidate.FileDispositions
-                .Where(item => current.FileDispositions.All(previous =>
-                    previous.DispositionId != item.DispositionId))
-                .Select(item => (item.PlanId, item.SourceClipId)))
+        var addedDispositions = candidate.FileDispositions.Where(item =>
+                current.FileDispositions.All(previous => previous.DispositionId != item.DispositionId))
             .ToArray();
-        RoutingValidation.Require(addedItems.All(item => !currentPlans.Contains(item.PlanId)),
-            "An outbox successor cannot add work to a plan that was already persisted.");
+
+        if (addedPlans.Length == 0)
+        {
+            RoutingValidation.Require(addedDeliveries.Length == 0 && addedDispositions.Length == 0,
+                "New outbox work requires one durable plan decision in the same generation.");
+            return;
+        }
+
+        var addedPlan = addedPlans[0];
+        RoutingValidation.Require(addedDeliveries.All(item => item.PlanId == addedPlan.PlanId) &&
+                                  addedDispositions.All(item => item.PlanId == addedPlan.PlanId),
+            "One generation cannot mix work from multiple new plans.");
+        var resolutionByDelivery = addedPlan.InitialMissingResolutions
+            .ToDictionary(item => item.DeliveryId);
+        foreach (var added in addedDeliveries)
+        {
+            if (resolutionByDelivery.TryGetValue(added.DeliveryId, out var resolution))
+                ValidateImmediateMissingResolution(added, resolution);
+            else
+                ValidateInitialDelivery(added);
+        }
+        RoutingValidation.Require(resolutionByDelivery.Keys.All(id =>
+                addedDeliveries.Any(item => item.DeliveryId == id)),
+            "Initial missing-output evidence names work outside its new plan generation.");
+        ValidateInitialDuplicateSuppression(addedDeliveries);
+        foreach (var added in addedDispositions) ValidateInitialDisposition(added);
     }
 
     private static RoutingOutboxDocument UpdateDelivery(
@@ -1142,7 +1329,9 @@ internal static class RoutingOutboxModel
         RoutingValidation.Require(!requireChange || changed,
             "The routing plan has no matching artifact state to resolve.");
 
-        updatedPlan = ReconcilePlanDuplicateKeys(originalPlan, updatedPlan, utcNow);
+        var planDecision = current.Plans.Single(item => item.PlanId == planId);
+        updatedPlan = ReconcilePlanDuplicateKeys(
+            originalPlan, updatedPlan, planDecision.LatentDuplicateAuthorizations, utcNow);
         var byId = updatedPlan.ToDictionary(item => item.DeliveryId);
         var deliveries = current.Deliveries.Select(item =>
             item.PlanId == planId ? byId[item.DeliveryId] : item).ToArray();
@@ -1160,6 +1349,7 @@ internal static class RoutingOutboxModel
     private static PlannedDelivery[] ReconcilePlanDuplicateKeys(
         IReadOnlyList<PlannedDelivery> originalPlan,
         IReadOnlyList<PlannedDelivery> updatedPlan,
+        IReadOnlyList<IntentionalDuplicateProvenance> latentAuthorizations,
         DateTimeOffset now)
     {
         var originalById = originalPlan.ToDictionary(item => item.DeliveryId);
@@ -1169,12 +1359,13 @@ internal static class RoutingOutboxModel
             var members = group.ToArray();
             if (members.Length == 1) continue;
 
-            if (members.Length == 2 && WasExactPairAuthorized(
+            if (members.Length == 2 && TryGetExactPairAuthorization(
                     originalById[members[0].DeliveryId],
-                    originalById[members[1].DeliveryId]))
+                    originalById[members[1].DeliveryId],
+                    group.Key,
+                    latentAuthorizations,
+                    out var proof))
             {
-                var oldProof = originalById[members[0].DeliveryId].IntentionalDuplicate!;
-                var proof = oldProof with { DeliveryKey = group.Key };
                 for (var index = 0; index < result.Length; index++)
                 {
                     if (members.Any(member => member.DeliveryId == result[index].DeliveryId))
@@ -1219,14 +1410,35 @@ internal static class RoutingOutboxModel
     private static bool IsUploadedDependencySettled(PlannedDelivery delivery) =>
         delivery.State == PlannedDeliveryState.Delivered ||
         delivery.State == PlannedDeliveryState.Skipped &&
-        delivery.ArtifactOutcome == RoutingMissingArtifactOutcome.DuplicateSuppressed;
+        delivery.ArtifactOutcome is RoutingMissingArtifactOutcome.Skipped or
+            RoutingMissingArtifactOutcome.DuplicateSuppressed;
 
-    private static bool WasExactPairAuthorized(PlannedDelivery first, PlannedDelivery second)
+    private static bool TryGetExactPairAuthorization(
+        PlannedDelivery first,
+        PlannedDelivery second,
+        RoutingDeliveryKey finalKey,
+        IReadOnlyList<IntentionalDuplicateProvenance> latentAuthorizations,
+        out IntentionalDuplicateProvenance proof)
     {
-        var proof = first.IntentionalDuplicate;
-        if (proof is null || second.IntentionalDuplicate != proof) return false;
         var routes = new HashSet<Guid> { first.Route.RouteId, second.Route.RouteId };
-        return routes.SetEquals([proof.FirstRouteId, proof.SecondRouteId]);
+        var attached = first.IntentionalDuplicate;
+        if (attached is not null && second.IntentionalDuplicate == attached &&
+            attached.DeliveryKey == finalKey &&
+            latentAuthorizations.Contains(attached) &&
+            routes.SetEquals([attached.FirstRouteId, attached.SecondRouteId]))
+        {
+            proof = attached;
+            return true;
+        }
+
+        var matches = latentAuthorizations.Where(candidate =>
+                candidate.DeliveryKey == finalKey &&
+                routes.SetEquals([candidate.FirstRouteId, candidate.SecondRouteId]))
+            .ToArray();
+        RoutingValidation.Require(matches.Length <= 1,
+            "Latent duplicate-delivery authorization is ambiguous.");
+        proof = matches.SingleOrDefault()!;
+        return proof is not null;
     }
 
     private static RoutingOutboxDocument UpdateDisposition(
@@ -1531,6 +1743,204 @@ internal static class RoutingOutboxModel
         }
     }
 
+    private static void ValidateAppendEnvelope(
+        RoutingOutboxDocument current,
+        Guid planId,
+        string sourceClipId,
+        IReadOnlyList<PlannedDelivery> deliveries,
+        IReadOnlyList<PlannedFileDisposition> dispositions)
+    {
+        RoutingValidation.Require(current.Plans.All(item => item.PlanId != planId) &&
+                                  current.Deliveries.All(item => item.PlanId != planId) &&
+                                  current.FileDispositions.All(item => item.PlanId != planId),
+            "A routing plan is append-only and can be planned only once.");
+        RoutingValidation.Require(current.Plans.All(item =>
+                                      !item.SourceClipId.Equals(sourceClipId, StringComparison.Ordinal)) &&
+                                  current.Deliveries.All(item =>
+                                      !item.SourceClipId.Equals(sourceClipId, StringComparison.Ordinal)) &&
+                                  current.FileDispositions.All(item =>
+                                      !item.SourceClipId.Equals(sourceClipId, StringComparison.Ordinal)),
+            "A source clip can be frozen into exactly one durable routing plan.");
+        RoutingValidation.Require(deliveries.All(item => item.PlanId == planId &&
+                                      item.SourceClipId.Equals(sourceClipId, StringComparison.Ordinal) &&
+                                      item.Output.ClipId.Equals(sourceClipId, StringComparison.Ordinal)) &&
+                                  dispositions.All(item => item.PlanId == planId &&
+                                      item.SourceClipId.Equals(sourceClipId, StringComparison.Ordinal)),
+            "One planning operation must bind one plan id, one source clip, and its own outputs.");
+        var routeReferences = deliveries.Select(item => item.Route)
+            .Concat(dispositions.Select(item => item.Route))
+            .ToArray();
+        RoutingValidation.Require(routeReferences.Length == 0 ||
+                                  routeReferences.Select(item => item.RoutingGeneration)
+                                      .Distinct().Count() == 1,
+            "Every member of a routing plan must use one frozen routing generation.");
+        RoutingValidation.Require(routeReferences.Select(item => (item.RouteId, item.ActionId))
+                                      .Distinct().Count() == routeReferences.Length,
+            "A route action can contribute at most one member to a routing plan.");
+        RoutingValidation.Require(dispositions.Count <= 1,
+            "A plan/source can have only one terminal file disposition.");
+        if (dispositions.Count == 1)
+        {
+            var expectedDependencies = deliveries.Select(item => item.DeliveryId).ToHashSet();
+            RoutingValidation.Require(
+                dispositions[0].PrerequisiteDeliveryIds.ToHashSet().SetEquals(expectedDependencies),
+                "A terminal file disposition must depend on every sibling delivery.");
+        }
+    }
+
+    private static void ValidatePlanDecision(RoutingPlanDecision plan)
+    {
+        RoutingValidation.Require(plan.PlanId != Guid.Empty && plan.RoutingGeneration > 0,
+            "A routing plan decision identity is invalid.");
+        RoutingValidation.RequireOpaqueId(plan.SourceClipId, 256, "plan source clip id");
+        RoutingValidation.RequireUtc(plan.CreatedUtc, "plan decision timestamp");
+        var routeIds = plan.MatchedRouteIds ??
+            throw new InvalidDataException("Plan matched-route evidence is missing.");
+        var resolutions = plan.InitialMissingResolutions ??
+            throw new InvalidDataException("Plan missing-output evidence is missing.");
+        var authorizations = plan.LatentDuplicateAuthorizations ??
+            throw new InvalidDataException("Plan duplicate authorization evidence is missing.");
+        RoutingValidation.Require(routeIds.All(id => id != Guid.Empty) &&
+                                  routeIds.Distinct().Count() == routeIds.Count,
+            "Plan matched-route evidence is invalid.");
+        var resolutionIds = new HashSet<Guid>();
+        foreach (var resolution in resolutions)
+        {
+            if (resolution is null)
+                throw new InvalidDataException("A plan missing-output resolution is missing.");
+            RoutingValidation.Require(resolution.DeliveryId != Guid.Empty &&
+                                      resolutionIds.Add(resolution.DeliveryId) &&
+                                      Enum.IsDefined(resolution.Outcome) &&
+                                      resolution.Outcome != RoutingMissingArtifactOutcome.RequestedOutput &&
+                                      Enum.IsDefined(resolution.State),
+                "Plan missing-output evidence is invalid.");
+            ValidateOutputReference(resolution.RequestedOutput);
+            ValidateOutputReference(resolution.EffectiveOutput);
+            RoutingValidation.Require(
+                resolution.RequestedOutput.ClipId.Equals(plan.SourceClipId, StringComparison.Ordinal) &&
+                resolution.EffectiveOutput.ClipId.Equals(plan.SourceClipId, StringComparison.Ordinal),
+                "Plan missing-output evidence belongs to another source clip.");
+            RoutingValidation.RequireErrorCode(resolution.ErrorCode);
+        }
+
+        var authorizationIds = new HashSet<Guid>();
+        var authorizationShapes = new HashSet<(RoutingDeliveryKey, Guid, Guid)>();
+        foreach (var authorization in authorizations)
+        {
+            ValidateDuplicate(authorization);
+            var first = authorization.FirstRouteId.CompareTo(authorization.SecondRouteId) <= 0
+                ? authorization.FirstRouteId
+                : authorization.SecondRouteId;
+            var second = first == authorization.FirstRouteId
+                ? authorization.SecondRouteId
+                : authorization.FirstRouteId;
+            RoutingValidation.Require(authorizationIds.Add(authorization.GroupId) &&
+                                      authorizationShapes.Add((authorization.DeliveryKey, first, second)) &&
+                                      authorization.DeliveryKey.OutputRef.ClipId.Equals(
+                                          plan.SourceClipId, StringComparison.Ordinal) &&
+                                      routeIds.Contains(authorization.FirstRouteId) &&
+                                      routeIds.Contains(authorization.SecondRouteId),
+                "Plan duplicate authorization evidence is invalid or ambiguous.");
+        }
+    }
+
+    private static void ValidateImmediateMissingResolution(
+        PlannedDelivery delivery,
+        RoutingImmediateMissingResolution resolution)
+    {
+        ValidateResolvedInitialDelivery(delivery);
+        RoutingValidation.Require(
+            resolution.DeliveryId == delivery.DeliveryId &&
+            resolution.RequestedOutput == delivery.RequestedOutput &&
+            resolution.Outcome == delivery.ArtifactOutcome &&
+            resolution.EffectiveOutput == delivery.Output &&
+            resolution.State == delivery.State &&
+            resolution.ErrorCode == delivery.ArtifactErrorCode,
+            "Immediate missing-output evidence does not match its planned delivery.");
+    }
+
+    private static void ValidateNewDelivery(PlannedDelivery delivery)
+    {
+        if (delivery.ArtifactOutcome == RoutingMissingArtifactOutcome.RequestedOutput)
+        {
+            ValidateInitialDelivery(delivery);
+            return;
+        }
+        ValidateResolvedInitialDelivery(delivery);
+    }
+
+    private static void ValidateResolvedInitialDelivery(PlannedDelivery delivery)
+    {
+        ValidateDelivery(delivery);
+        RoutingValidation.Require(delivery.Attempts == 0 &&
+                                  delivery.CurrentAttemptId is null &&
+                                  delivery.ProviderResumeReference is null &&
+                                  delivery.RemoteReceiptReference is null &&
+                                  delivery.ErrorCode is null &&
+                                  delivery.ApprovedUtc is null &&
+                                  delivery.AttemptStartedUtc is null &&
+                                  delivery.DuplicateRiskAcceptedUtc is null &&
+                                  delivery.ArtifactErrorCode is not null &&
+                                  delivery.CreatedUtc == delivery.UpdatedUtc,
+            "A pre-resolved delivery contains attempt, receipt, or mutable history.");
+        switch (delivery.ArtifactOutcome)
+        {
+            case RoutingMissingArtifactOutcome.OriginalFallback:
+                RoutingValidation.Require(
+                    delivery.OnMissingOutput == RoutingMissingOutputBehavior.UseOriginal &&
+                    delivery.Output == delivery.OriginalOutput &&
+                    delivery.CompletedUtc is null &&
+                    delivery.State == (delivery.Mode == RoutingDeliveryMode.Approval
+                        ? PlannedDeliveryState.WaitingForApproval
+                        : PlannedDeliveryState.Ready),
+                    "An initial original fallback is inconsistent with its route policy.");
+                break;
+            case RoutingMissingArtifactOutcome.Skipped:
+                RoutingValidation.Require(
+                    delivery.OnMissingOutput == RoutingMissingOutputBehavior.Skip &&
+                    delivery.Output == delivery.RequestedOutput &&
+                    delivery.State == PlannedDeliveryState.Skipped &&
+                    delivery.CompletedUtc == delivery.UpdatedUtc,
+                    "An initial skipped output is inconsistent with its route policy.");
+                break;
+            case RoutingMissingArtifactOutcome.NeedsAttention:
+                RoutingValidation.Require(
+                    delivery.OnMissingOutput == RoutingMissingOutputBehavior.NeedsAttention &&
+                    delivery.Output == delivery.RequestedOutput &&
+                    delivery.State == PlannedDeliveryState.NeedsAttention &&
+                    delivery.CompletedUtc is null,
+                    "An initial needs-attention output is inconsistent with its route policy.");
+                break;
+            case RoutingMissingArtifactOutcome.DuplicateSuppressed:
+                RoutingValidation.Require(
+                    delivery.State == PlannedDeliveryState.Skipped &&
+                    delivery.CompletedUtc == delivery.UpdatedUtc &&
+                    delivery.ArtifactErrorCode == "duplicate-fallback-suppressed",
+                    "An initial duplicate-suppressed output is inconsistent.");
+                break;
+            default:
+                throw new InvalidDataException(
+                    "A pre-resolved delivery must retain a missing-output outcome.");
+        }
+    }
+
+    private static void ValidateInitialDuplicateSuppression(
+        IReadOnlyList<PlannedDelivery> deliveries)
+    {
+        foreach (var suppressed in deliveries.Where(item =>
+                     item.ArtifactOutcome == RoutingMissingArtifactOutcome.DuplicateSuppressed))
+        {
+            RoutingValidation.Require(deliveries.Any(candidate =>
+                    candidate.DeliveryId != suppressed.DeliveryId &&
+                    candidate.DeliveryKey == suppressed.DeliveryKey &&
+                    candidate.State != PlannedDeliveryState.Skipped &&
+                    (candidate.Route.Priority < suppressed.Route.Priority ||
+                     candidate.Route.Priority == suppressed.Route.Priority &&
+                     candidate.Route.Order < suppressed.Route.Order)),
+                "A duplicate-suppressed initial delivery has no surviving higher-precedence sibling.");
+        }
+    }
+
     private static void ValidateInitialDelivery(PlannedDelivery delivery)
     {
         ValidateDelivery(delivery);
@@ -1585,6 +1995,10 @@ internal static class RoutingOutboxModel
         RoutingValidation.Require(next.UpdatedUtc >= previous.UpdatedUtc,
             "A delivery transition moved its timestamp backwards.");
         if (previous == next) return;
+        if (previous with { IntentionalDuplicate = next.IntentionalDuplicate } == next)
+        {
+            return;
+        }
         RoutingValidation.Require(IsLegalDeliveryStateTransition(previous.State, next.State),
             "A delivery state transition is invalid.");
         var resolvingMissing = previous.State == PlannedDeliveryState.WaitingForArtifact &&
@@ -1900,6 +2314,9 @@ internal static class RoutingOutboxModel
         RoutingValidation.Require(Enum.IsDefined(output.Kind),
             "A routing output kind is unsupported.");
         RoutingValidation.RequireSha256(output.Revision, "output revision");
+        RoutingValidation.Require(output.Revision.All(character =>
+                character is >= '0' and <= '9' or >= 'a' and <= 'f'),
+            "The output revision must use canonical lowercase SHA-256 text.");
     }
 
     private static void RequireCurrentAttempt(PlannedDelivery delivery, Guid attemptId)

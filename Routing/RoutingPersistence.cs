@@ -62,7 +62,8 @@ internal sealed class RoutingSnapshotStore
 
 internal sealed class RoutingOutboxStore
 {
-    internal const int CurrentSchemaVersion = 1;
+    // Version 2 adds immutable RoutingPlanDecision headers for every evaluated source.
+    internal const int CurrentSchemaVersion = 2;
     internal const int MaximumDocumentBytes = 8 * 1024 * 1024;
     internal const string FileName = "outbox.json";
 
@@ -143,6 +144,7 @@ internal sealed class RoutingOutboxStore
     {
         RoutingValidation.Require(document.Generation == 1 &&
                                   document.CreatedUtc == document.UpdatedUtc &&
+                                  document.Plans.Count == 0 &&
                                   document.Deliveries.Count == 0 &&
                                   document.FileDispositions.Count == 0,
             "The first routing outbox must be the canonical empty document.");

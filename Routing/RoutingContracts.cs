@@ -176,6 +176,44 @@ internal enum RoutingNeedsAttentionResolution
     RetryOrRebuild
 }
 
+/// <summary>Immutable evidence for an output decision made before a plan first became visible.</summary>
+internal sealed record RoutingImmediateMissingResolution(
+    Guid DeliveryId,
+    RoutingOutputReference RequestedOutput,
+    RoutingMissingArtifactOutcome Outcome,
+    RoutingOutputReference EffectiveOutput,
+    PlannedDeliveryState State,
+    string ErrorCode);
+
+/// <summary>
+/// Durable header for every source evaluation, including a no-match/no-work decision. It pins the
+/// route generation and exact matched route ids so restart never re-evaluates a source against
+/// newer configuration. Latent duplicate authorization is retained for collisions that appear
+/// only after pending or missing outputs fall back to the original.
+/// </summary>
+internal sealed record RoutingPlanDecision(
+    Guid PlanId,
+    string SourceClipId,
+    long RoutingGeneration,
+    IReadOnlyList<Guid> MatchedRouteIds,
+    IReadOnlyList<RoutingImmediateMissingResolution> InitialMissingResolutions,
+    IReadOnlyList<IntentionalDuplicateProvenance> LatentDuplicateAuthorizations,
+    DateTimeOffset CreatedUtc)
+{
+    public bool Equals(RoutingPlanDecision? other) =>
+        ReferenceEquals(this, other) ||
+        other is not null && PlanId == other.PlanId && SourceClipId == other.SourceClipId &&
+        RoutingGeneration == other.RoutingGeneration && CreatedUtc == other.CreatedUtc &&
+        RoutingStructural.SequenceEqual(MatchedRouteIds, other.MatchedRouteIds) &&
+        RoutingStructural.SequenceEqual(InitialMissingResolutions, other.InitialMissingResolutions) &&
+        RoutingStructural.SequenceEqual(
+            LatentDuplicateAuthorizations, other.LatentDuplicateAuthorizations);
+
+    public override int GetHashCode() => RoutingStructural.Hash(
+        PlanId, SourceClipId, RoutingGeneration, MatchedRouteIds, InitialMissingResolutions,
+        LatentDuplicateAuthorizations, CreatedUtc);
+}
+
 internal sealed record PlannedDelivery(
     Guid DeliveryId,
     Guid PlanId,
@@ -264,6 +302,7 @@ internal sealed record PlannedFileDisposition(
 internal sealed record RoutingOutboxDocument(
     int SchemaVersion,
     long Generation,
+    IReadOnlyList<RoutingPlanDecision> Plans,
     IReadOnlyList<PlannedDelivery> Deliveries,
     IReadOnlyList<PlannedFileDisposition> FileDispositions,
     DateTimeOffset CreatedUtc,
@@ -274,11 +313,12 @@ internal sealed record RoutingOutboxDocument(
         other is not null && SchemaVersion == other.SchemaVersion &&
         Generation == other.Generation && CreatedUtc == other.CreatedUtc &&
         UpdatedUtc == other.UpdatedUtc &&
+        RoutingStructural.SequenceEqual(Plans, other.Plans) &&
         RoutingStructural.SequenceEqual(Deliveries, other.Deliveries) &&
         RoutingStructural.SequenceEqual(FileDispositions, other.FileDispositions);
 
     public override int GetHashCode() => RoutingStructural.Hash(
-        SchemaVersion, Generation, Deliveries, FileDispositions, CreatedUtc, UpdatedUtc);
+        SchemaVersion, Generation, Plans, Deliveries, FileDispositions, CreatedUtc, UpdatedUtc);
 }
 
 internal enum RoutingDocumentLoadStatus

@@ -12,9 +12,10 @@ internal static class RoutingFoundationTests
         AssertMissingArtifactOutcomesSurviveRestart(testRoot);
         AssertSelectiveMissingArtifactResolution(testRoot);
         AssertPlanFallbackCollisionsSurviveRestart(testRoot);
-        AssertIntentionalDuplicateProvenance();
+        AssertIntentionalDuplicateProvenance(testRoot);
         AssertDeliveryAndDispositionRecovery();
         AssertOutboxPersistenceAndRecovery(testRoot);
+        AssertOutboxSchemaVersionIsExplicit(testRoot);
         AssertAncestorReparsePointsAreRejected(testRoot);
     }
 
@@ -351,13 +352,12 @@ internal static class RoutingFoundationTests
             "Uploaded filing must treat duplicate suppression as settled after one confirmed delivery.");
         var deliberateMembers = restarted.Deliveries
             .Where(item => item.PlanId == deliberatePlan).ToArray();
-        Assert(deliberateMembers.All(item =>
-                   item.State == PlannedDeliveryState.Ready &&
-                   item.IntentionalDuplicate is not null &&
-                   item.IntentionalDuplicate.DeliveryKey == item.DeliveryKey) &&
-               deliberateMembers.Select(item => item.IntentionalDuplicate!.GroupId)
-                   .Distinct().Count() == 1,
-            "Exact deliver-twice proof must be atomically rebound to the fallback output key.");
+        Assert(deliberateMembers.Single(item => item.Route.RouteId == firstRoute.RouteId).State ==
+                   PlannedDeliveryState.Ready &&
+               deliberateMembers.Single(item => item.Route.RouteId == secondRoute.RouteId)
+                   .ArtifactOutcome == RoutingMissingArtifactOutcome.DuplicateSuppressed &&
+               deliberateMembers.All(item => item.IntentionalDuplicate is null),
+            "Authorization for a requested rendition key must not be rebound to a different fallback key.");
     }
 
     private static void AssertSelectiveMissingArtifactResolution(string testRoot)
@@ -411,7 +411,7 @@ internal static class RoutingFoundationTests
             "A failure report must name an exact waiting output reference from the plan.");
     }
 
-    private static void AssertIntentionalDuplicateProvenance()
+    private static void AssertIntentionalDuplicateProvenance(string testRoot)
     {
         var empty = RoutingOutboxModel.CreateEmpty(At(0));
         var planId = Guid.NewGuid();
@@ -442,6 +442,29 @@ internal static class RoutingFoundationTests
             [], At(1));
         Assert(planned.Deliveries.Select(item => item.ProviderIdempotencyKey).Distinct().Count() == 2,
             "Deliver twice must persist two stable, independent planned-delivery ids.");
+
+        var alteredProof = proof with { ConfirmedUtc = At(1) };
+        AssertThrows<InvalidDataException>(() => RoutingOutboxModel.Validate(planned with
+            {
+                Deliveries = planned.Deliveries.Select(item => item with
+                {
+                    IntentionalDuplicate = alteredProof
+                }).ToArray()
+            }),
+            "An attached proof must exactly match immutable same-plan authorization evidence.");
+
+        var persistenceRoot = Path.Combine(testRoot, "duplicate-proof-load-boundary");
+        Directory.CreateDirectory(persistenceRoot);
+        var store = new RoutingOutboxStore(
+            Path.Combine(persistenceRoot, RoutingOutboxStore.FileName));
+        _ = store.LoadOrCreateAsync(At(0)).GetAwaiter().GetResult();
+        _ = store.SaveAsync(planned, empty.Generation).GetAwaiter().GetResult();
+        var persistedJson = JsonNode.Parse(File.ReadAllText(store.Path))!.AsObject();
+        persistedJson["plans"]!.AsArray()[0]!.AsObject()["latentDuplicateAuthorizations"] =
+            new JsonArray();
+        File.WriteAllText(store.Path, persistedJson.ToJsonString());
+        Assert(store.Load().Status == RoutingDocumentLoadStatus.Invalid,
+            "Loading must reject delivery proof removed from its immutable plan header.");
 
         var wrongRoutes = proof with { SecondRouteId = Guid.NewGuid() };
         AssertThrows<InvalidDataException>(() => RoutingOutboxModel.AppendPlan(empty, planId,
@@ -534,6 +557,57 @@ internal static class RoutingFoundationTests
             "Startup must durably persist conservative outbox recovery before returning.");
         Assert(!Directory.EnumerateFiles(root, ".outbox.json.*.tmp").Any(),
             "Atomic outbox saves must clean their exact owned temporary file.");
+    }
+
+    private static void AssertOutboxSchemaVersionIsExplicit(string testRoot)
+    {
+        var root = Path.Combine(testRoot, "outbox-schema-version");
+        Directory.CreateDirectory(root);
+        var store = new RoutingOutboxStore(Path.Combine(root, RoutingOutboxStore.FileName));
+        var empty = store.LoadOrCreateAsync(At(0)).GetAwaiter().GetResult();
+        var plan = Guid.NewGuid();
+        var delivery = Delivery(
+            plan,
+            "clip-legacy-outbox",
+            RouteReference(Guid.NewGuid(), Guid.NewGuid(), "Legacy outbox route"),
+            'a');
+        var planned = RoutingOutboxModel.AppendPlan(empty, plan, [delivery], [], At(1));
+        _ = store.SaveAsync(planned, empty.Generation).GetAwaiter().GetResult();
+
+        var legacy = JsonNode.Parse(File.ReadAllText(store.Path))!.AsObject();
+        Assert(legacy["schemaVersion"]!.GetValue<int>() == 2 &&
+               legacy["plans"]!.AsArray().Count == 1,
+            "Plan-header outboxes must serialize as schema 2 with their durable decision.");
+        legacy["schemaVersion"] = 1;
+        legacy.Remove("plans");
+        File.WriteAllText(store.Path, legacy.ToJsonString());
+        var legacyBytes = File.ReadAllBytes(store.Path);
+
+        var loaded = store.Load();
+        Assert(loaded.Status == RoutingDocumentLoadStatus.UnsupportedSchema &&
+               loaded.Document is null && File.ReadAllBytes(store.Path).SequenceEqual(legacyBytes),
+            "The pre-plan-header outbox shape must be classified as an explicit older schema.");
+
+        legacy["schemaVersion"] = RoutingOutboxStore.CurrentSchemaVersion + 1;
+        File.WriteAllText(store.Path, legacy.ToJsonString());
+        Assert(store.Load().Status == RoutingDocumentLoadStatus.UnsupportedSchema,
+            "A future outbox schema must fail closed as unsupported.");
+
+        var noOpRoot = Path.Combine(testRoot, "outbox-missing-plan-header");
+        Directory.CreateDirectory(noOpRoot);
+        var noOpStore = new RoutingOutboxStore(
+            Path.Combine(noOpRoot, RoutingOutboxStore.FileName));
+        var noOpEmpty = noOpStore.LoadOrCreateAsync(At(2)).GetAwaiter().GetResult();
+        var noOpProposal = new RoutingPlanProposal(
+            Guid.NewGuid(), "clip-no-op-schema", 1, [], [], null, [], [],
+            RequiresAtomicResolvedAppend: false);
+        var noOp = RoutingOutboxModel.AppendEvaluatedPlan(noOpEmpty, noOpProposal, At(3));
+        _ = noOpStore.SaveAsync(noOp, noOpEmpty.Generation).GetAwaiter().GetResult();
+        var missingPlans = JsonNode.Parse(File.ReadAllText(noOpStore.Path))!.AsObject();
+        missingPlans.Remove("plans");
+        File.WriteAllText(noOpStore.Path, missingPlans.ToJsonString());
+        Assert(noOpStore.Load().Status == RoutingDocumentLoadStatus.Invalid,
+            "Schema 2 must reject a missing plan collection even when the decision has no work.");
     }
 
     private static void AssertAncestorReparsePointsAreRejected(string testRoot)

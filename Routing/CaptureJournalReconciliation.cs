@@ -21,7 +21,9 @@ internal sealed record CaptureJournalReconciliationItem(
         MediaValidated &&
         Document is not null &&
         Document.State is CaptureJournalState.OriginalCommitted or
-            CaptureJournalState.RenditionsReady;
+            CaptureJournalState.CameraPending or
+            CaptureJournalState.RenditionsReady or
+            CaptureJournalState.RenditionsFailed;
 }
 
 internal interface ICaptureJournalReconciliationHandler
