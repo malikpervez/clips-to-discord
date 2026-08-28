@@ -714,6 +714,7 @@ try
     CaptureFoundationTests.Run(Path.Combine(temporaryRoot, "capture-foundation"));
     TraceSmokeStep("ClipCord 2.0 routing foundation");
     RoutingFoundationTests.Run(Path.Combine(temporaryRoot, "routing-foundation"));
+    RoutingArchiveTests.Run(Path.Combine(temporaryRoot, "routing-archive"));
     RoutingCaptureJournalTests.Run(Path.Combine(temporaryRoot, "routing-journal"));
     RoutingEvaluatorTests.Run(Path.Combine(temporaryRoot, "routing-evaluator"));
     TraceSmokeStep("ClipCord 2.0 routing migration");

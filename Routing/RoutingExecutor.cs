@@ -166,7 +166,9 @@ internal sealed class RoutingOutboxExecutor : IDisposable
     private readonly Func<Guid> _createAttemptId;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly int _maximumSideEffectsPerRun;
+    private readonly int _maximumRecoveryInspectionsPerRun;
     private readonly SemaphoreSlim _runGate = new(1, 1);
+    private (DateTimeOffset CreatedUtc, Guid DispositionId)? _lastRecoveryInspection;
     private bool _startupRecoveryApplied;
     private bool _disposed;
 
@@ -178,16 +180,22 @@ internal sealed class RoutingOutboxExecutor : IDisposable
         Func<bool> canExecute,
         int maximumSideEffectsPerRun = 32,
         Func<Guid>? createAttemptId = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        int? maximumRecoveryInspectionsPerRun = null)
     {
         if (maximumSideEffectsPerRun is < 1 or > 256)
             throw new ArgumentOutOfRangeException(nameof(maximumSideEffectsPerRun));
+        var recoveryBudget = maximumRecoveryInspectionsPerRun ??
+                             Math.Min(8, maximumSideEffectsPerRun);
+        if (recoveryBudget is < 1 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(maximumRecoveryInspectionsPerRun));
         _outboxStore = outboxStore ?? throw new ArgumentNullException(nameof(outboxStore));
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         _artifactResolver = artifactResolver ?? throw new ArgumentNullException(nameof(artifactResolver));
         _libraryFiler = libraryFiler ?? throw new ArgumentNullException(nameof(libraryFiler));
         _canExecute = canExecute ?? throw new ArgumentNullException(nameof(canExecute));
         _maximumSideEffectsPerRun = maximumSideEffectsPerRun;
+        _maximumRecoveryInspectionsPerRun = recoveryBudget;
         _createAttemptId = createAttemptId ?? Guid.NewGuid;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
@@ -218,10 +226,16 @@ internal sealed class RoutingOutboxExecutor : IDisposable
             var fileAttempts = 0;
             var recoveryInspections = 0;
             var inspectedRecovery = new HashSet<Guid>();
-            var transitionBudget = checked(_maximumSideEffectsPerRun * 4 + 64);
+            var transitionBudget = checked(
+                _maximumSideEffectsPerRun * 4 + _maximumRecoveryInspectionsPerRun + 64);
 
+            // Recovery is a bounded read-only inspection lane, not part of the external-side-effect
+            // budget. Runnable work leads and recovery catches up one-for-one, so large hash checks
+            // cannot enter an upload's critical path and a steady upload queue cannot starve them.
             while (_canExecute() &&
-                   providerAttempts + fileAttempts + recoveryInspections < _maximumSideEffectsPerRun &&
+                   (providerAttempts + fileAttempts < _maximumSideEffectsPerRun ||
+                    recoveryInspections < _maximumRecoveryInspectionsPerRun &&
+                    recoveryInspections < providerAttempts + fileAttempts) &&
                    transitionBudget-- > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -229,15 +243,16 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                         UtcNow(), cancellationToken)
                     .ConfigureAwait(false);
 
-                var recovery = current.FileDispositions
-                    .Where(item => item.State == PlannedFileDispositionState.RecoveryPending &&
-                                   !inspectedRecovery.Contains(item.DispositionId))
-                    .OrderBy(item => item.CreatedUtc)
-                    .ThenBy(item => item.DispositionId)
-                    .FirstOrDefault();
+                var sideEffectAttempts = providerAttempts + fileAttempts;
+                var hasRunnableWork = HasRunnableWork(current);
+                var recovery = recoveryInspections < _maximumRecoveryInspectionsPerRun &&
+                               (!hasRunnableWork || recoveryInspections < sideEffectAttempts)
+                    ? SelectRecoveryCandidate(current, inspectedRecovery)
+                    : null;
                 if (recovery is not null)
                 {
                     inspectedRecovery.Add(recovery.DispositionId);
+                    _lastRecoveryInspection = (recovery.CreatedUtc, recovery.DispositionId);
                     recoveryInspections++;
                     var recoveryAttemptId = recovery.CurrentAttemptId ??
                                             throw new InvalidDataException(
@@ -275,6 +290,10 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                     }
                     continue;
                 }
+
+                // A final recovery inspection may catch up after the side-effect lane reaches its
+                // cap, but that catch-up iteration must never admit one extra provider/file call.
+                if (sideEffectAttempts >= _maximumSideEffectsPerRun) break;
 
                 var readyDelivery = current.Deliveries
                     .Where(item => item.State == PlannedDeliveryState.Ready &&
@@ -434,6 +453,38 @@ internal sealed class RoutingOutboxExecutor : IDisposable
         {
             _runGate.Release();
         }
+    }
+
+    private bool HasRunnableWork(RoutingOutboxDocument current) =>
+        current.Deliveries.Any(item =>
+            item.State == PlannedDeliveryState.Ready && _provider.Supports(item.Destination)) ||
+        current.FileDispositions.Any(item =>
+            item.State == PlannedFileDispositionState.Ready ||
+            item.State == PlannedFileDispositionState.WaitingForDependencies &&
+            DependenciesSettled(current, item));
+
+    private PlannedFileDisposition? SelectRecoveryCandidate(
+        RoutingOutboxDocument current,
+        IReadOnlySet<Guid> inspectedRecovery)
+    {
+        var candidates = current.FileDispositions
+            .Where(item => item.State == PlannedFileDispositionState.RecoveryPending &&
+                           !inspectedRecovery.Contains(item.DispositionId))
+            .OrderBy(item => item.CreatedUtc)
+            .ThenBy(item => item.DispositionId)
+            .ToArray();
+        if (candidates.Length == 0) return null;
+
+        if (_lastRecoveryInspection is { } cursor)
+        {
+            var next = candidates.FirstOrDefault(item =>
+                item.CreatedUtc > cursor.CreatedUtc ||
+                item.CreatedUtc == cursor.CreatedUtc &&
+                item.DispositionId.CompareTo(cursor.DispositionId) > 0);
+            if (next is not null) return next;
+        }
+
+        return candidates[0];
     }
 
     private async Task<PlannedDelivery?> TryStartDeliveryAsync(

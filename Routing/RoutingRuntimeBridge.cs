@@ -369,6 +369,8 @@ internal enum RoutingRuntimePlanStatus
     Disabled,
     IgnoredNonSourceEvent,
     AlreadyPlanned,
+    AlreadyArchived,
+    CapacityNeedsAttention,
     Planned
 }
 
@@ -476,16 +478,33 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
                 null);
         }
         var snapshot = loadedSnapshot.Document;
-        var current = await _outboxStore.LoadOrCreateAsync(
-                _utcNow(),
-                cancellationToken)
+        var admission = await _outboxStore.PrepareForPlanningAsync(
+                _utcNow(), cancellationToken)
             .ConfigureAwait(false);
+        var current = admission.Document;
         if (TryFindExistingPlan(current, sourceClipId, out var existingPlan))
         {
+            ValidateArchiveOverlap(current, sourceClipId, existingPlan, cancellationToken);
             return new RoutingRuntimePlanResult(
                 RoutingRuntimePlanStatus.AlreadyPlanned,
                 sourceClipId,
                 existingPlan,
+                current.Generation);
+        }
+        if (TryFindArchivedPlan(sourceClipId, cancellationToken, out existingPlan))
+        {
+            return new RoutingRuntimePlanResult(
+                RoutingRuntimePlanStatus.AlreadyArchived,
+                sourceClipId,
+                existingPlan,
+                current.Generation);
+        }
+        if (!admission.CanAcceptNewPlan)
+        {
+            return new RoutingRuntimePlanResult(
+                RoutingRuntimePlanStatus.CapacityNeedsAttention,
+                sourceClipId,
+                null,
                 current.Generation);
         }
 
@@ -512,8 +531,17 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
             }
             if (TryFindExistingPlan(current, sourceClipId, out existingPlan))
             {
+                ValidateArchiveOverlap(current, sourceClipId, existingPlan, cancellationToken);
                 return new RoutingRuntimePlanResult(
                     RoutingRuntimePlanStatus.AlreadyPlanned,
+                    sourceClipId,
+                    existingPlan,
+                    current.Generation);
+            }
+            if (TryFindArchivedPlan(sourceClipId, cancellationToken, out existingPlan))
+            {
+                return new RoutingRuntimePlanResult(
+                    RoutingRuntimePlanStatus.AlreadyArchived,
                     sourceClipId,
                     existingPlan,
                     current.Generation);
@@ -526,6 +554,15 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
                 current,
                 proposal,
                 appendUtc);
+            if (_outboxStore.MeasureSerializedBytes(candidate) >
+                _outboxStore.PlanningAdmissionLimitBytes)
+            {
+                return new RoutingRuntimePlanResult(
+                    RoutingRuntimePlanStatus.CapacityNeedsAttention,
+                    sourceClipId,
+                    null,
+                    current.Generation);
+            }
             try
             {
                 if (!activationPermit.SamePermit(_featureGate.Inspect()))
@@ -829,5 +866,42 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
         }
         planId = planIds.SingleOrDefault();
         return planIds.Length == 1;
+    }
+
+    private bool TryFindArchivedPlan(
+        string sourceClipId,
+        CancellationToken cancellationToken,
+        out Guid planId)
+    {
+        var archived = _outboxStore.ArchiveStore.LoadBySource(sourceClipId, cancellationToken);
+        if (archived.Status == RoutingDocumentLoadStatus.Missing)
+        {
+            planId = Guid.Empty;
+            return false;
+        }
+        if (!archived.LoadedFromDisk || archived.Document is null)
+        {
+            throw new InvalidDataException(
+                $"The routing plan archive cannot be trusted ({archived.Status}).");
+        }
+        planId = archived.Document.Plan.PlanId;
+        return true;
+    }
+
+    private void ValidateArchiveOverlap(
+        RoutingOutboxDocument current,
+        string sourceClipId,
+        Guid planId,
+        CancellationToken cancellationToken)
+    {
+        var archived = _outboxStore.ArchiveStore.LoadBySource(sourceClipId, cancellationToken);
+        if (archived.Status == RoutingDocumentLoadStatus.Missing) return;
+        if (!archived.LoadedFromDisk || archived.Document is null)
+            throw new InvalidDataException(
+                $"The overlapping routing plan archive cannot be trusted ({archived.Status}).");
+        var expected = RoutingArchiveModel.Create(current, planId);
+        if (archived.Document != expected)
+            throw new InvalidDataException(
+                "The hot and archived routing decisions for a source clip do not match.");
     }
 }

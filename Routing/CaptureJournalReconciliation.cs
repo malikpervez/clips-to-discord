@@ -118,7 +118,27 @@ internal static class CaptureJournalStartupReconciler
                 load.Status,
                 load.Document,
                 artifactStatuses);
-            await handler.ReconcileAsync(item, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await handler.ReconcileAsync(item, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException or InvalidDataException or
+                    RoutingConcurrencyException)
+            {
+                // A handler can observe cancellation and then surface a data/CAS failure. Cancellation
+                // still owns the operation and must not be converted into a successfully advanced page.
+                cancellationToken.ThrowIfCancellationRequested();
+                // A corrupt or concurrently-changing routing record is local to this clip. Keep
+                // advancing the durable page cursor so one bad item cannot starve every later clip.
+                Log.Error(
+                    $"ClipCord could not reconcile capture journal {item.ClipId}; startup scanning will continue.",
+                    exception);
+            }
             inspected++;
             nextCursor = clipId;
             if (load.LoadedFromDisk) loaded++;

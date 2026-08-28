@@ -1503,18 +1503,73 @@ internal static class RoutingOutboxModel
             var members = group.ToArray();
             if (members.Length == 1) continue;
 
-            if (members.Length == 2 && TryGetExactPairAuthorization(
-                    originalById[members[0].DeliveryId],
-                    originalById[members[1].DeliveryId],
-                    group.Key,
-                    latentAuthorizations,
-                    out var proof))
+            var authorizedPairs = new List<(
+                PlannedDelivery First,
+                PlannedDelivery Second,
+                IntentionalDuplicateProvenance Proof)>();
+            for (var firstIndex = 0; firstIndex < members.Length - 1; firstIndex++)
             {
+                for (var secondIndex = firstIndex + 1;
+                     secondIndex < members.Length;
+                     secondIndex++)
+                {
+                    if (TryGetExactPairAuthorization(
+                            originalById[members[firstIndex].DeliveryId],
+                            originalById[members[secondIndex].DeliveryId],
+                            group.Key,
+                            latentAuthorizations,
+                            out var pairProof))
+                    {
+                        authorizedPairs.Add((
+                            members[firstIndex],
+                            members[secondIndex],
+                            pairProof));
+                    }
+                }
+            }
+            RoutingValidation.Require(authorizedPairs.Count <= 1,
+                "Overlapping deliver-twice proofs cannot authorize one fallback collision group.");
+
+            // Exact Deliver-twice evidence remains binding if more unapproved fallbacks later
+            // converge on its key. Otherwise a provider-entered member is authoritative: a later
+            // rendition fallback must never suppress work that may already exist remotely. With no
+            // proof or attempted member, frozen route precedence is the deterministic winner.
+            var authoritative = members.Where(IsFallbackCollisionAuthoritative).ToArray();
+            if (authorizedPairs.Count == 1)
+            {
+                var authorized = authorizedPairs[0];
+                var authorizedIds = new HashSet<Guid>
+                {
+                    authorized.First.DeliveryId,
+                    authorized.Second.DeliveryId
+                };
+                RoutingValidation.Require(authoritative.All(member =>
+                        authorizedIds.Contains(member.DeliveryId)),
+                    "A deliver-twice proof cannot suppress a different provider attempt.");
                 for (var index = 0; index < result.Length; index++)
                 {
-                    if (members.Any(member => member.DeliveryId == result[index].DeliveryId))
-                        result[index] = result[index] with { IntentionalDuplicate = proof };
+                    if (authorizedIds.Contains(result[index].DeliveryId))
+                    {
+                        result[index] = result[index] with
+                        {
+                            IntentionalDuplicate = authorized.Proof
+                        };
+                    }
                 }
+                foreach (var extra in members.Where(member =>
+                             !authorizedIds.Contains(member.DeliveryId)))
+                {
+                    SuppressFallbackDuplicate(result, extra.DeliveryId, now);
+                }
+                continue;
+            }
+
+            if (authoritative.Length > 0)
+            {
+                RoutingValidation.Require(authoritative.Length == 1,
+                    "Multiple fallback duplicates reached a provider without exact user authorization.");
+                foreach (var loser in members.Except(authoritative))
+                    SuppressFallbackDuplicate(result, loser.DeliveryId, now);
                 continue;
             }
 
@@ -1524,28 +1579,38 @@ internal static class RoutingOutboxModel
                 .ThenBy(item => item.Route.RouteId)
                 .First();
             foreach (var loser in members.Where(item => item.DeliveryId != winner.DeliveryId))
-            {
-                RoutingValidation.Require(loser.State is not PlannedDeliveryState.Sending and
-                    not PlannedDeliveryState.Delivered and not PlannedDeliveryState.Failed and
-                    not PlannedDeliveryState.DeliveryUnknown,
-                    "A fallback duplicate collision must be resolved before a provider attempt starts.");
-                for (var index = 0; index < result.Length; index++)
-                {
-                    if (result[index].DeliveryId != loser.DeliveryId) continue;
-                    result[index] = result[index] with
-                    {
-                        State = PlannedDeliveryState.Skipped,
-                        ArtifactOutcome = RoutingMissingArtifactOutcome.DuplicateSuppressed,
-                        ArtifactErrorCode = "duplicate-fallback-suppressed",
-                        CompletedUtc = now,
-                        IntentionalDuplicate = null,
-                        UpdatedUtc = now
-                    };
-                }
-            }
+                SuppressFallbackDuplicate(result, loser.DeliveryId, now);
         }
         return result;
     }
+
+    private static void SuppressFallbackDuplicate(
+        PlannedDelivery[] deliveries,
+        Guid deliveryId,
+        DateTimeOffset now)
+    {
+        for (var index = 0; index < deliveries.Length; index++)
+        {
+            if (deliveries[index].DeliveryId != deliveryId) continue;
+            RoutingValidation.Require(!IsFallbackCollisionAuthoritative(deliveries[index]),
+                "A fallback duplicate collision cannot suppress a provider attempt.");
+            deliveries[index] = deliveries[index] with
+            {
+                State = PlannedDeliveryState.Skipped,
+                ArtifactOutcome = RoutingMissingArtifactOutcome.DuplicateSuppressed,
+                ArtifactErrorCode = "duplicate-fallback-suppressed",
+                CompletedUtc = now,
+                IntentionalDuplicate = null,
+                UpdatedUtc = now
+            };
+            return;
+        }
+        throw new InvalidDataException("The fallback duplicate delivery disappeared.");
+    }
+
+    private static bool IsFallbackCollisionAuthoritative(PlannedDelivery delivery) =>
+        delivery.State is PlannedDeliveryState.Sending or PlannedDeliveryState.Delivered or
+            PlannedDeliveryState.Failed or PlannedDeliveryState.DeliveryUnknown;
 
     private static bool IsDuplicateRelevant(PlannedDelivery delivery) =>
         delivery.State is not PlannedDeliveryState.Skipped and

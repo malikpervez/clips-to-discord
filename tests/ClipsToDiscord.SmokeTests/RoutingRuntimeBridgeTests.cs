@@ -21,6 +21,8 @@ internal static class RoutingRuntimeBridgeTests
             await AssertDefaultBridgeIsInertAsync(Path.Combine(root, "disabled"));
             await AssertRouteSnapshotLossFailsClosedAsync(Path.Combine(root, "snapshot-loss"));
             await AssertPlanIsFrozenOnceAndSurvivesRestartAsync(Path.Combine(root, "restart"));
+            await AssertArchivedPlanPreventsReplanningAsync(Path.Combine(root, "archived-restart"));
+            await AssertCapacityAttentionIsTypedAsync(Path.Combine(root, "capacity-attention"));
             await AssertEveryJournalStatePlansWithStableOutputsAsync(Path.Combine(root, "states"));
             await AssertReconciliationSkipsUnreadableBeforeValidAsync(Path.Combine(root, "reconcile-skip"));
             await AssertGateRevocationDuringPlanningPreventsAppendAsync(Path.Combine(root, "gate-revoke"));
@@ -550,6 +552,69 @@ internal static class RoutingRuntimeBridgeTests
                fixture.OutboxStore.Load().Document!.Deliveries.Single().Route.RoutingGeneration ==
                fixture.Snapshot.Generation,
             "Editing routes after planning must not re-resolve or rewrite an existing source plan.");
+    }
+
+    private static async Task AssertArchivedPlanPreventsReplanningAsync(string root)
+    {
+        var fixture = await CreateFixtureAsync(root, reactionCamera: false);
+        var empty = await fixture.OutboxStore.LoadOrCreateAsync(Now);
+        var archivedPlanId = Guid.NewGuid();
+        var proposal = new RoutingPlanProposal(
+            archivedPlanId,
+            fixture.Item.ClipId,
+            fixture.Snapshot.Generation,
+            [], [], null, [], [],
+            RequiresAtomicResolvedAppend: false);
+        var hot = RoutingOutboxModel.AppendEvaluatedPlan(
+            empty, proposal, Now.AddSeconds(1));
+        hot = await fixture.OutboxStore.SaveAsync(hot, empty.Generation);
+        var archive = RoutingArchiveModel.Create(hot, archivedPlanId);
+        await fixture.OutboxStore.ArchiveStore.PersistExactAsync(archive);
+
+        var overlapPlanner = new RecordingPlanner();
+        var overlap = await fixture.CreateBridge(overlapPlanner).PlanAsync(SourceEvent(fixture.Item));
+        Assert(overlap.Status == RoutingRuntimePlanStatus.AlreadyPlanned &&
+               overlap.PlanId == archivedPlanId && overlapPlanner.Calls == 0,
+            "An archive-first crash overlap must still reuse the exact hot plan without re-evaluation.");
+
+        var compacted = await fixture.OutboxStore.CompactTerminalPlansAsync(Now.AddSeconds(2));
+        Assert(compacted.ArchivedPlanCount == 1 && compacted.Document.Plans.Count == 0,
+            "A terminal no-op plan must compact after its immutable archive is durable.");
+        var archiveOnlyPlanner = new RecordingPlanner();
+        var archiveOnly = await fixture.CreateBridge(archiveOnlyPlanner)
+            .PlanAsync(SourceEvent(fixture.Item));
+        Assert(archiveOnly.Status == RoutingRuntimePlanStatus.AlreadyArchived &&
+               archiveOnly.PlanId == archivedPlanId && archiveOnlyPlanner.Calls == 0 &&
+               fixture.OutboxStore.Load().Document!.Plans.Count == 0,
+            "An archive-only source tombstone must permanently prevent replanning and reupload.");
+
+        File.WriteAllText(
+            fixture.OutboxStore.ArchiveStore.PathForSource(fixture.Item.ClipId),
+            "{ corrupt archive");
+        var corruptPlanner = new RecordingPlanner();
+        await AssertThrowsAsync<InvalidDataException>(
+            () => fixture.CreateBridge(corruptPlanner).PlanAsync(SourceEvent(fixture.Item)),
+            "A corrupt source tombstone must fail closed instead of treating the clip as unplanned.");
+        Assert(corruptPlanner.Calls == 0 &&
+               fixture.OutboxStore.Load().Document!.Plans.Count == 0,
+            "A corrupt archive must prevent both planner execution and replacement outbox work.");
+    }
+
+    private static async Task AssertCapacityAttentionIsTypedAsync(string root)
+    {
+        var fixture = await CreateFixtureAsync(root, reactionCamera: false);
+        fixture = fixture with
+        {
+            OutboxStore = new RoutingOutboxStore(
+                fixture.OutboxStore.Path, planningAdmissionBytes: 1024)
+        };
+        var planner = new RecordingPlanner();
+        var result = await fixture.CreateBridge(planner).PlanAsync(SourceEvent(fixture.Item));
+        Assert(result.Status == RoutingRuntimePlanStatus.CapacityNeedsAttention &&
+               planner.Calls == 1 &&
+               fixture.OutboxStore.Load().Document!.Plans.Count == 0,
+            "A proposal that cannot fit below the admission ceiling must return typed capacity " +
+            "attention without appending partial work.");
     }
 
     private static async Task AssertNonSourceEventsCannotCreatePlansAsync(string root)

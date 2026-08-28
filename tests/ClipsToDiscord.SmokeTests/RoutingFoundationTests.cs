@@ -12,6 +12,7 @@ internal static class RoutingFoundationTests
         AssertMissingArtifactOutcomesSurviveRestart(testRoot);
         AssertSelectiveMissingArtifactResolution(testRoot);
         AssertPlanFallbackCollisionsSurviveRestart(testRoot);
+        AssertAttemptedSiblingWinsLateFallbackCollision(testRoot);
         AssertIntentionalDuplicateProvenance(testRoot);
         AssertDeliveryAndDispositionRecovery();
         AssertOutboxPersistenceAndRecovery(testRoot);
@@ -358,6 +359,222 @@ internal static class RoutingFoundationTests
                    .ArtifactOutcome == RoutingMissingArtifactOutcome.DuplicateSuppressed &&
                deliberateMembers.All(item => item.IntentionalDuplicate is null),
             "Authorization for a requested rendition key must not be rebound to a different fallback key.");
+    }
+
+    private static void AssertAttemptedSiblingWinsLateFallbackCollision(string testRoot)
+    {
+        foreach (var delivered in new[] { false, true })
+        {
+            var root = Path.Combine(
+                testRoot,
+                delivered ? "fallback-after-delivered" : "fallback-while-sending");
+            Directory.CreateDirectory(root);
+            var store = new RoutingOutboxStore(Path.Combine(root, RoutingOutboxStore.FileName));
+            var empty = store.LoadOrCreateAsync(At(0)).GetAwaiter().GetResult();
+            var planId = Guid.NewGuid();
+            var clipId = delivered
+                ? "clip-fallback-after-delivered"
+                : "clip-fallback-while-sending";
+            var original = Output(clipId, RoutingOutputKind.Original, '7');
+            var pendingFallback = RoutingOutboxModel.CreateDelivery(
+                Guid.NewGuid(), planId, clipId,
+                RouteReference(Guid.NewGuid(), Guid.NewGuid(), "Preferred landscape", 0, 0),
+                RoutingDestinationKind.Discord, "discord.friends",
+                Output(clipId, RoutingOutputKind.Landscape, '8'), original,
+                RoutingMissingOutputBehavior.UseOriginal, RoutingDeliveryMode.Automatic,
+                Settings(), artifactReady: false, intentionalDuplicate: null, At(0));
+            var attemptedOriginal = RoutingOutboxModel.CreateDelivery(
+                Guid.NewGuid(), planId, clipId,
+                RouteReference(Guid.NewGuid(), Guid.NewGuid(), "Original fallback route", 1, 1),
+                RoutingDestinationKind.Discord, "discord.friends", original, original,
+                RoutingMissingOutputBehavior.NeedsAttention, RoutingDeliveryMode.Automatic,
+                Settings(), artifactReady: true, intentionalDuplicate: null, At(0));
+            var appended = RoutingOutboxModel.AppendPlan(
+                empty, planId, [pendingFallback, attemptedOriginal], [], At(1));
+            _ = store.SaveAsync(appended, empty.Generation).GetAwaiter().GetResult();
+
+            var attemptId = Guid.NewGuid();
+            var sending = RoutingOutboxModel.StartDelivery(
+                appended, attemptedOriginal.DeliveryId, attemptId, At(2));
+            _ = store.SaveAsync(sending, appended.Generation).GetAwaiter().GetResult();
+            var attempted = delivered
+                ? RoutingOutboxModel.CompleteDelivery(
+                    sending,
+                    attemptedOriginal.DeliveryId,
+                    attemptId,
+                    "discord.fallback-receipt",
+                    At(3))
+                : sending;
+            if (delivered)
+            {
+                _ = store.SaveAsync(attempted, sending.Generation).GetAwaiter().GetResult();
+            }
+
+            var reconciled = RoutingOutboxModel.ReconcilePlanArtifactAvailability(
+                attempted,
+                planId,
+                [],
+                new Dictionary<RoutingOutputReference, string>
+                {
+                    [pendingFallback.RequestedOutput] = "rendition-failed"
+                },
+                At(4));
+            var winner = reconciled.Deliveries.Single(item =>
+                item.DeliveryId == attemptedOriginal.DeliveryId);
+            var suppressed = reconciled.Deliveries.Single(item =>
+                item.DeliveryId == pendingFallback.DeliveryId);
+            Assert(winner == attempted.Deliveries.Single(item =>
+                       item.DeliveryId == attemptedOriginal.DeliveryId) &&
+                   winner.State == (delivered
+                       ? PlannedDeliveryState.Delivered
+                       : PlannedDeliveryState.Sending),
+                "A delivery that reached the provider must win a later fallback collision regardless of route precedence.");
+            Assert(suppressed.State == PlannedDeliveryState.Skipped &&
+                   suppressed.ArtifactOutcome ==
+                       RoutingMissingArtifactOutcome.DuplicateSuppressed &&
+                   suppressed.ArtifactErrorCode == "duplicate-fallback-suppressed" &&
+                   suppressed.CompletedUtc == At(4) &&
+                   reconciled.Generation == attempted.Generation + 1,
+                "The unresolved fallback sibling must become one durable duplicate-suppressed record in the same generation.");
+
+            _ = store.SaveAsync(reconciled, attempted.Generation).GetAwaiter().GetResult();
+            var persisted = store.Load().Document ??
+                            throw new InvalidOperationException(
+                                "The fallback-collision outbox did not reload.");
+            Assert(persisted.Deliveries.Single(item =>
+                       item.DeliveryId == pendingFallback.DeliveryId) == suppressed,
+                "Fallback collision suppression must survive an outbox restart exactly.");
+            var replay = RoutingOutboxModel.ReconcilePlanArtifactAvailability(
+                persisted,
+                planId,
+                [],
+                new Dictionary<RoutingOutputReference, string>
+                {
+                    [pendingFallback.RequestedOutput] = "rendition-failed"
+                },
+                At(5));
+            Assert(ReferenceEquals(replay, persisted) &&
+                   replay.Generation == persisted.Generation,
+                "Replaying the same late fallback evidence must be an exact generation-preserving no-op.");
+        }
+
+        var threeWayPlanId = Guid.NewGuid();
+        const string threeWayClipId = "clip-three-way-late-fallback";
+        var threeWayOriginal = Output(threeWayClipId, RoutingOutputKind.Original, '4');
+        var originalRoute = RouteReference(
+            Guid.NewGuid(), Guid.NewGuid(), "Original already delivered", 2, 2);
+        var landscapeRoute = RouteReference(
+            Guid.NewGuid(), Guid.NewGuid(), "Authorized landscape fallback", 0, 0);
+        var portraitRoute = RouteReference(
+            Guid.NewGuid(), Guid.NewGuid(), "Unapproved portrait fallback", 1, 1);
+        var originalDelivery = RoutingOutboxModel.CreateDelivery(
+            Guid.NewGuid(), threeWayPlanId, threeWayClipId, originalRoute,
+            RoutingDestinationKind.Discord, "discord.three-way", threeWayOriginal,
+            threeWayOriginal, RoutingMissingOutputBehavior.NeedsAttention,
+            RoutingDeliveryMode.Automatic, Settings(), artifactReady: true,
+            intentionalDuplicate: null, At(0));
+        var landscapeDelivery = RoutingOutboxModel.CreateDelivery(
+            Guid.NewGuid(), threeWayPlanId, threeWayClipId, landscapeRoute,
+            RoutingDestinationKind.Discord, "discord.three-way",
+            Output(threeWayClipId, RoutingOutputKind.Landscape, '5'),
+            threeWayOriginal, RoutingMissingOutputBehavior.UseOriginal,
+            RoutingDeliveryMode.Automatic, Settings(), artifactReady: false,
+            intentionalDuplicate: null, At(0));
+        var portraitDelivery = RoutingOutboxModel.CreateDelivery(
+            Guid.NewGuid(), threeWayPlanId, threeWayClipId, portraitRoute,
+            RoutingDestinationKind.Discord, "discord.three-way",
+            Output(threeWayClipId, RoutingOutputKind.Portrait, '6'),
+            threeWayOriginal, RoutingMissingOutputBehavior.UseOriginal,
+            RoutingDeliveryMode.Automatic, Settings(), artifactReady: false,
+            intentionalDuplicate: null, At(0));
+        var proof = new IntentionalDuplicateProvenance(
+            Guid.NewGuid(),
+            IntentionalDuplicateDecision.UserConfirmedDeliverTwice,
+            new RoutingDeliveryKey("discord.three-way", threeWayOriginal),
+            originalRoute.RouteId,
+            landscapeRoute.RouteId,
+            At(0));
+        var proposal = new RoutingPlanProposal(
+            threeWayPlanId,
+            threeWayClipId,
+            1,
+            [landscapeRoute.RouteId, portraitRoute.RouteId, originalRoute.RouteId],
+            [landscapeDelivery, portraitDelivery, originalDelivery],
+            null,
+            [],
+            [proof],
+            RequiresAtomicResolvedAppend: false);
+        var threeWayInitial = RoutingOutboxModel.AppendEvaluatedPlan(
+            RoutingOutboxModel.CreateEmpty(At(0)), proposal, At(1));
+        var originalAttempt = Guid.NewGuid();
+        var originalSending = RoutingOutboxModel.StartDelivery(
+            threeWayInitial, originalDelivery.DeliveryId, originalAttempt, At(2));
+        var originalDelivered = RoutingOutboxModel.CompleteDelivery(
+            originalSending,
+            originalDelivery.DeliveryId,
+            originalAttempt,
+            "discord.three-way-receipt",
+            At(3));
+        var threeWayResolved = RoutingOutboxModel.ReconcilePlanArtifactAvailability(
+            originalDelivered,
+            threeWayPlanId,
+            [],
+            new Dictionary<RoutingOutputReference, string>
+            {
+                [landscapeDelivery.RequestedOutput] = "landscape-render-failed",
+                [portraitDelivery.RequestedOutput] = "portrait-render-failed"
+            },
+            At(4));
+        var threeWayMembers = threeWayResolved.Deliveries.ToDictionary(item => item.DeliveryId);
+        Assert(threeWayMembers[originalDelivery.DeliveryId].State ==
+                   PlannedDeliveryState.Delivered &&
+               threeWayMembers[originalDelivery.DeliveryId].IntentionalDuplicate == proof &&
+               threeWayMembers[landscapeDelivery.DeliveryId].State ==
+                   PlannedDeliveryState.Ready &&
+               threeWayMembers[landscapeDelivery.DeliveryId].ArtifactOutcome ==
+                   RoutingMissingArtifactOutcome.OriginalFallback &&
+               threeWayMembers[landscapeDelivery.DeliveryId].IntentionalDuplicate == proof &&
+               threeWayMembers[portraitDelivery.DeliveryId].State ==
+                   PlannedDeliveryState.Skipped &&
+               threeWayMembers[portraitDelivery.DeliveryId].ArtifactOutcome ==
+                   RoutingMissingArtifactOutcome.DuplicateSuppressed,
+            "A three-way late fallback must retain the one exact Deliver-twice pair and suppress only its unapproved extra.");
+
+        var overlappingProof = proof with
+        {
+            GroupId = Guid.NewGuid(),
+            SecondRouteId = portraitRoute.RouteId
+        };
+        var ambiguousInitial = threeWayInitial with
+        {
+            Plans = threeWayInitial.Plans.Select(item => item.PlanId == threeWayPlanId
+                ? item with
+                {
+                    LatentDuplicateAuthorizations = [proof, overlappingProof]
+                }
+                : item).ToArray()
+        };
+        RoutingOutboxModel.Validate(ambiguousInitial);
+        var ambiguousSending = RoutingOutboxModel.StartDelivery(
+            ambiguousInitial, originalDelivery.DeliveryId, originalAttempt, At(2));
+        var ambiguousDelivered = RoutingOutboxModel.CompleteDelivery(
+            ambiguousSending,
+            originalDelivery.DeliveryId,
+            originalAttempt,
+            "discord.ambiguous-receipt",
+            At(3));
+        AssertThrows<InvalidDataException>(() =>
+                RoutingOutboxModel.ReconcilePlanArtifactAvailability(
+                    ambiguousDelivered,
+                    threeWayPlanId,
+                    [],
+                    new Dictionary<RoutingOutputReference, string>
+                    {
+                        [landscapeDelivery.RequestedOutput] = "landscape-render-failed",
+                        [portraitDelivery.RequestedOutput] = "portrait-render-failed"
+                    },
+                    At(4)),
+            "Overlapping late Deliver-twice proofs must fail closed instead of silently choosing one authorization.");
     }
 
     private static void AssertSelectiveMissingArtifactResolution(string testRoot)

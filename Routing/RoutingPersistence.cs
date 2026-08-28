@@ -65,6 +65,9 @@ internal sealed class RoutingOutboxStore
     // Version 2 adds immutable RoutingPlanDecision headers for every evaluated source.
     internal const int CurrentSchemaVersion = 2;
     internal const int MaximumDocumentBytes = 8 * 1024 * 1024;
+    // New work stops well before the physical ceiling so existing attempts retain ample room to
+    // record receipts and failure evidence while terminal plans are archived.
+    internal const int PlanningAdmissionBytes = 4 * 1024 * 1024;
     internal const string FileName = "outbox.json";
 
     private readonly RoutingAtomicJsonStore<RoutingOutboxDocument> _store;
@@ -74,8 +77,13 @@ internal sealed class RoutingOutboxStore
     {
     }
 
-    internal RoutingOutboxStore(string path)
+    internal RoutingOutboxStore(
+        string path,
+        int planningAdmissionBytes = PlanningAdmissionBytes)
     {
+        if (planningAdmissionBytes is < 1024 or > MaximumDocumentBytes)
+            throw new ArgumentOutOfRangeException(nameof(planningAdmissionBytes));
+        PlanningAdmissionLimitBytes = planningAdmissionBytes;
         _store = new RoutingAtomicJsonStore<RoutingOutboxDocument>(
             path,
             MaximumDocumentBytes,
@@ -85,9 +93,18 @@ internal sealed class RoutingOutboxStore
             RoutingOutboxModel.Validate,
             RoutingOutboxModel.ValidateSuccessor,
             ValidateInitial);
+        var directory = System.IO.Path.GetDirectoryName(_store.Path)
+            ?? throw new InvalidOperationException("The routing outbox directory is unavailable.");
+        ArchiveStore = new RoutingPlanArchiveStore(
+            System.IO.Path.Combine(directory, "archive", "v1"));
     }
 
     internal string Path => _store.Path;
+    internal RoutingPlanArchiveStore ArchiveStore { get; }
+    internal int PlanningAdmissionLimitBytes { get; }
+
+    internal int MeasureSerializedBytes(RoutingOutboxDocument document) =>
+        _store.MeasureSerializedBytes(document);
 
     internal RoutingDocumentLoadResult<RoutingOutboxDocument> Load(
         CancellationToken cancellationToken = default) =>
@@ -99,6 +116,51 @@ internal sealed class RoutingOutboxStore
         CancellationToken cancellationToken = default,
         Action? beforeCommit = null) =>
         _store.SaveAsync(document, expectedGeneration, cancellationToken, beforeCommit);
+
+    internal async Task<RoutingOutboxDocument> SaveCompactedAsync(
+        RoutingOutboxDocument document,
+        long expectedGeneration,
+        IReadOnlyList<RoutingArchivedPlanDocument> archives,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(archives);
+        if (archives.Count == 0)
+            throw new ArgumentException("Compaction requires durable archive evidence.", nameof(archives));
+        var leases = new List<IDisposable>(archives.Count);
+        try
+        {
+            foreach (var archive in archives)
+                leases.Add(ArchiveStore.OpenValidatedLease(archive, cancellationToken));
+            return await _store.SaveWithSuccessorValidatorAsync(
+                    document,
+                    expectedGeneration,
+                    (current, candidate) =>
+                        RoutingArchiveModel.ValidateCompactionSuccessor(current, candidate, archives),
+                    cancellationToken,
+                    beforeCommit: () =>
+                    {
+                        // The read leases deny write/delete sharing until after the hot rename.
+                        // Re-read while those leases are held to pin exact archive bytes too.
+                        foreach (var archive in archives)
+                            ArchiveStore.RequireExact(archive, CancellationToken.None);
+                    })
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (var lease in leases) lease.Dispose();
+        }
+    }
+
+    internal Task<RoutingOutboxAdmissionResult> PrepareForPlanningAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        new RoutingOutboxCompactor(this, ArchiveStore).PrepareForPlanningAsync(now, cancellationToken);
+
+    internal Task<RoutingOutboxAdmissionResult> CompactTerminalPlansAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        new RoutingOutboxCompactor(this, ArchiveStore).CompactTerminalPlansAsync(now, cancellationToken);
 
     internal Task<RoutingOutboxDocument> LoadOrCreateAsync(
         DateTimeOffset? now = null,
@@ -223,8 +285,32 @@ internal sealed class RoutingAtomicJsonStore<TDocument>
         if (expectedGeneration < 0) throw new ArgumentOutOfRangeException(nameof(expectedGeneration));
         cancellationToken.ThrowIfCancellationRequested();
         return Task.Run(
-            () => SaveCore(document, expectedGeneration, cancellationToken, beforeCommit),
+            () => SaveCore(document, expectedGeneration, cancellationToken, beforeCommit, null),
             cancellationToken);
+    }
+
+    internal Task<TDocument> SaveWithSuccessorValidatorAsync(
+        TDocument document,
+        long expectedGeneration,
+        Action<TDocument, TDocument> successorValidator,
+        CancellationToken cancellationToken = default,
+        Action? beforeCommit = null)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(successorValidator);
+        if (expectedGeneration < 0) throw new ArgumentOutOfRangeException(nameof(expectedGeneration));
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.Run(
+            () => SaveCore(document, expectedGeneration, cancellationToken, beforeCommit,
+                successorValidator),
+            cancellationToken);
+    }
+
+    internal int MeasureSerializedBytes(TDocument document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        _validate(document);
+        return JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions).Length;
     }
 
     internal async Task<TDocument> LoadOrCreateAsync(
@@ -262,7 +348,8 @@ internal sealed class RoutingAtomicJsonStore<TDocument>
         TDocument document,
         long expectedGeneration,
         CancellationToken cancellationToken,
-        Action? beforeCommit)
+        Action? beforeCommit,
+        Action<TDocument, TDocument>? successorValidator)
     {
         _validate(document);
         cancellationToken.ThrowIfCancellationRequested();
@@ -307,7 +394,7 @@ internal sealed class RoutingAtomicJsonStore<TDocument>
                     throw new RoutingConcurrencyException(
                         "A newer routing document has already been saved.");
                 }
-                _validateSuccessor(persisted, document);
+                (successorValidator ?? _validateSuccessor)(persisted, document);
             }
 
             var bytes = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);

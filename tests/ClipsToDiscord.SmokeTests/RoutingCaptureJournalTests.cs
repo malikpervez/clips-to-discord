@@ -670,6 +670,65 @@ internal static class RoutingCaptureJournalTests
         Assert(auditHandler.Statuses[corruptId] == CaptureJournalLoadStatus.Corrupt &&
                auditHandler.Statuses[futureId] == CaptureJournalLoadStatus.UnsupportedSchema,
             "Startup reconciliation must surface corrupt and future-schema state distinctly.");
+
+        var orderedIds = expectedIds.Order(StringComparer.Ordinal).ToArray();
+        var failingHandler = new FailingReconciliationHandler(
+            orderedIds[0],
+            new InvalidDataException("synthetic-routing-item-failure"));
+        var observedLogLines = new List<string>();
+        CaptureJournalReconciliationSummary isolatedFailure;
+        using (Log.ObserveForTests(observedLogLines.Add))
+        {
+            isolatedFailure = await CaptureJournalStartupReconciler.ReconcileAsync(
+                root,
+                failingHandler,
+                maximumEntries: 20,
+                maximumDuration: TimeSpan.FromSeconds(5));
+        }
+        Assert(isolatedFailure.Inspected == expectedIds.Count &&
+               failingHandler.Visited.SequenceEqual(orderedIds) &&
+               failingHandler.Visited.Skip(1).Any(),
+            "One invalid routing handler item must be counted and isolated without starving later clips in the startup page.");
+        Assert(observedLogLines.Count(line =>
+                   line.Contains(
+                       $"could not reconcile capture journal {orderedIds[0]}",
+                       StringComparison.OrdinalIgnoreCase) &&
+                   line.Contains("synthetic-routing-item-failure", StringComparison.Ordinal)) == 1,
+            "An isolated per-clip reconciliation failure must leave one actionable, clip-scoped diagnostic.");
+
+        var concurrencyHandler = new FailingReconciliationHandler(
+            orderedIds[0],
+            new RoutingConcurrencyException("synthetic-routing-concurrency-failure"));
+        observedLogLines.Clear();
+        using (Log.ObserveForTests(observedLogLines.Add))
+        {
+            isolatedFailure = await CaptureJournalStartupReconciler.ReconcileAsync(
+                root,
+                concurrencyHandler,
+                maximumEntries: 20,
+                maximumDuration: TimeSpan.FromSeconds(5));
+        }
+        Assert(isolatedFailure.Inspected == expectedIds.Count &&
+               concurrencyHandler.Visited.SequenceEqual(orderedIds) &&
+               observedLogLines.Count(line => line.Contains(
+                   "synthetic-routing-concurrency-failure", StringComparison.Ordinal)) == 1,
+            "A routing CAS conflict must be isolated and logged without aborting the remaining startup page.");
+
+        using var cancelled = new CancellationTokenSource();
+        var cancellingHandler = new FailingReconciliationHandler(
+            orderedIds[0],
+            new InvalidDataException("synthetic-failure-after-cancellation"),
+            cancelled.Cancel);
+        await AssertThrowsAsync<OperationCanceledException>(
+            () => CaptureJournalStartupReconciler.ReconcileAsync(
+                root,
+                cancellingHandler,
+                cancelled.Token,
+                maximumEntries: 20,
+                maximumDuration: TimeSpan.FromSeconds(5)),
+            "Cancellation observed by a failing handler must be rethrown instead of returning a successful page.");
+        Assert(cancellingHandler.Visited.SequenceEqual([orderedIds[0]]),
+            "Cancellation after a catchable handler failure must stop before a later clip is inspected.");
     }
 
     private static async Task AssertStaleAttemptCannotPromoteAsync(string root)
@@ -964,6 +1023,29 @@ internal static class RoutingCaptureJournalTests
             cancellationToken.ThrowIfCancellationRequested();
             Statuses.Add(item.ClipId, item.Status);
             Items.Add(item);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FailingReconciliationHandler(
+        string failingClipId,
+        Exception failure,
+        Action? beforeThrow = null) :
+        ICaptureJournalReconciliationHandler
+    {
+        internal List<string> Visited { get; } = [];
+
+        public ValueTask ReconcileAsync(
+            CaptureJournalReconciliationItem item,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Visited.Add(item.ClipId);
+            if (item.ClipId.Equals(failingClipId, StringComparison.Ordinal))
+            {
+                beforeThrow?.Invoke();
+                throw failure;
+            }
             return ValueTask.CompletedTask;
         }
     }

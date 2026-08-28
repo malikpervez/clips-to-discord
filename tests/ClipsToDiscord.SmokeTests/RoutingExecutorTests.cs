@@ -20,6 +20,8 @@ internal static class RoutingExecutorTests
         await AssertArtifactResolutionFailureDoesNotBlockAsync(
             Path.Combine(testRoot, "artifact-resolution"));
         await AssertBoundedAndSerializedAsync(Path.Combine(testRoot, "bounded"));
+        await AssertRecoveryBacklogDoesNotStarveDeliveriesAsync(
+            Path.Combine(testRoot, "recovery-fairness"));
         await AssertGateRevocationStopsBeforeProviderAsync(Path.Combine(testRoot, "gate"));
         await AssertCaptureJournalImplementationsAsync(Path.Combine(testRoot, "capture"));
         await AssertDerivedCaptureJournalArtifactResolutionAsync(
@@ -60,10 +62,12 @@ internal static class RoutingExecutorTests
         var result = await executor.RunOnceAsync();
         var final = seeded.Store.Load().Document!;
         Assert(result.Enabled && result.ProviderAttempts == 1 && result.FileAttempts == 1 &&
-               provider.Calls == 1 && filer.FileCalls == 1,
+               result.RecoveryInspections == 0 && provider.Calls == 1 &&
+               filer.FileCalls == 1 && filer.RecoveryCalls == 0,
             "One confirmed plan must perform exactly one provider and one terminal filing attempt.");
         Assert(final.Deliveries.Single().State == PlannedDeliveryState.Delivered &&
                final.Deliveries.Single().RemoteReceiptReference == "discord:message-100" &&
+               final.Deliveries.Single().ErrorCode is null &&
                final.FileDispositions.Single().State == PlannedFileDispositionState.Completed &&
                final.FileDispositions.Single().FinalLibraryItemReference ==
                "capture:clip-confirmed:original",
@@ -311,6 +315,58 @@ internal static class RoutingExecutorTests
             "Concurrent calls on one executor must serialize and cannot double-send ready work.");
         Assert(runs.Sum(item => item.ProviderAttempts) == 1,
             "Only the remaining delivery may be attempted by serialized concurrent runs.");
+    }
+
+    private static async Task AssertRecoveryBacklogDoesNotStarveDeliveriesAsync(string root)
+    {
+        const int maximumSideEffects = 4;
+        const int recoveryCount = maximumSideEffects * 2;
+        var seeded = await SeedRecoveryBacklogAsync(
+            root, recoveryCount, maximumSideEffects);
+        var provider = new RecordingProvider((delivery, _, _) =>
+            RoutingDeliveryAttemptResult.Confirmed($"discord:{delivery.DeliveryId:N}"));
+        var filer = new BlockingInterleavingFiler();
+        using var executor = Executor(
+            seeded.Store,
+            provider,
+            new RecordingResolver(),
+            filer,
+            maximumSideEffects);
+
+        var running = executor.RunOnceAsync();
+        await filer.FirstRecoveryEntered.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert(provider.Calls == 1,
+            "The first ready delivery must run before any potentially expensive recovery inspection.");
+        filer.ReleaseFirstRecovery();
+        await filer.SecondRecoveryEntered.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert(provider.Calls == 2,
+            "The second ready delivery must run before the executor starts its second recovery inspection.");
+
+        var first = await running;
+        Assert(first.RecoveryInspections == maximumSideEffects &&
+               first.ProviderAttempts == maximumSideEffects &&
+               provider.Calls == maximumSideEffects &&
+               seeded.Store.Load().Document!.Deliveries.All(item =>
+                   item.State == PlannedDeliveryState.Delivered),
+            "Recovery must advance under a steady upload backlog without consuming its independent delivery budget.");
+        Assert(filer.FileCalls == 0 &&
+               seeded.Store.Load().Document!.FileDispositions.All(item =>
+                   item.State == PlannedFileDispositionState.RecoveryPending),
+            "Unresolved recovery inspections must never guess that an ambiguous move is retry-safe.");
+
+        var firstInspections = filer.RecoveryDispositionIds.ToHashSet();
+        var second = await executor.RunOnceAsync();
+        Assert(second.RecoveryInspections == maximumSideEffects &&
+               filer.RecoveryDispositionIds.Count == recoveryCount &&
+               filer.RecoveryDispositionIds.Skip(maximumSideEffects).All(id =>
+                   !firstInspections.Contains(id)),
+            "Bounded recovery inspection must rotate deterministically instead of polling only the oldest items.");
+
+        _ = await executor.RunOnceAsync();
+        Assert(provider.Calls == maximumSideEffects && filer.FileCalls == 0 &&
+               seeded.Store.Load().Document!.FileDispositions.All(item =>
+                   item.State == PlannedFileDispositionState.RecoveryPending),
+            "Repeated unresolved inspections must neither resend a delivery nor auto-retry a file move.");
     }
 
     private static async Task AssertGateRevocationStopsBeforeProviderAsync(string root)
@@ -597,6 +653,74 @@ internal static class RoutingExecutorTests
         return new SeededPlan(store, deliveries, disposition);
     }
 
+    private static async Task<SeededPlan> SeedRecoveryBacklogAsync(
+        string root,
+        int recoveryCount,
+        int deliveryCount)
+    {
+        Directory.CreateDirectory(root);
+        var store = new RoutingOutboxStore(Path.Combine(root, RoutingOutboxStore.FileName));
+        var current = await store.LoadOrCreateAsync(At(0));
+        var tick = 0;
+
+        for (var index = 0; index < recoveryCount; index++)
+        {
+            var planId = Guid.NewGuid();
+            var sourceClipId = $"clip-recovery-{index}";
+            var disposition = RoutingOutboxModel.CreateFileDisposition(
+                Guid.NewGuid(),
+                planId,
+                sourceClipId,
+                Hash('e'),
+                RouteReference(Guid.NewGuid(), Guid.NewGuid(), index),
+                RoutingLibraryArea.LocalOnly,
+                [],
+                At(++tick));
+            var appended = RoutingOutboxModel.AppendPlan(
+                current, planId, [], [disposition], At(++tick));
+            current = await store.SaveAsync(appended, current.Generation);
+
+            var attemptId = Guid.NewGuid();
+            var moving = RoutingOutboxModel.StartFileDisposition(
+                current, disposition.DispositionId, attemptId, At(++tick));
+            current = await store.SaveAsync(moving, current.Generation);
+            var pending = RoutingOutboxModel.MarkFileDispositionRecoveryPending(
+                current,
+                disposition.DispositionId,
+                attemptId,
+                "move-result-unknown",
+                At(++tick));
+            current = await store.SaveAsync(pending, current.Generation);
+        }
+
+        var deliveryPlanId = Guid.NewGuid();
+        var deliveries = Enumerable.Range(0, deliveryCount).Select(index =>
+        {
+            var deliveryOutput = new RoutingOutputReference(
+                "clip-ready-after-recovery", RoutingOutputKind.Original, Hash('d'));
+            return RoutingOutboxModel.CreateDelivery(
+                Guid.NewGuid(),
+                deliveryPlanId,
+                deliveryOutput.ClipId,
+                RouteReference(
+                    Guid.NewGuid(), Guid.NewGuid(), recoveryCount + index),
+                RoutingDestinationKind.Discord,
+                $"discord.recovery-fairness-{index}",
+                deliveryOutput,
+                deliveryOutput,
+                RoutingMissingOutputBehavior.UseOriginal,
+                RoutingDeliveryMode.Automatic,
+                Settings(),
+                artifactReady: true,
+                intentionalDuplicate: null,
+                At(++tick));
+        }).ToArray();
+        var withDelivery = RoutingOutboxModel.AppendPlan(
+            current, deliveryPlanId, deliveries, [], At(++tick));
+        _ = await store.SaveAsync(withDelivery, current.Generation);
+        return new SeededPlan(store, deliveries, null);
+    }
+
     private static RoutingRouteSnapshotReference RouteReference(
         Guid routeId,
         Guid actionId,
@@ -703,6 +827,50 @@ internal static class RoutingExecutorTests
         {
             _entered.TrySetResult(true);
             return _release.Task;
+        }
+    }
+
+    private sealed class BlockingInterleavingFiler : IRoutingLibraryFiler
+    {
+        private readonly TaskCompletionSource<bool> _firstRecoveryEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _releaseFirstRecovery =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _secondRecoveryEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal Task FirstRecoveryEntered => _firstRecoveryEntered.Task;
+        internal Task SecondRecoveryEntered => _secondRecoveryEntered.Task;
+        internal int FileCalls { get; private set; }
+        internal List<Guid> RecoveryDispositionIds { get; } = [];
+
+        internal void ReleaseFirstRecovery() =>
+            _releaseFirstRecovery.TrySetResult(true);
+
+        public Task<RoutingFileAttemptResult> FileAsync(
+            PlannedFileDisposition disposition,
+            CancellationToken cancellationToken)
+        {
+            FileCalls++;
+            throw new InvalidOperationException(
+                "An unresolved ambiguous move must not enter the ordinary filing path.");
+        }
+
+        public async Task<RoutingFileRecoveryResult> ReconcileAsync(
+            PlannedFileDisposition disposition,
+            CancellationToken cancellationToken)
+        {
+            RecoveryDispositionIds.Add(disposition.DispositionId);
+            if (RecoveryDispositionIds.Count == 1)
+            {
+                _firstRecoveryEntered.TrySetResult(true);
+                await _releaseFirstRecovery.Task.ConfigureAwait(false);
+            }
+            else if (RecoveryDispositionIds.Count == 2)
+            {
+                _secondRecoveryEntered.TrySetResult(true);
+            }
+            return RoutingFileRecoveryResult.Unresolved;
         }
     }
 
