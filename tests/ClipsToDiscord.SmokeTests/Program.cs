@@ -126,6 +126,14 @@ try
         return;
     }
 
+    if (args.Length == 2 && args[0].Equals("--render-routes", StringComparison.Ordinal))
+    {
+        RunPreviewOnStaThread(
+            () => RenderSharedPagePreview(args[1], SettingsPage.Routes),
+            "Routes preview");
+        return;
+    }
+
     if (args.Length == 2 && args[0].Equals("--render-silhouette-layouts", StringComparison.Ordinal))
     {
         RunPreviewOnStaThread(
@@ -714,6 +722,7 @@ try
     CaptureFoundationTests.Run(Path.Combine(temporaryRoot, "capture-foundation"));
     TraceSmokeStep("ClipCord 2.0 routing foundation");
     RoutingFoundationTests.Run(Path.Combine(temporaryRoot, "routing-foundation"));
+    RoutesFeatureTests.Run(Path.Combine(temporaryRoot, "routes-feature"));
     RoutingArchiveTests.Run(Path.Combine(temporaryRoot, "routing-archive"));
     RoutingCaptureJournalTests.Run(Path.Combine(temporaryRoot, "routing-journal"));
     RoutingEvaluatorTests.Run(Path.Combine(temporaryRoot, "routing-evaluator"));
@@ -721,9 +730,13 @@ try
     RoutingMigrationTests.Run(Path.Combine(temporaryRoot, "routing-migration"));
     TraceSmokeStep("ClipCord 2.0 routing runtime bridge");
     RoutingRuntimeBridgeTests.Run(Path.Combine(temporaryRoot, "routing-runtime-bridge"));
+    RoutingRuntimeCoordinatorTests.Run();
     RoutingExecutorTests.Run(Path.Combine(temporaryRoot, "routing-executor"));
+    RoutingOperatorTests.Run(Path.Combine(temporaryRoot, "routing-operator"));
     await DiscordRoutingProviderTests.RunAsync(
         Path.Combine(temporaryRoot, "discord-routing-provider"));
+    await DiscordConnectionCatalogTests.RunAsync(
+        Path.Combine(temporaryRoot, "discord-connection-catalog"));
 
     TraceSmokeStep("State recovery and readiness");
     var recoveryRoot = Path.Combine(temporaryRoot, "safe-baseline-recovery");
@@ -1805,6 +1818,7 @@ static void AssertFigmaIconAssets()
         [FigmaIconAsset.Play] = ("play.png", "37709608177cda025a60f73093ca50dc2f1cd6a21a6c7227300a1c1d235e3227"),
         [FigmaIconAsset.Portrait] = ("portrait.png", "dd657e58343807a30f574dbb261d2a11dd55f16e8147150b32fdcc4368e6ddd3"),
         [FigmaIconAsset.Refresh] = ("refresh.png", "76de4b8515f3a30b10a22aef9aea7bedcefebea1ddd3ea7d6526fe2cab537ff8"),
+        [FigmaIconAsset.Routes] = ("routes.png", "05881983627be5308fe0c3e0884b2a78500526db70c8fc4408e1b35c796c920f"),
         [FigmaIconAsset.SafeZone] = ("safezone.png", "4b5f3881558252b9380a66ab3ea412ca90255bba22571232beb83f1eeeaacaa5"),
         [FigmaIconAsset.Search] = ("search.png", "5864d203d75f638db750af490cc957f15d16e08e65c2a7c0c03c6705a3779fd1"),
         [FigmaIconAsset.Settings] = ("settings.png", "c66fbb264e0b2493606b50618665b035c6551a3d9b4fce8e44462b58212d9e65"),
@@ -1815,8 +1829,8 @@ static void AssertFigmaIconAssets()
         [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde")
     };
     var enumAssets = Enum.GetValues<FigmaIconAsset>();
-    Assert(enumAssets.Length == 40 && enumAssets.ToHashSet().SetEquals(expected.Keys),
-        $"The approved Figma icon catalog must contain exactly 40 pinned assets; got {string.Join(", ", enumAssets)}.");
+    Assert(enumAssets.Length == 41 && enumAssets.ToHashSet().SetEquals(expected.Keys),
+        $"The approved Figma icon catalog must contain exactly 41 pinned assets; got {string.Join(", ", enumAssets)}.");
 
     var assembly = typeof(FigmaIconRenderer).Assembly;
     var actualResources = assembly.GetManifestResourceNames()
@@ -1826,7 +1840,7 @@ static void AssertFigmaIconAssets()
         .Select(value => resourcePrefix + value.FileName)
         .ToHashSet(StringComparer.Ordinal);
     Assert(actualResources.SetEquals(expectedResources),
-        $"Embedded Figma icon resources diverged from the 40 approved exports: " +
+        $"Embedded Figma icon resources diverged from the 41 approved exports: " +
         $"expected={string.Join(", ", expectedResources.OrderBy(name => name, StringComparer.Ordinal))}; " +
         $"actual={string.Join(", ", actualResources.OrderBy(name => name, StringComparer.Ordinal))}.");
     foreach (var (asset, contract) in expected)
@@ -8107,12 +8121,12 @@ static void AssertSharedShellLayout(SettingsForm form)
         "The legacy top navigation and always-on footer must not survive inside the redesigned left-rail shell.");
 
     var navigation = EnumerateControls(form).Single(control => control.Name == "SideNavigation");
-    var expectedItems = new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "CaptureNavItem", "GalleryNavItem", "AboutNavItem" };
+    var expectedItems = new[] { "HomeNavItem", "SettingsNavItem", "ActivityNavItem", "CaptureNavItem", "RoutesNavItem", "GalleryNavItem", "AboutNavItem" };
     var actualItems = navigation.Controls.Cast<Control>().Select(control => control.Name).ToArray();
     Assert(actualItems.SequenceEqual(expectedItems) &&
            navigation.Controls.Cast<Control>().All(control =>
                control.TabStop && control.AccessibleRole == AccessibleRole.MenuItem),
-        $"The left rail must expose six ordered keyboard menu items; got {string.Join(", ", actualItems)}.");
+        $"The left rail must expose seven ordered keyboard menu items; got {string.Join(", ", actualItems)}.");
     Assert(EnumerateControls(form).Single(control => control.Name == "RailStatusCard").Visible &&
            EnumerateControls(form).OfType<Button>().Count(button =>
                button.AccessibleRole == AccessibleRole.RadioButton &&
@@ -8143,10 +8157,10 @@ static void AssertSharedShellLayout(SettingsForm form)
     var navigationGlyphs = EnumerateControls(navigation).OfType<BrandGlyphControl>()
         .Where(control => control.Name == "NavigationGlyph")
         .ToArray();
-    Assert(navigationGlyphs.Length == 6 && navigationGlyphs.All(control =>
+    Assert(navigationGlyphs.Length == 7 && navigationGlyphs.All(control =>
                Math.Abs(Math.Min(control.Width, control.Height) - expectedNavigationGlyphSide) <= 1 &&
                Math.Abs(control.Width - control.Height) <= 1),
-        $"The six shared-rail Figma glyphs must retain their compact 16px logical width; " +
+        $"The seven shared-rail Figma glyphs must retain their compact 16px logical width; " +
         $"expected={expectedNavigationGlyphSide}, actual={string.Join(", ", navigationGlyphs.Select(control => control.Size))}.");
 }
 
@@ -8298,6 +8312,7 @@ static void RenderSharedPagePreview(
     string? silhouetteOrientationId = null)
 {
     if (page is not (SettingsPage.Home or SettingsPage.Activity or SettingsPage.Capture or
+        SettingsPage.Routes or
         SettingsPage.SilhouetteLayouts or SettingsPage.Gallery))
     {
         throw new ArgumentOutOfRangeException(nameof(page), page, "Only shared visual-QA pages are supported.");
@@ -8390,6 +8405,45 @@ static void RenderSharedPagePreview(
             AppSettings.DefaultCompressionTargetMb,
             "PlayerOne",
             true);
+        var previewRoutes = new RoutingRouteManager(new RoutingSnapshotStore(
+            Path.Combine(fixtureRoot, "routing", RoutingSnapshotStore.FileName)));
+        if (page == SettingsPage.Routes)
+        {
+            DiscordRoutingConnectionIdentity.TryCreate(settings.WebhookUrl, out var connectionId);
+            previewRoutes.AddAsync(new RoutingRouteDraft(
+                    "Battlefield highlights",
+                    RoutingTriggerKind.InstantReplay,
+                    "Battlefield™-6",
+                    RoutingDestinationKind.Discord,
+                    connectionId,
+                    RoutingOutputKind.Landscape,
+                    RoutingDeliveryMode.Automatic,
+                    RoutingMissingOutputBehavior.UseOriginal,
+                    FileIntoLibrary: true))
+                .GetAwaiter().GetResult();
+            previewRoutes.AddAsync(new RoutingRouteDraft(
+                    "Manual recordings stay local",
+                    RoutingTriggerKind.ManualRecording,
+                    Game: null,
+                    Destination: null,
+                    ConnectionId: null,
+                    RoutingOutputKind.Original,
+                    RoutingDeliveryMode.Automatic,
+                    RoutingMissingOutputBehavior.UseOriginal,
+                    FileIntoLibrary: true))
+                .GetAwaiter().GetResult();
+            previewRoutes.AddAsync(new RoutingRouteDraft(
+                    "Everything else → Friends server",
+                    RoutingTriggerKind.AnyNewSourceClip,
+                    Game: null,
+                    RoutingDestinationKind.Discord,
+                    connectionId,
+                    RoutingOutputKind.Original,
+                    RoutingDeliveryMode.Automatic,
+                    RoutingMissingOutputBehavior.UseOriginal,
+                    FileIntoLibrary: true))
+                .GetAwaiter().GetResult();
+        }
         using var form = new SettingsForm(
             settings,
             checkForUpdatesAsync: _ => Task.CompletedTask,
@@ -8409,7 +8463,8 @@ static void RenderSharedPagePreview(
                 LibraryRoot = Path.Combine(Path.GetTempPath(), "ClipCordPreviewLibrary")
             },
             captureEngineAvailable: true,
-            silhouetteSettingsDirectory: Path.Combine(fixtureRoot, "silhouette-settings"));
+            silhouetteSettingsDirectory: Path.Combine(fixtureRoot, "silhouette-settings"),
+            routingRouteManager: previewRoutes);
         form.Show();
         Application.DoEvents();
         if (page == SettingsPage.Capture)

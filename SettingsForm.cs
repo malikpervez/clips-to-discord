@@ -11,6 +11,7 @@ internal enum SettingsPage
     Settings,
     Activity,
     Capture,
+    Routes,
     SilhouetteLayouts,
     Gallery,
     About
@@ -26,6 +27,7 @@ internal sealed class SettingsForm : Form
     internal static readonly Size ActivityDesignedClientSize = DesignedClientSize;
     internal static readonly Size GalleryDesignedClientSize = DesignedClientSize;
     internal static readonly Size CaptureDesignedClientSize = DesignedClientSize;
+    internal static readonly Size RoutesDesignedClientSize = DesignedClientSize;
     internal static readonly Size SilhouetteLayoutsDesignedClientSize = DesignedClientSize;
     internal static readonly Size AboutDesignedClientSize = DesignedClientSize;
     internal static readonly Size HomeDesignedClientSize = DesignedClientSize;
@@ -233,10 +235,13 @@ internal sealed class SettingsForm : Form
     private readonly Action<CaptureSettings>? _saveCaptureSettings;
     private readonly IManualCaptureRecorder? _manualCaptureRecorder;
     private readonly string _silhouetteSettingsDirectory;
+    private readonly DiscordConnectionCatalog? _discordConnectionCatalog;
+    private readonly RoutingRouteManager? _routingRouteManager;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _homeNavigationItem;
     private RoundedPanel? _activityNavigationItem;
     private RoundedPanel? _captureNavigationItem;
+    private RoundedPanel? _routesNavigationItem;
     private RoundedPanel? _galleryNavigationItem;
     private RoundedPanel? _aboutNavigationItem;
     private BufferedTableLayoutPanel? _rootLayout;
@@ -249,6 +254,7 @@ internal sealed class SettingsForm : Form
     private BrandedScrollHost? _settingsScrollHost;
     private ActivityView? _activityPage;
     private CaptureView? _capturePage;
+    private RoutesView? _routesPage;
     private SilhouetteLayoutEditorView? _silhouetteLayoutsPage;
     private GalleryView? _galleryPage;
     private AboutView? _aboutPage;
@@ -280,7 +286,9 @@ internal sealed class SettingsForm : Form
         bool captureEngineAvailable = false,
         Action<CaptureSettings>? saveCaptureSettings = null,
         IManualCaptureRecorder? manualCaptureRecorder = null,
-        string? silhouetteSettingsDirectory = null)
+        string? silhouetteSettingsDirectory = null,
+        DiscordConnectionCatalog? discordConnectionCatalog = null,
+        RoutingRouteManager? routingRouteManager = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -297,6 +305,8 @@ internal sealed class SettingsForm : Form
         _captureEngineAvailable = captureEngineAvailable;
         _saveCaptureSettings = saveCaptureSettings;
         _manualCaptureRecorder = manualCaptureRecorder;
+        _discordConnectionCatalog = discordConnectionCatalog;
+        _routingRouteManager = routingRouteManager;
         _silhouetteSettingsDirectory = Path.GetFullPath(
             silhouetteSettingsDirectory ?? SettingsStore.DataDirectory);
         _ownsActivityHistory = activityHistory is null;
@@ -534,6 +544,13 @@ internal sealed class SettingsForm : Form
             _captureEngineAvailable,
             _saveCaptureSettings,
             _manualCaptureRecorder);
+        _routesPage = new RoutesView(
+            _routingRouteManager,
+            connections: _discordConnectionCatalog is null
+                ? new LegacyDiscordConnectionViewSource(() => _appliedSettings)
+                : new DiscordConnectionCatalogViewSource(_discordConnectionCatalog));
+        _routesPage.OpenSettingsRequested += (_, _) => ShowPage(SettingsPage.Settings);
+        _routesPage.DeliveryHistoryRequested += (_, _) => ShowRoutingDeliveryHistory();
         _silhouetteLayoutsPage = new SilhouetteLayoutEditorView(
             _silhouetteSettingsDirectory,
             mirrorCameraDefault: true);
@@ -568,6 +585,7 @@ internal sealed class SettingsForm : Form
         pageHost.Controls.Add(_settingsPage);
         pageHost.Controls.Add(_activityPage);
         pageHost.Controls.Add(_capturePage);
+        pageHost.Controls.Add(_routesPage);
         pageHost.Controls.Add(_silhouetteLayoutsPage);
         pageHost.Controls.Add(_galleryPage);
         pageHost.Controls.Add(_aboutPage);
@@ -613,6 +631,13 @@ internal sealed class SettingsForm : Form
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
+    }
+
+    private void ShowRoutingDeliveryHistory()
+    {
+        using var dialog = new RoutingDeliveryHistoryDialog();
+        dialog.ShowDialog(this);
+        _routesPage?.ActivateView();
     }
 
     private Control BuildNavigationRail()
@@ -699,7 +724,7 @@ internal sealed class SettingsForm : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 7,
             Margin = Padding.Empty,
             Padding = new Padding(0, 0, 0, 0),
             BackColor = ClipCordTheme.Sidebar
@@ -723,6 +748,13 @@ internal sealed class SettingsForm : Form
             "Capture",
             "Configure ClipCord's optional Instant Replay recorder",
             SettingsPage.Capture);
+        _routesNavigationItem = CreateNavigationItem("Routes", BrandGlyph.Routes, selected: false);
+        ConfigureNavigationItem(
+            _routesNavigationItem,
+            "RoutesNavItem",
+            "Routes",
+            "Choose how new clips are prepared, delivered, and filed",
+            SettingsPage.Routes);
         _galleryNavigationItem = CreateNavigationItem("Gallery", BrandGlyph.Gallery, selected: false);
         ConfigureNavigationItem(_galleryNavigationItem, "GalleryNavItem", "Gallery", "Browse uploaded and local-only clips", SettingsPage.Gallery);
         _aboutNavigationItem = CreateNavigationItem("About", BrandGlyph.About, selected: false);
@@ -731,8 +763,9 @@ internal sealed class SettingsForm : Form
         navigation.Controls.Add(_settingsNavigationItem, 0, 1);
         navigation.Controls.Add(_activityNavigationItem, 0, 2);
         navigation.Controls.Add(_captureNavigationItem, 0, 3);
-        navigation.Controls.Add(_galleryNavigationItem, 0, 4);
-        navigation.Controls.Add(_aboutNavigationItem, 0, 5);
+        navigation.Controls.Add(_routesNavigationItem, 0, 4);
+        navigation.Controls.Add(_galleryNavigationItem, 0, 5);
+        navigation.Controls.Add(_aboutNavigationItem, 0, 6);
 
         var modeCard = BuildRailStatusCard();
         rail.Controls.Add(brand, 0, 0);
@@ -892,6 +925,7 @@ internal sealed class SettingsForm : Form
     internal void ShowPage(SettingsPage page)
     {
         if (_settingsPage is null || _activityPage is null || _capturePage is null ||
+            _routesPage is null ||
             _silhouetteLayoutsPage is null || _galleryPage is null || _aboutPage is null)
         {
             return;
@@ -903,6 +937,7 @@ internal sealed class SettingsForm : Form
         var showSettings = page == SettingsPage.Settings;
         var showActivity = page == SettingsPage.Activity;
         var showCapture = page == SettingsPage.Capture;
+        var showRoutes = page == SettingsPage.Routes;
         var showSilhouetteLayouts = page == SettingsPage.SilhouetteLayouts;
         var showGallery = page == SettingsPage.Gallery;
         var showAbout = page == SettingsPage.About;
@@ -910,6 +945,7 @@ internal sealed class SettingsForm : Form
         _settingsPage.Visible = showSettings;
         _activityPage.Visible = showActivity;
         _capturePage.Visible = showCapture;
+        _routesPage.Visible = showRoutes;
         _silhouetteLayoutsPage.Visible = showSilhouetteLayouts;
         _galleryPage.Visible = showGallery;
         _aboutPage.Visible = showAbout;
@@ -942,6 +978,13 @@ internal sealed class SettingsForm : Form
             _capturePage.BringToFront();
             _capturePage.RefreshViewport();
         }
+        else if (showRoutes)
+        {
+            _homePage?.DeactivateView();
+            _galleryPage.Deactivate();
+            _routesPage.BringToFront();
+            _routesPage.ActivateView();
+        }
         else if (showSilhouetteLayouts)
         {
             _homePage?.DeactivateView();
@@ -968,6 +1011,7 @@ internal sealed class SettingsForm : Form
         UpdateNavigationSelection(_settingsNavigationItem, showSettings);
         UpdateNavigationSelection(_activityNavigationItem, showActivity);
         UpdateNavigationSelection(_captureNavigationItem, showCapture || showSilhouetteLayouts);
+        UpdateNavigationSelection(_routesNavigationItem, showRoutes);
         UpdateNavigationSelection(_galleryNavigationItem, showGallery);
         UpdateNavigationSelection(_aboutNavigationItem, showAbout);
         UpdatePageHeaderAction(page);
@@ -977,6 +1021,7 @@ internal sealed class SettingsForm : Form
             SettingsPage.Home => "ClipCord — Home",
             SettingsPage.Activity => "ClipCord — Activity",
             SettingsPage.Capture => "ClipCord — Capture",
+            SettingsPage.Routes => "ClipCord — Routes",
             SettingsPage.SilhouetteLayouts => "ClipCord — Silhouette layouts",
             SettingsPage.Gallery => "ClipCord — Gallery",
             SettingsPage.About => "ClipCord — About",
@@ -988,6 +1033,7 @@ internal sealed class SettingsForm : Form
             SettingsPage.Settings => ("Settings", "Where clips come from, and where they go"),
             SettingsPage.Activity => ("Activity", "Recent clip activity stored on this PC"),
             SettingsPage.Capture => ("Capture", "Save the last minutes of gameplay locally, encoded on your GPU"),
+            SettingsPage.Routes => ("Routes", "Decide what happens to every new clip"),
             SettingsPage.SilhouetteLayouts => (
                 "Silhouette layouts",
                 "Reusable defaults · every capture with the reaction camera on uses these layouts"),
@@ -1004,6 +1050,7 @@ internal sealed class SettingsForm : Form
         var aboutAction = _aboutPage.UpdateActionButton;
         var galleryAction = _galleryPage?.HeaderActions;
         var captureAction = _capturePage?.HeaderStatusPill;
+        var routesAction = _routesPage?.HeaderActionButton;
         var silhouetteBackAction = _silhouetteLayoutsPage?.HeaderBackButton;
         var useSharedGalleryHeader = page == SettingsPage.Gallery &&
                                      ClientSize.Width >= ScaleLogical(1050);
@@ -1012,6 +1059,7 @@ internal sealed class SettingsForm : Form
             SettingsPage.Home => homeAction,
             SettingsPage.About => aboutAction,
             SettingsPage.Capture => captureAction,
+            SettingsPage.Routes => routesAction,
             SettingsPage.SilhouetteLayouts => silhouetteBackAction,
             SettingsPage.Gallery when useSharedGalleryHeader => galleryAction,
             _ => null
@@ -1022,6 +1070,7 @@ internal sealed class SettingsForm : Form
                      aboutAction,
                      galleryAction,
                      captureAction,
+                     routesAction,
                      silhouetteBackAction
                  })
         {
@@ -1050,6 +1099,7 @@ internal sealed class SettingsForm : Form
             {
                 SettingsPage.Home => 158,
                 SettingsPage.Capture => 190,
+                SettingsPage.Routes => 136,
                 SettingsPage.SilhouetteLayouts => 152,
                 _ => 164
             };
@@ -2508,6 +2558,7 @@ internal sealed class SettingsForm : Form
         SettingsPage.Home => HomeDesignedClientSize,
         SettingsPage.Activity => ActivityDesignedClientSize,
         SettingsPage.Capture => CaptureDesignedClientSize,
+        SettingsPage.Routes => RoutesDesignedClientSize,
         SettingsPage.SilhouetteLayouts => SilhouetteLayoutsDesignedClientSize,
         SettingsPage.Gallery => GalleryDesignedClientSize,
         SettingsPage.About => AboutDesignedClientSize,

@@ -7,6 +7,8 @@ internal static class DiscordRoutingProviderTests
 {
     private const string Webhook =
         "https://discord.com/api/webhooks/123456789012345678/provider-secret-token";
+    private const string CatalogWebhook =
+        "https://discord.com/api/webhooks/999999999999999999/catalog-destination-token";
 
     internal static async Task RunAsync(string root)
     {
@@ -22,6 +24,10 @@ internal static class DiscordRoutingProviderTests
         await AssertConnectionMismatchRefusesSendAsync(root, clipPath);
         await AssertDefiniteRejectionFailsAsync(root, clipPath);
         await AssertTransportAmbiguityIsUnknownAsync(root, clipPath);
+        await AssertRandomCatalogConnectionResolvesAsync(root, clipPath);
+        await AssertMissingCatalogConnectionFailsClosedAsync(root, clipPath);
+        await AssertTamperedCatalogConnectionFailsClosedAsync(root, clipPath);
+        await AssertLegacyConnectionStillResolvesWithCatalogAsync(root, clipPath);
     }
 
     private static void AssertConnectionIdentity()
@@ -171,12 +177,167 @@ internal static class DiscordRoutingProviderTests
             "A transport failure after provider entry must be delivery-unknown to prevent duplicate retry.");
     }
 
+    private static async Task AssertRandomCatalogConnectionResolvesAsync(
+        string root,
+        string clipPath)
+    {
+        var fixture = Catalog(root, "random-id",
+            new Guid("01234567-89ab-cdef-0123-456789abcdef"));
+        var added = await fixture.Catalog.AddAsync(
+            "Catalog destination", CatalogWebhook, DateTimeOffset.UtcNow);
+        Assert(added.Status == DiscordConnectionMutationStatus.Added &&
+               added.Connection is
+               {
+                   ConnectionId: "discord.0123456789abcdef0123456789abcdef",
+                   Health: DiscordConnectionHealth.Ready
+               },
+            "The provider catalog fixture must create one canonical random connection id.");
+        var handler = new RecordingHandler((request, _) =>
+        {
+            Assert(request.RequestUri is not null &&
+                   request.RequestUri.AbsolutePath.Contains(
+                       "catalog-destination-token", StringComparison.Ordinal) &&
+                   !request.RequestUri.AbsolutePath.Contains(
+                       "provider-secret-token", StringComparison.Ordinal),
+                "A catalog delivery must resolve the encrypted catalog destination, not the legacy setting.");
+            return Response(HttpStatusCode.OK, "{\"id\":\"444444444444444444\"}");
+        });
+        var result = await Provider(
+                Settings(root, Webhook), handler, fixture.Catalog)
+            .SendAsync(
+                Delivery(added.Connection!.ConnectionId),
+                Artifact(clipPath),
+                CancellationToken.None);
+        Assert(result.Outcome == RoutingDeliveryAttemptOutcome.Confirmed &&
+               result.RemoteReceiptReference == "discord:444444444444444444" &&
+               handler.CallCount == 1,
+            "A random catalog connection id must resolve and send exactly once.");
+    }
+
+    private static async Task AssertMissingCatalogConnectionFailsClosedAsync(
+        string root,
+        string clipPath)
+    {
+        var fixture = Catalog(root, "missing-id", Guid.NewGuid());
+        _ = await fixture.Store.LoadOrCreateAsync(DateTimeOffset.UtcNow);
+        var handler = new RecordingHandler((_, _) =>
+            throw new InvalidOperationException(
+                "A missing random catalog id must never fall back to the legacy webhook."));
+        var result = await Provider(
+                Settings(root, Webhook), handler, fixture.Catalog)
+            .SendAsync(
+                Delivery("discord.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Artifact(clipPath),
+                CancellationToken.None);
+        Assert(result.Outcome == RoutingDeliveryAttemptOutcome.Failed &&
+               result.ErrorCode == "discord-connection-mismatch" &&
+               handler.CallCount == 0,
+            "A missing random catalog connection must fail closed without legacy fallback or network I/O.");
+
+        var absent = Catalog(root, "missing-store", Guid.NewGuid());
+        var unavailableResult = await Provider(
+                Settings(root, Webhook), handler, absent.Catalog)
+            .SendAsync(
+                Delivery("discord.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                Artifact(clipPath),
+                CancellationToken.None);
+        Assert(unavailableResult.Outcome == RoutingDeliveryAttemptOutcome.Failed &&
+               unavailableResult.ErrorCode == "discord-connection-unavailable" &&
+               handler.CallCount == 0,
+            "A missing catalog file must leave a random connection unavailable, never reinterpret it as legacy.");
+    }
+
+    private static async Task AssertTamperedCatalogConnectionFailsClosedAsync(
+        string root,
+        string clipPath)
+    {
+        var fixture = Catalog(root, "tampered", Guid.NewGuid());
+        var added = await fixture.Catalog.AddAsync(
+            "Tamper target", CatalogWebhook, DateTimeOffset.UtcNow);
+        Assert(added.Connection is not null,
+            "The tamper fixture must create a catalog connection.");
+        var current = fixture.Store.Load().Document!;
+        var target = current.Connections.Single(item =>
+            item.ConnectionId == added.Connection!.ConnectionId);
+        var tampered = target with
+        {
+            ProtectedWebhook = Convert.ToBase64String([1, 2, 3, 4]),
+            UpdatedUtc = current.UpdatedUtc.AddSeconds(1)
+        };
+        var next = DiscordConnectionCatalogModel.ReplaceConnections(
+            current,
+            current.Connections.Select(item =>
+                    item.ConnectionId == target.ConnectionId ? tampered : item)
+                .ToArray(),
+            current.UpdatedUtc.AddSeconds(1));
+        await fixture.Store.SaveAsync(next, current.Generation);
+
+        var handler = new RecordingHandler((_, _) =>
+            throw new InvalidOperationException(
+                "A tampered protected webhook must never reach the network."));
+        var result = await Provider(
+                Settings(root, Webhook), handler, fixture.Catalog)
+            .SendAsync(
+                Delivery(target.ConnectionId),
+                Artifact(clipPath),
+                CancellationToken.None);
+        Assert(result.Outcome == RoutingDeliveryAttemptOutcome.Failed &&
+               result.ErrorCode == "discord-connection-unavailable" &&
+               handler.CallCount == 0,
+            "A structurally valid but undecryptable catalog credential must fail closed before provider I/O.");
+    }
+
+    private static async Task AssertLegacyConnectionStillResolvesWithCatalogAsync(
+        string root,
+        string clipPath)
+    {
+        var fixture = Catalog(root, "legacy-compatible", Guid.NewGuid());
+        _ = await fixture.Store.LoadOrCreateAsync(DateTimeOffset.UtcNow);
+        Assert(DiscordRoutingConnectionIdentity.TryCreate(Webhook, out var legacyConnectionId),
+            "The legacy compatibility fixture must derive its stable digest id.");
+        var handler = new RecordingHandler((request, _) =>
+        {
+            Assert(request.RequestUri?.AbsolutePath.Contains(
+                       "provider-secret-token", StringComparison.Ordinal) == true,
+                "A legacy digest id must continue resolving through the DPAPI-backed settings path.");
+            return Response(HttpStatusCode.OK, "{\"id\":\"555555555555555555\"}");
+        });
+        var result = await Provider(
+                Settings(root, Webhook), handler, fixture.Catalog)
+            .SendAsync(
+                Delivery(legacyConnectionId),
+                Artifact(clipPath),
+                CancellationToken.None);
+        Assert(result.Outcome == RoutingDeliveryAttemptOutcome.Confirmed &&
+               result.RemoteReceiptReference == "discord:555555555555555555" &&
+               handler.CallCount == 1,
+            "Adding the catalog resolver must preserve existing legacy digest-id deliveries.");
+    }
+
     private static DiscordRoutingProvider Provider(
         AppSettings settings,
-        RecordingHandler handler) =>
+        RecordingHandler handler,
+        DiscordConnectionCatalog? catalog = null) =>
         new(
-            new DiscordRoutingConnectionResolver(() => settings),
+            new DiscordRoutingConnectionResolver(() => settings, catalog),
             () => new DiscordWebhookClient(handler));
+
+    private static CatalogFixture Catalog(string root, string name, Guid id)
+    {
+        var directory = Path.Combine(root, "catalog-provider", name, "routing");
+        var store = new DiscordConnectionCatalogStore(
+            Path.Combine(directory, DiscordConnectionCatalogStore.FileName));
+        var routes = new RoutingSnapshotStore(
+            Path.Combine(directory, RoutingSnapshotStore.FileName));
+        var outbox = new RoutingOutboxStore(
+            Path.Combine(directory, RoutingOutboxStore.FileName));
+        var catalog = new DiscordConnectionCatalog(
+            store,
+            new CurrentUserDiscordWebhookProtector(),
+            new DiscordConnectionReferenceProbe(routes, outbox),
+            () => id);
+        return new CatalogFixture(catalog, store);
+    }
 
     private static PlannedDelivery Delivery(string connectionId)
     {
@@ -261,4 +422,8 @@ internal static class DiscordRoutingProviderTests
             return Task.FromResult(send(request, cancellationToken));
         }
     }
+
+    private sealed record CatalogFixture(
+        DiscordConnectionCatalog Catalog,
+        DiscordConnectionCatalogStore Store);
 }

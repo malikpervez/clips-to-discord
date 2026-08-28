@@ -513,6 +513,7 @@ internal enum BrandGlyph
     Settings,
     Activity,
     Capture,
+    Routes,
     Gallery,
     About,
     Folder,

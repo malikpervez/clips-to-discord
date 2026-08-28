@@ -207,6 +207,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ICaptureProjectCompletionSource? _captureProjectCompletionSource;
     private readonly SilhouetteProcessingCoordinator _silhouetteProcessingCoordinator;
     private readonly ClipProcessingOwnershipCoordinator _processingOwnership = new();
+    private readonly DiscordConnectionCatalog _discordConnectionCatalog = new();
     // Anything created at or after this process boundary may still be completing in the
     // isolated capture host while startup reconciliation scans the shared library.
     private readonly DateTimeOffset _captureRecoveryCutoffUtc = DateTimeOffset.UtcNow;
@@ -422,6 +423,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settingsOpen = true;
         try
         {
+            if (ShouldStageLegacyDiscordConnection(_settings))
+            {
+                var imported = await _discordConnectionCatalog.EnsureLegacyConnectionAsync(
+                    _settings,
+                    cancellationToken: _lifetimeCancellation.Token);
+                if (!imported.Succeeded)
+                {
+                    Log.Error($"Could not stage the existing Discord destination for Routes: {imported.Status}.");
+                }
+            }
             using var form = new SettingsForm(
                 _settings,
                 (Icon)_applicationIcon.Clone(),
@@ -436,7 +447,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 captureSettings: _captureSettings,
                 captureEngineAvailable: _manualCaptureRecorder is IReplayCaptureController,
                 saveCaptureSettings: SaveAndApplyCaptureSettings,
-                manualCaptureRecorder: _manualCaptureRecorder);
+                manualCaptureRecorder: _manualCaptureRecorder,
+                discordConnectionCatalog: _discordConnectionCatalog);
             form.GalleryRenditionRetryRequested += GalleryRenditionRetryRequested;
             _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
@@ -469,6 +481,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _settingsOpen = false;
         }
     }
+
+    internal static bool ShouldStageLegacyDiscordConnection(AppSettings settings) =>
+        settings is { UploadToDiscord: true } &&
+        WebhookValidation.IsDiscordWebhook(settings.WebhookUrl);
 
     private async Task PersistAndApplySettingsAsync(AppSettings updated)
     {

@@ -23,6 +23,12 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
 - ClipCord Capture preferences, including the selected camera device and the locally stored record
   of one-time Reaction Camera consent
 - The Discord webhook URL encrypted with Windows DPAPI for the current user
+- Additional named Discord connections encrypted with Windows DPAPI for the current user; route
+  files contain only random opaque connection identifiers, never webhook URLs or tokens
+- Local route definitions and, only during the final routing activation flow, a legacy-cutover
+  marker that binds the preserved Discord or Local-only fallback to the exact watcher state
+- When the routing runtime is eventually enabled, bounded local delivery plans, approval/retry
+  state, content hashes, and opaque provider receipt references needed for crash-safe recovery
 - Path/length/timestamp keys used only to preserve the initial do-not-upload baseline
 - SHA-256 hashes of clip contents used for stable duplicate detection
 - Pending archive moves

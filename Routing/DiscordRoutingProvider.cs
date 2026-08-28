@@ -87,20 +87,31 @@ internal sealed class DiscordRoutingConnectionResolution
 }
 
 /// <summary>
-/// Re-reads the current DPAPI-backed settings for every provider attempt. A frozen delivery can
-/// use the current secret only when its immutable opaque connection id still names that secret.
+/// Re-reads encrypted connection state for every provider attempt. Random catalog ids resolve
+/// only through the DPAPI-backed catalog; legacy SHA-256 ids retain the settings-backed path.
+/// A missing or damaged catalog record is never reinterpreted as a legacy destination.
 /// </summary>
 internal sealed class DiscordRoutingConnectionResolver
 {
     private readonly Func<AppSettings> _settingsProvider;
+    private readonly DiscordConnectionCatalog? _catalog;
 
-    internal DiscordRoutingConnectionResolver() : this(SettingsStore.Load)
+    internal DiscordRoutingConnectionResolver()
+        : this(SettingsStore.Load, new DiscordConnectionCatalog())
     {
     }
 
     internal DiscordRoutingConnectionResolver(Func<AppSettings> settingsProvider)
+        : this(settingsProvider, catalog: null)
+    {
+    }
+
+    internal DiscordRoutingConnectionResolver(
+        Func<AppSettings> settingsProvider,
+        DiscordConnectionCatalog? catalog)
     {
         _settingsProvider = settingsProvider ?? throw new ArgumentNullException(nameof(settingsProvider));
+        _catalog = catalog;
     }
 
     internal DiscordRoutingConnectionResolution Resolve(string connectionId)
@@ -108,9 +119,25 @@ internal sealed class DiscordRoutingConnectionResolver
         try
         {
             var settings = _settingsProvider();
-            if (settings is null ||
-                settings.CompressionTargetMb is < 1 or > 100 ||
-                !DiscordRoutingConnectionIdentity.TryCreate(
+            if (settings is null || settings.CompressionTargetMb is < 1 or > 100)
+            {
+                return DiscordRoutingConnectionResolution.Unavailable;
+            }
+
+            if (_catalog is not null)
+            {
+                var catalogResolution = _catalog.ResolveForRouting(connectionId, settings);
+                if (catalogResolution.Status == DiscordRoutingConnectionResolutionStatus.Resolved)
+                    return catalogResolution;
+                // Catalog ids use a random 128-bit suffix. If one cannot be resolved, never let
+                // the legacy digest resolver reinterpret it as a different destination.
+                if (IsCatalogConnectionId(connectionId))
+                {
+                    return catalogResolution;
+                }
+            }
+
+            if (!DiscordRoutingConnectionIdentity.TryCreate(
                     settings.WebhookUrl, out var currentConnectionId))
             {
                 return DiscordRoutingConnectionResolution.Unavailable;
@@ -130,6 +157,13 @@ internal sealed class DiscordRoutingConnectionResolver
             return DiscordRoutingConnectionResolution.Unavailable;
         }
     }
+
+    private static bool IsCatalogConnectionId(string? connectionId) =>
+        connectionId is not null &&
+        connectionId.StartsWith("discord.", StringComparison.Ordinal) &&
+        connectionId.Length == "discord.".Length + 32 &&
+        connectionId["discord.".Length..].All(character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
 
 /// <summary>

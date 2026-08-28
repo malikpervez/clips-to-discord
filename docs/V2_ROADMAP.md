@@ -148,6 +148,14 @@ soak tests remain phase gates before release.
 - Transforms: trim, reframe, silhouette, audio mix, captions, and compression.
 - Actions: save locally, Discord, YouTube, and TikTok draft/direct post.
 - Begin with guided recipes; add a visual Zapier-style builder only after common recipes are known.
+- The Discord-first foundation now includes crash-safe plans, encrypted named Discord connections,
+  operator retry/approval controls, and the Figma-aligned Routes editor. Connection staging is
+  available while route edits remain read-only until the final atomic cutover can preserve the
+  exact 1.x watcher state as an immutable fallback.
+- Live routing activation remains deliberately gated until SteelSeries/NVIDIA watched-folder clips
+  have the same durable ingestion and artifact-resolution path as ClipCord Capture. The legacy
+  watcher and routing runtime must never run concurrently, and activation must not drop an existing
+  source type.
 
 ## Invariants
 
