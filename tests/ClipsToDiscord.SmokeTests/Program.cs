@@ -8162,6 +8162,14 @@ static void AssertSharedShellLayout(SettingsForm form)
                Math.Abs(control.Width - control.Height) <= 1),
         $"The seven shared-rail Figma glyphs must retain their compact 16px logical width; " +
         $"expected={expectedNavigationGlyphSide}, actual={string.Join(", ", navigationGlyphs.Select(control => control.Size))}.");
+    var routesNavigation = navigation.Controls.Cast<Control>()
+        .Single(control => control.Name == "RoutesNavItem");
+    var routesGlyph = EnumerateControls(routesNavigation).OfType<BrandGlyphControl>()
+        .Single(control => control.Name == "NavigationGlyph");
+    Assert(routesGlyph.Glyph == BrandGlyph.Routes &&
+           FigmaIconRenderer.TryGetBrandAsset(routesGlyph.Glyph, out var routesAsset) &&
+           routesAsset == FigmaIconAsset.Routes,
+        "The Routes navigation item must resolve through the Figma asset map to the exact Routes icon.");
 }
 
 static void AssertConditionalSaveBarLayout(
@@ -8405,8 +8413,11 @@ static void RenderSharedPagePreview(
             AppSettings.DefaultCompressionTargetMb,
             "PlayerOne",
             true);
-        var previewRoutes = new RoutingRouteManager(new RoutingSnapshotStore(
-            Path.Combine(fixtureRoot, "routing", RoutingSnapshotStore.FileName)));
+        var previewRoutes = new RoutingRouteManager(
+            new RoutingSnapshotStore(
+                Path.Combine(fixtureRoot, "routing", RoutingSnapshotStore.FileName)),
+            mutationAuthority: TestRouteMutationAuthority.Allowed,
+            connectionMembership: TestRoutingConnectionMembership.AllowAll);
         if (page == SettingsPage.Routes)
         {
             DiscordRoutingConnectionIdentity.TryCreate(settings.WebhookUrl, out var connectionId);

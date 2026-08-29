@@ -4,6 +4,12 @@ internal static class RoutingRuntimeBridgeTests
 {
     private static readonly DateTimeOffset Now =
         new(2026, 8, 27, 21, 0, 0, TimeSpan.Zero);
+    private static readonly IReadOnlySet<ClipCaptureSource> FullLegacyCoverage =
+        new HashSet<ClipCaptureSource>
+        {
+            ClipCaptureSource.SteelSeriesGg,
+            ClipCaptureSource.Nvidia
+        };
 
     internal static void Run(string testRoot) => RunAsync(testRoot).GetAwaiter().GetResult();
 
@@ -70,24 +76,24 @@ internal static class RoutingRuntimeBridgeTests
                RoutingRuntimeGateState.DisabledByDefault,
             "The routing runtime feature gate must be disabled by default.");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   false, marker, snapshotStore, evidence, owned).State ==
+                   false, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
                RoutingRuntimeGateState.DisabledByDefault,
             "A committed marker must not override the explicit disabled default.");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
                RoutingRuntimeGateState.MigrationMarkerMissing,
             "A requested cutover without a committed marker must fail closed.");
 
         File.WriteAllText(marker.Path, "status=committed");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
                RoutingRuntimeGateState.MigrationMarkerNotCommitted,
             "A lookalike or old migration marker must not activate routing.");
 
         File.Delete(marker.Path);
         marker = CreateMarkerStore(root, migrationPlan, commit: false);
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
                RoutingRuntimeGateState.MigrationMarkerNotCommitted,
             "A valid but merely prepared migration marker must not activate routing.");
         var prepared = marker.Load().Document!;
@@ -103,7 +109,7 @@ internal static class RoutingRuntimeBridgeTests
         });
         stateStore.Save(pending);
         var blocked = RoutingRuntimeFeatureGate.Evaluate(
-            true, marker, snapshotStore, evidence, owned);
+            true, marker, snapshotStore, evidence, owned, FullLegacyCoverage);
         Assert(blocked.State == RoutingRuntimeGateState.LegacyQueuesPending &&
                blocked.PendingLegacyMoves == 1 &&
                blocked.PendingLegacyLocalOnlyMoves == 1 &&
@@ -112,13 +118,34 @@ internal static class RoutingRuntimeBridgeTests
 
         File.WriteAllText(stateStore.StatePath, "{\"version\":4}");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
                RoutingRuntimeGateState.LegacyStateUnavailable,
             "Missing legacy queue state must fail closed rather than being treated as empty.");
 
         stateStore.Save(drained);
+        var missingCoverage = RoutingRuntimeFeatureGate.Evaluate(
+            true,
+            marker,
+            snapshotStore,
+            evidence,
+            owned,
+            new HashSet<ClipCaptureSource> { ClipCaptureSource.Nvidia });
+        var missingInspection = missingCoverage.Inspect();
+        Assert(missingInspection.State == RoutingRuntimeGateState.SourceCoverageMissing &&
+               missingInspection.RequiredLegacySource == ClipCaptureSource.SteelSeriesGg &&
+               !missingInspection.HasRequiredSourceCoverage && !missingCoverage.Enabled,
+            "A routing runtime must not activate when its registered adapters omit the exact legacy watched source.");
+        var mutableCoverage = new HashSet<ClipCaptureSource>
+        {
+            ClipCaptureSource.SteelSeriesGg
+        };
+        var copiedCoverage = RoutingRuntimeFeatureGate.Evaluate(
+            true, marker, snapshotStore, evidence, owned, mutableCoverage);
+        mutableCoverage.Clear();
+        Assert(copiedCoverage.Enabled,
+            "The activation gate must freeze registered source coverage instead of retaining a caller-mutable set.");
         var enabled = RoutingRuntimeFeatureGate.Evaluate(
-            true, marker, snapshotStore, evidence, owned);
+            true, marker, snapshotStore, evidence, owned, FullLegacyCoverage);
         Assert(enabled.Enabled,
             "Only an exact committed marker plus fully drained legacy queues may enable the gate.");
         drained.KnownContentHashes.Add(new string('B', 64));
@@ -303,7 +330,8 @@ internal static class RoutingRuntimeBridgeTests
                 marker,
                 snapshotStore,
                 evidence,
-                callerLease);
+                callerLease,
+                FullLegacyCoverage);
             Assert(blockedGate.State == RoutingRuntimeGateState.OwnershipUnavailable,
                 "Direct caller-handle revocation must not enable routing while the legacy watcher continues.");
 
@@ -326,7 +354,8 @@ internal static class RoutingRuntimeBridgeTests
                 marker,
                 snapshotStore,
                 evidence,
-                routingLease);
+                routingLease,
+                FullLegacyCoverage);
             Assert(enabledGate.Enabled,
                 "Exact cutover evidence may enable routing after legacy shutdown releases ownership.");
         }
@@ -369,7 +398,8 @@ internal static class RoutingRuntimeBridgeTests
             markers,
             routes,
             evidence,
-            owned);
+            owned,
+            FullLegacyCoverage);
         Assert(gate.Enabled,
             "Exact current Discord connection evidence must authorize its committed marker.");
         connectionIds = ["discord.connection.changed"];
@@ -1164,7 +1194,8 @@ internal static class RoutingRuntimeBridgeTests
             marker,
             snapshotStore,
             evidence,
-            routingLease);
+            routingLease,
+            FullLegacyCoverage);
         Assert(gate.Enabled, "The focused runtime fixture must carry explicit safe cutover evidence.");
         return new Fixture(
             root,

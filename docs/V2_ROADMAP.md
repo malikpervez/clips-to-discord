@@ -155,7 +155,9 @@ soak tests remain phase gates before release.
 - Live routing activation remains deliberately gated until SteelSeries/NVIDIA watched-folder clips
   have the same durable ingestion and artifact-resolution path as ClipCord Capture. The legacy
   watcher and routing runtime must never run concurrently, and activation must not drop an existing
-  source type.
+  source type. Activation evidence now carries the exact normalized legacy source from durable
+  `WatchState` plus an immutable set of sources covered by registered routing adapters; incomplete
+  coverage is rejected and legacy ownership is restored before routing can start.
 
 ## Invariants
 

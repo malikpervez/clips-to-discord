@@ -99,6 +99,8 @@ internal sealed class RoutesView : UserControl
     private readonly OutlineButton _connectionsTab;
     private readonly GradientButton _newRouteButton;
     private readonly Func<bool> _isCutoverCommitted;
+    private readonly Func<IReadOnlyList<RoutingConnectionDisplay>, RoutingRouteDraft?> _editRoute;
+    private readonly int? _layoutDpi;
     private bool _showConnections;
     private bool _busy;
     private bool _cutoverCommitted;
@@ -111,11 +113,15 @@ internal sealed class RoutesView : UserControl
     internal RoutesView(
         RoutingRouteManager? routeManager = null,
         IRoutingConnectionViewSource? connections = null,
-        Func<bool>? isCutoverCommitted = null)
+        Func<bool>? isCutoverCommitted = null,
+        Func<IReadOnlyList<RoutingConnectionDisplay>, RoutingRouteDraft?>? editRoute = null,
+        int? layoutDpi = null)
     {
+        _layoutDpi = layoutDpi is null ? null : Math.Max(96, layoutDpi.Value);
         _routeManager = routeManager ?? new RoutingRouteManager();
         _connections = connections ?? throw new ArgumentNullException(nameof(connections));
         _isCutoverCommitted = isCutoverCommitted ?? CreateCutoverStatusSource(_routeManager);
+        _editRoute = editRoute ?? ShowRouteEditor;
         Name = "RoutesView";
         Dock = DockStyle.Fill;
         BackColor = ClipCordTheme.SurfaceBase;
@@ -291,7 +297,7 @@ internal sealed class RoutesView : UserControl
         var fallback = ordered.Where(route => route.Kind == RoutingRouteKind.Fallback).ToArray();
         content.Controls.Add(BuildSectionHeader(
             "CONFIGURED ROUTES",
-            $"{specific.Count(route => route.Enabled)} configured"), 0, row++);
+            $"{specific.Length} configured"), 0, row++);
         if (specific.Length == 0)
         {
             content.Controls.Add(BuildInlineEmpty(
@@ -644,7 +650,7 @@ internal sealed class RoutesView : UserControl
                 : null;
         enabled.Enabled = editable;
         enabled.ForeColor = route.Enabled ? Color.FromArgb(76, 210, 145) : ClipCordTheme.TextSecondary;
-        enabled.Click += async (_, _) => await RunCommandAsync(
+        enabled.Click += async (_, _) => await RunRouteCommandAsync(
             () => _routeManager.SetEnabledAsync(route.RouteId, !route.Enabled));
         host.Controls.Add(enabled);
         var remove = CreateSmallButton("Delete", 66);
@@ -657,7 +663,7 @@ internal sealed class RoutesView : UserControl
                     "Delete route",
                     MessageBoxButtons.OKCancel,
                     MessageBoxIcon.Warning) != DialogResult.OK) return;
-            await RunCommandAsync(() => _routeManager.DeleteAsync(route.RouteId));
+            await RunRouteCommandAsync(() => _routeManager.DeleteAsync(route.RouteId));
         };
         remove.Enabled = editable;
         remove.AccessibleDescription = editable
@@ -674,14 +680,14 @@ internal sealed class RoutesView : UserControl
         down.Name = $"MoveRouteDown_{route.RouteId:N}";
         down.Enabled = editable && nextIsEditable;
         down.AccessibleName = $"Move {route.Name} down";
-        down.Click += async (_, _) => await RunCommandAsync(
+        down.Click += async (_, _) => await RunRouteCommandAsync(
             () => _routeManager.MoveAsync(route.RouteId, 1));
         host.Controls.Add(down);
         var up = CreateSmallButton("↑", 34);
         up.Name = $"MoveRouteUp_{route.RouteId:N}";
         up.Enabled = editable && previousIsEditable;
         up.AccessibleName = $"Move {route.Name} up";
-        up.Click += async (_, _) => await RunCommandAsync(
+        up.Click += async (_, _) => await RunRouteCommandAsync(
             () => _routeManager.MoveAsync(route.RouteId, -1));
         host.Controls.Add(up);
         return host;
@@ -858,13 +864,20 @@ internal sealed class RoutesView : UserControl
         return card;
     }
 
-    private async Task AddRouteAsync()
+    internal async Task AddRouteAsync()
     {
-        if (_busy || !_cutoverCommitted) return;
+        if (_busy || !ReadCutoverStatus()) return;
         var connections = SafeLoadConnections().Where(item => item.Available).ToArray();
+        var draft = _editRoute(connections);
+        if (draft is null) return;
+        _ = await RunRouteCommandAsync(() => _routeManager.AddAsync(draft));
+    }
+
+    private RoutingRouteDraft? ShowRouteEditor(
+        IReadOnlyList<RoutingConnectionDisplay> connections)
+    {
         using var dialog = new RouteEditorDialog(connections);
-        if (dialog.ShowDialog(FindForm()) != DialogResult.OK || dialog.Draft is null) return;
-        await RunCommandAsync(() => _routeManager.AddAsync(dialog.Draft));
+        return dialog.ShowDialog(FindForm()) == DialogResult.OK ? dialog.Draft : null;
     }
 
     private async Task AddDiscordConnectionAsync()
@@ -913,19 +926,22 @@ internal sealed class RoutesView : UserControl
         finally
         {
             _busy = false;
+            _cutoverCommitted = ReadCutoverStatus();
             _newRouteButton.Enabled = _cutoverCommitted;
         }
     }
 
-    private async Task RunCommandAsync(Func<Task> command)
+    internal async Task<bool> RunRouteCommandAsync(Func<Task> command)
     {
-        if (_busy) return;
+        ArgumentNullException.ThrowIfNull(command);
+        if (_busy || !ReadCutoverStatus()) return false;
         _busy = true;
         _newRouteButton.Enabled = false;
         try
         {
             await command();
             Reload();
+            return true;
         }
         catch (Exception exception) when (
             exception is InvalidDataException or InvalidOperationException or IOException or
@@ -938,10 +954,12 @@ internal sealed class RoutesView : UserControl
                 "Routes need attention",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
+            return false;
         }
         finally
         {
             _busy = false;
+            _cutoverCommitted = ReadCutoverStatus();
             _newRouteButton.Enabled = _cutoverCommitted;
         }
     }
@@ -976,29 +994,8 @@ internal sealed class RoutesView : UserControl
         }
     }
 
-    private static Func<bool> CreateCutoverStatusSource(RoutingRouteManager routeManager)
-    {
-        var directory = Path.GetDirectoryName(routeManager.SnapshotPath)
-            ?? throw new InvalidOperationException("The routing state directory is unavailable.");
-        var marker = new LegacyRoutingMigrationMarkerStore(
-            Path.Combine(directory, LegacyRoutingMigrationMarkerStore.FileName));
-        return () =>
-        {
-            var loaded = marker.Load();
-            if (!loaded.LoadedFromDisk ||
-                loaded.Document?.Phase != LegacyRoutingMigrationMarkerPhase.Committed)
-            {
-                return false;
-            }
-            var routes = routeManager.Load();
-            if (!routes.LoadedFromDisk || routes.Document is null) return false;
-            var migrationRoute = routes.Document.Routes.SingleOrDefault(route =>
-                route.RouteId == loaded.Document.Route.RouteId);
-            return migrationRoute is not null &&
-                   LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
-                       migrationRoute, loaded.Document.Route);
-        };
-    }
+    private static Func<bool> CreateCutoverStatusSource(RoutingRouteManager routeManager) =>
+        () => routeManager.CanMutate();
 
     private static string DescribeTrigger(RoutingRoute route)
     {
@@ -1036,12 +1033,12 @@ internal sealed class RoutesView : UserControl
         return string.Join("   →   ", actions);
     }
 
-    private static OutlineButton CreateSmallButton(string text, int width) => new()
+    private OutlineButton CreateSmallButton(string text, int width) => new()
     {
         Text = text,
         AutoSize = false,
-        Size = new Size(width, 30),
-        Margin = new Padding(5, 0, 0, 0),
+        Size = new Size(ScaleLogical(width), ScaleLogical(30)),
+        Margin = new Padding(ScaleLogical(5), 0, 0, 0),
         SurfaceColor = ClipCordTheme.SurfaceControl,
         HoverColor = ClipCordTheme.SurfaceControlHover,
         OutlineColor = ClipCordTheme.BorderStrong,
@@ -1049,8 +1046,11 @@ internal sealed class RoutesView : UserControl
         Font = ClipCordTheme.InterfaceFont(8.5f)
     };
 
+    internal static int ScaleLogicalMetric(int value, int dpi) =>
+        Math.Max(1, (int)Math.Round(value * Math.Max(96, dpi) / 96d));
+
     private int ScaleLogical(int value) =>
-        Math.Max(1, (int)Math.Round(value * Math.Max(96, DeviceDpi) / 96d));
+        ScaleLogicalMetric(value, _layoutDpi ?? DeviceDpi);
 }
 
 internal sealed class DiscordConnectionDialog : Form
@@ -1189,8 +1189,8 @@ internal sealed class RouteEditorDialog : Form
     {
         _connections = connections ?? throw new ArgumentNullException(nameof(connections));
         Text = "New route";
-        ClientSize = new Size(600, 610);
-        MinimumSize = new Size(560, 570);
+        ClientSize = new Size(600, 630);
+        MinimumSize = new Size(560, 590);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -1258,7 +1258,7 @@ internal sealed class RouteEditorDialog : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 124));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         root.Controls.Add(CreateTitle(), 0, 0);
@@ -1330,11 +1330,11 @@ internal sealed class RouteEditorDialog : Form
         };
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 29));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 49));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(CreateSectionLabel("THEN"), 0, 0);
         panel.Controls.Add(CreateHorizontalChoices(_discord, _localOnly), 0, 1);
-        panel.Controls.Add(_discordConnection, 0, 2);
+        panel.Controls.Add(CreateField("DISCORD CONNECTION", _discordConnection), 0, 2);
         panel.Controls.Add(CreateHorizontalChoices(_approval, _fileIntoLibrary), 0, 3);
         return panel;
     }

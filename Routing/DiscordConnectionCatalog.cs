@@ -409,7 +409,7 @@ internal sealed class DiscordConnectionReferenceProbe
 /// The catalog persists ciphertext and non-secret metadata only. All mutations are generation-CAS
 /// operations; connection ids remain stable across a safe credential update.
 /// </summary>
-internal sealed class DiscordConnectionCatalog
+internal sealed class DiscordConnectionCatalog : IRoutingConnectionMembership
 {
     private const string DefaultLegacyDisplayName = "Friends server";
     private readonly DiscordConnectionCatalogStore _store;
@@ -453,6 +453,22 @@ internal sealed class DiscordConnectionCatalog
             RoutingDocumentLoadStatus.Loaded,
             loaded.Document!.Generation,
             loaded.Document.Connections.Select(ToSummary).ToArray());
+    }
+
+    bool IRoutingConnectionMembership.IsReady(
+        RoutingDestinationKind destination,
+        string connectionId,
+        CancellationToken cancellationToken)
+    {
+        if (destination != RoutingDestinationKind.Discord ||
+            !TryValidateConnectionId(connectionId))
+        {
+            return false;
+        }
+        var snapshot = Inspect(cancellationToken);
+        return snapshot.IsUsable && snapshot.Connections.Any(connection =>
+            connection.ConnectionId.Equals(connectionId, StringComparison.Ordinal) &&
+            connection.Health == DiscordConnectionHealth.Ready);
     }
 
     internal async Task<DiscordConnectionMutationResult> AddAsync(
@@ -635,7 +651,8 @@ internal sealed class DiscordConnectionCatalog
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        if (!DiscordRoutingConnectionIdentity.TryCreate(
+        if (!settings.UploadToDiscord ||
+            !DiscordRoutingConnectionIdentity.TryCreate(
                 settings.WebhookUrl, out var legacyIdentity))
         {
             return Task.FromResult(InvalidInput());

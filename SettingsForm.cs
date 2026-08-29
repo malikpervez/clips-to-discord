@@ -544,8 +544,10 @@ internal sealed class SettingsForm : Form
             _captureEngineAvailable,
             _saveCaptureSettings,
             _manualCaptureRecorder);
+        var routeManager = _routingRouteManager ?? new RoutingRouteManager(
+            connectionMembership: _discordConnectionCatalog);
         _routesPage = new RoutesView(
-            _routingRouteManager,
+            routeManager,
             connections: _discordConnectionCatalog is null
                 ? new LegacyDiscordConnectionViewSource(() => _appliedSettings)
                 : new DiscordConnectionCatalogViewSource(_discordConnectionCatalog));

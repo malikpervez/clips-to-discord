@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 namespace ClipsToDiscord;
 
 internal enum RoutingRuntimeSourceEventKind
@@ -149,6 +151,7 @@ internal enum RoutingRuntimeGateState
     MigrationEvidenceMismatch,
     RoutingSnapshotUnavailable,
     MigrationRouteMismatch,
+    SourceCoverageMissing,
     Enabled
 }
 
@@ -164,19 +167,24 @@ internal sealed class RoutingRuntimeFeatureGate
     private readonly RoutingSnapshotStore? _routingSnapshots;
     private readonly ILegacyRoutingActivationEvidenceSource? _activationEvidence;
     private readonly ClipProcessingOwnershipLease? _ownership;
+    private readonly IReadOnlySet<ClipCaptureSource> _coveredLegacySources;
 
     private RoutingRuntimeFeatureGate(
         bool requestedEnabled,
         LegacyRoutingMigrationMarkerStore? migrationMarkers,
         RoutingSnapshotStore? routingSnapshots,
         ILegacyRoutingActivationEvidenceSource? activationEvidence,
-        ClipProcessingOwnershipLease? ownership)
+        ClipProcessingOwnershipLease? ownership,
+        IReadOnlySet<ClipCaptureSource> coveredLegacySources)
     {
         _requestedEnabled = requestedEnabled;
         _migrationMarkers = migrationMarkers;
         _routingSnapshots = routingSnapshots;
         _activationEvidence = activationEvidence;
         _ownership = ownership;
+        _coveredLegacySources = coveredLegacySources
+            .Select(AppSettings.NormalizeCaptureSource)
+            .ToFrozenSet();
     }
 
     internal static RoutingRuntimeFeatureGate Disabled { get; } = new(
@@ -184,32 +192,36 @@ internal sealed class RoutingRuntimeFeatureGate
         migrationMarkers: null,
         routingSnapshots: null,
         activationEvidence: null,
-        ownership: null);
+        ownership: null,
+        coveredLegacySources: FrozenSet<ClipCaptureSource>.Empty);
 
     internal RoutingRuntimeGateState State => Inspect().State;
     internal int PendingLegacyMoves => Inspect().PendingLegacyMoves;
     internal int PendingLegacyLocalOnlyMoves => Inspect().PendingLegacyLocalOnlyMoves;
     internal int PendingLegacyEditedUploads => Inspect().PendingLegacyEditedUploads;
     internal int IgnoredLegacyFileKeys => Inspect().IgnoredLegacyFileKeys;
-    internal bool Enabled => State == RoutingRuntimeGateState.Enabled;
+    internal bool Enabled => Inspect().Enabled;
 
     internal static RoutingRuntimeFeatureGate Evaluate(
         bool requestedEnabled,
         LegacyRoutingMigrationMarkerStore migrationMarkers,
         RoutingSnapshotStore routingSnapshots,
         ILegacyRoutingActivationEvidenceSource activationEvidence,
-        ClipProcessingOwnershipLease ownership)
+        ClipProcessingOwnershipLease ownership,
+        IReadOnlySet<ClipCaptureSource> coveredLegacySources)
     {
         ArgumentNullException.ThrowIfNull(migrationMarkers);
         ArgumentNullException.ThrowIfNull(routingSnapshots);
         ArgumentNullException.ThrowIfNull(activationEvidence);
         ArgumentNullException.ThrowIfNull(ownership);
+        ArgumentNullException.ThrowIfNull(coveredLegacySources);
         return new RoutingRuntimeFeatureGate(
             requestedEnabled,
             migrationMarkers,
             routingSnapshots,
             activationEvidence,
-            ownership);
+            ownership,
+            coveredLegacySources);
     }
 
     internal RoutingRuntimeGateInspection Inspect()
@@ -258,6 +270,9 @@ internal sealed class RoutingRuntimeFeatureGate
         }
 
         var legacyState = evidence.LegacyState;
+        var requiredLegacySource = legacyState.State is null
+            ? (ClipCaptureSource?)null
+            : AppSettings.NormalizeCaptureSource(legacyState.State.CaptureSource);
         var pendingMoves = legacyState.PendingMoves;
         var pendingLocalOnlyMoves = legacyState.PendingLocalOnlyMoves;
         var pendingEditedUploads = legacyState.PendingEditedUploads;
@@ -273,7 +288,9 @@ internal sealed class RoutingRuntimeFeatureGate
                 ignoredFileKeys,
                 null,
                 marker.Document.PayloadFingerprint,
-                ownership.Epoch);
+                ownership.Epoch,
+                requiredLegacySource,
+                _coveredLegacySources);
         }
 
         var readiness = evidence.Readiness!;
@@ -292,7 +309,8 @@ internal sealed class RoutingRuntimeFeatureGate
             return Inspection(
                 RoutingRuntimeGateState.MigrationEvidenceMismatch,
                 ownership.Epoch,
-                marker.Document.PayloadFingerprint);
+                marker.Document.PayloadFingerprint,
+                requiredLegacySource: requiredLegacySource);
         }
 
         var snapshot = _routingSnapshots?.Load();
@@ -301,7 +319,8 @@ internal sealed class RoutingRuntimeFeatureGate
             return Inspection(
                 RoutingRuntimeGateState.RoutingSnapshotUnavailable,
                 ownership.Epoch,
-                marker.Document.PayloadFingerprint);
+                marker.Document.PayloadFingerprint,
+                requiredLegacySource: requiredLegacySource);
         }
         var migrationRoute = snapshot.Document.Routes.SingleOrDefault(route =>
             route.RouteId == marker.Document.Route.RouteId);
@@ -314,7 +333,19 @@ internal sealed class RoutingRuntimeFeatureGate
                 RoutingRuntimeGateState.MigrationRouteMismatch,
                 ownership.Epoch,
                 marker.Document.PayloadFingerprint,
-                snapshot.Document.Generation);
+                snapshot.Document.Generation,
+                requiredLegacySource);
+        }
+
+        if (requiredLegacySource is not { } required ||
+            !_coveredLegacySources.Contains(required))
+        {
+            return Inspection(
+                RoutingRuntimeGateState.SourceCoverageMissing,
+                ownership.Epoch,
+                marker.Document.PayloadFingerprint,
+                snapshot.Document.Generation,
+                requiredLegacySource);
         }
 
         return new RoutingRuntimeGateInspection(
@@ -325,14 +356,17 @@ internal sealed class RoutingRuntimeFeatureGate
             0,
             snapshot.Document.Generation,
             marker.Document.PayloadFingerprint,
-            ownership.Epoch);
+            ownership.Epoch,
+            requiredLegacySource,
+            _coveredLegacySources);
     }
 
-    private static RoutingRuntimeGateInspection Inspection(
+    private RoutingRuntimeGateInspection Inspection(
         RoutingRuntimeGateState state,
         long? ownershipEpoch = null,
         string? markerPayloadFingerprint = null,
-        long? routingGeneration = null) => new(
+        long? routingGeneration = null,
+        ClipCaptureSource? requiredLegacySource = null) => new(
         state,
         0,
         0,
@@ -340,7 +374,9 @@ internal sealed class RoutingRuntimeFeatureGate
         0,
         routingGeneration,
         markerPayloadFingerprint,
-        ownershipEpoch);
+        ownershipEpoch,
+        requiredLegacySource,
+        _coveredLegacySources);
 }
 
 internal sealed record RoutingRuntimeGateInspection(
@@ -351,17 +387,27 @@ internal sealed record RoutingRuntimeGateInspection(
     int IgnoredLegacyFileKeys,
     long? RoutingGeneration,
     string? MarkerPayloadFingerprint,
-    long? OwnershipEpoch)
+    long? OwnershipEpoch,
+    ClipCaptureSource? RequiredLegacySource,
+    IReadOnlySet<ClipCaptureSource> CoveredLegacySources)
 {
-    internal bool Enabled => State == RoutingRuntimeGateState.Enabled;
+    internal bool HasRequiredSourceCoverage =>
+        RequiredLegacySource is { } required && CoveredLegacySources.Contains(required);
+
+    internal bool Enabled =>
+        State == RoutingRuntimeGateState.Enabled && HasRequiredSourceCoverage;
 
     internal bool SamePermit(RoutingRuntimeGateInspection other) =>
-        SameAuthority(other) && RoutingGeneration == other.RoutingGeneration;
+        SameAuthority(other) && RoutingGeneration == other.RoutingGeneration &&
+        RequiredLegacySource == other.RequiredLegacySource &&
+        CoveredLegacySources.SetEquals(other.CoveredLegacySources);
 
     internal bool SameAuthority(RoutingRuntimeGateInspection other) =>
         other.Enabled &&
         MarkerPayloadFingerprint == other.MarkerPayloadFingerprint &&
-        OwnershipEpoch == other.OwnershipEpoch;
+        OwnershipEpoch == other.OwnershipEpoch &&
+        RequiredLegacySource == other.RequiredLegacySource &&
+        CoveredLegacySources.SetEquals(other.CoveredLegacySources);
 }
 
 internal enum RoutingRuntimePlanStatus

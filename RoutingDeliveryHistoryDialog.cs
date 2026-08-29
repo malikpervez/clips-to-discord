@@ -5,22 +5,27 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
     private readonly RoutingDeliveryHistoryReader _history;
     private readonly RoutingOperatorControl _operator;
     private readonly FlowLayoutPanel _items;
+    private readonly int? _layoutDpi;
     private bool _busy;
 
-    internal RoutingDeliveryHistoryDialog(RoutingOutboxStore? outboxStore = null)
+    internal RoutingDeliveryHistoryDialog(
+        RoutingOutboxStore? outboxStore = null,
+        int? layoutDpi = null)
     {
+        _layoutDpi = layoutDpi is null ? null : Math.Max(96, layoutDpi.Value);
         var store = outboxStore ?? new RoutingOutboxStore();
         _history = new RoutingDeliveryHistoryReader(store);
         _operator = new RoutingOperatorControl(store);
         Text = "ClipCord — Delivery history";
-        ClientSize = new Size(820, 620);
-        MinimumSize = new Size(660, 500);
+        AutoScaleMode = AutoScaleMode.None;
+        ClientSize = new Size(ScaleLogical(820), ScaleLogical(620));
+        MinimumSize = new Size(ScaleLogical(660), ScaleLogical(500));
         StartPosition = FormStartPosition.CenterParent;
         BackColor = ClipCordTheme.SurfaceBase;
         ForeColor = ClipCordTheme.TextPrimary;
         Font = ClipCordTheme.InterfaceFont(9.5f);
         ShowInTaskbar = false;
-        Padding = new Padding(18);
+        Padding = new Padding(ScaleLogical(18));
 
         var root = new BufferedTableLayoutPanel
         {
@@ -31,7 +36,7 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             Padding = Padding.Empty,
             BackColor = ClipCordTheme.SurfaceBase
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(58)));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.Controls.Add(BuildHeader(), 0, 0);
         _items = new FlowLayoutPanel
@@ -42,7 +47,11 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             WrapContents = false,
             AutoScroll = true,
             Margin = Padding.Empty,
-            Padding = new Padding(0, 4, 8, 8),
+            Padding = new Padding(
+                0,
+                ScaleLogical(4),
+                ScaleLogical(8),
+                ScaleLogical(8)),
             BackColor = ClipCordTheme.SurfaceBase
         };
         _items.SizeChanged += (_, _) => FitCards();
@@ -63,8 +72,8 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             BackColor = ClipCordTheme.SurfaceBase
         };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
-        header.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(104)));
+        header.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(31)));
         header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         header.Controls.Add(new Label
         {
@@ -134,13 +143,17 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
         var card = new RoundedPanel
         {
             Name = $"DeliveryPlan_{item.Plan.PlanId:N}",
-            Width = Math.Max(300, _items.ClientSize.Width - 12),
-            Height = 62 + Math.Max(1, rows - 1) * 58,
+            Width = Math.Max(ScaleLogical(300), _items.ClientSize.Width - ScaleLogical(12)),
+            Height = ScaleLogical(62) + Math.Max(1, rows - 1) * ScaleLogical(58),
             BackColor = ClipCordTheme.SurfaceRaised,
             BorderColor = ClipCordTheme.BorderDefault,
-            CornerRadius = 10,
-            Margin = new Padding(0, 0, 0, 10),
-            Padding = new Padding(14, 10, 14, 10),
+            CornerRadius = ScaleLogical(10),
+            Margin = new Padding(0, 0, 0, ScaleLogical(10)),
+            Padding = new Padding(
+                ScaleLogical(14),
+                ScaleLogical(10),
+                ScaleLogical(14),
+                ScaleLogical(10)),
             AccessibleName = $"Delivery plan for {item.Plan.SourceClipId}"
         };
         var layout = new BufferedTableLayoutPanel
@@ -153,17 +166,17 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             BackColor = Color.Transparent
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(42)));
         layout.Controls.Add(BuildPlanHeader(item), 0, 0);
         var row = 1;
         foreach (var delivery in item.Deliveries)
         {
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(58)));
             layout.Controls.Add(BuildDeliveryRow(delivery, item.IsArchived), 0, row++);
         }
         foreach (var disposition in item.FileDispositions)
         {
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(58)));
             layout.Controls.Add(BuildDispositionRow(disposition, item.IsArchived), 0, row++);
         }
         card.Controls.Add(layout);
@@ -182,7 +195,7 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             BackColor = Color.Transparent
         };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 108));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(108)));
         header.Controls.Add(new Label
         {
             Text = item.Plan.SourceClipId,
@@ -215,7 +228,11 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
                 : FigmaIconAsset.Upload,
             IconColor = Color.FromArgb(176, 128, 255),
             Dock = DockStyle.Fill,
-            Margin = new Padding(8, 17, 11, 17)
+            Margin = new Padding(
+                ScaleLogical(8),
+                ScaleLogical(17),
+                ScaleLogical(11),
+                ScaleLogical(17))
         }, 0, 0);
         row.Controls.Add(BuildDescription(
             $"{delivery.Destination} · {delivery.Output.Kind}",
@@ -232,7 +249,11 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             Asset = FigmaIconAsset.Disk,
             IconColor = Color.FromArgb(49, 177, 113),
             Dock = DockStyle.Fill,
-            Margin = new Padding(8, 17, 11, 17)
+            Margin = new Padding(
+                ScaleLogical(8),
+                ScaleLogical(17),
+                ScaleLogical(11),
+                ScaleLogical(17))
         }, 0, 0);
         row.Controls.Add(BuildDescription(
             $"File into Library · {disposition.LibraryArea}",
@@ -244,7 +265,7 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             WrapContents = false,
             BackColor = Color.Transparent,
             Margin = Padding.Empty,
-            Padding = new Padding(0, 12, 0, 0)
+            Padding = new Padding(0, ScaleLogical(12), 0, 0)
         };
         if (!archived && disposition.State is PlannedFileDispositionState.Failed or
             PlannedFileDispositionState.RecoveryPending)
@@ -267,7 +288,7 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             WrapContents = false,
             BackColor = Color.Transparent,
             Margin = Padding.Empty,
-            Padding = new Padding(0, 12, 0, 0)
+            Padding = new Padding(0, ScaleLogical(12), 0, 0)
         };
         if (archived) return actions;
         switch (delivery.State)
@@ -363,14 +384,15 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
         using var prompt = new Form
         {
             Text = "Mark delivery complete",
-            ClientSize = new Size(430, 140),
+            AutoScaleMode = AutoScaleMode.None,
+            ClientSize = new Size(ScaleLogical(430), ScaleLogical(140)),
             StartPosition = FormStartPosition.CenterParent,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false,
             MinimizeBox = false,
             BackColor = ClipCordTheme.SurfaceBase,
             ForeColor = ClipCordTheme.TextPrimary,
-            Padding = new Padding(14),
+            Padding = new Padding(ScaleLogical(14)),
             ShowInTaskbar = false
         };
         var editor = new TextBox
@@ -383,15 +405,15 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
         };
         var confirm = CreateAction("Confirm", 88);
         confirm.DialogResult = DialogResult.OK;
-        confirm.Top = 72;
-        confirm.Left = 310;
+        confirm.Top = ScaleLogical(72);
+        confirm.Left = ScaleLogical(310);
         prompt.Controls.Add(confirm);
         prompt.Controls.Add(editor);
         prompt.Controls.Add(new Label
         {
             Text = "Paste the provider receipt or message reference:",
             Dock = DockStyle.Top,
-            Height = 28,
+            Height = ScaleLogical(28),
             ForeColor = ClipCordTheme.TextSecondary
         });
         prompt.AcceptButton = confirm;
@@ -400,7 +422,7 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
         return editor.Text.Trim();
     }
 
-    private static BufferedTableLayoutPanel CreateHistoryRow()
+    private BufferedTableLayoutPanel CreateHistoryRow()
     {
         var row = new BufferedTableLayoutPanel
         {
@@ -411,9 +433,9 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
             Padding = Padding.Empty,
             BackColor = Color.Transparent
         };
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(42)));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 312));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(312)));
         return row;
     }
 
@@ -451,17 +473,17 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
         return text;
     }
 
-    private static Control BuildNotice(string title, string detail)
+    private Control BuildNotice(string title, string detail)
     {
         var card = new RoundedPanel
         {
-            Width = 740,
-            Height = 100,
+            Width = ScaleLogical(740),
+            Height = ScaleLogical(100),
             BackColor = ClipCordTheme.SurfaceRaised,
             BorderColor = ClipCordTheme.BorderDefault,
-            CornerRadius = 10,
-            Padding = new Padding(16),
-            Margin = new Padding(0, 0, 0, 10)
+            CornerRadius = ScaleLogical(10),
+            Padding = new Padding(ScaleLogical(16)),
+            Margin = new Padding(0, 0, 0, ScaleLogical(10))
         };
         var label = new Label
         {
@@ -478,19 +500,25 @@ internal sealed class RoutingDeliveryHistoryDialog : Form
 
     private void FitCards()
     {
-        var width = Math.Max(300, _items.ClientSize.Width - 28);
+        var width = Math.Max(ScaleLogical(300), _items.ClientSize.Width - ScaleLogical(28));
         foreach (Control card in _items.Controls) card.Width = width;
     }
 
-    private static OutlineButton CreateAction(string text, int width) => new()
+    private OutlineButton CreateAction(string text, int width) => new()
     {
         Text = text,
-        Size = new Size(width, 30),
-        Margin = new Padding(5, 0, 0, 0),
+        Size = new Size(ScaleLogical(width), ScaleLogical(30)),
+        Margin = new Padding(ScaleLogical(5), 0, 0, 0),
         SurfaceColor = ClipCordTheme.SurfaceControl,
         HoverColor = ClipCordTheme.SurfaceControlHover,
         OutlineColor = ClipCordTheme.BorderStrong,
         ForeColor = ClipCordTheme.TextPrimary,
         Font = ClipCordTheme.InterfaceFont(8.5f)
     };
+
+    internal static int ScaleLogicalMetric(int value, int dpi) =>
+        Math.Max(1, (int)Math.Round(value * Math.Max(96, dpi) / 96d));
+
+    private int ScaleLogical(int value) =>
+        ScaleLogicalMetric(value, _layoutDpi ?? DeviceDpi);
 }

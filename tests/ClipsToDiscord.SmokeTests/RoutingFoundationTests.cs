@@ -729,6 +729,9 @@ internal static class RoutingFoundationTests
             "Retry must reuse its planned-delivery id.");
         current = RoutingOutboxModel.CompleteDelivery(
             current, delivery.DeliveryId, retryAttempt, "discord.receipt-1", At(6));
+        AssertThrows<InvalidDataException>(() => RoutingOutboxModel.StartDelivery(
+                current, delivery.DeliveryId, Guid.NewGuid(), At(7)),
+            "A delivered item must never re-enter Sending through the model API.");
         current = RoutingOutboxModel.RefreshFileDisposition(current, disposition.DispositionId, At(7));
         var moveAttempt = Guid.NewGuid();
         current = RoutingOutboxModel.StartFileDisposition(

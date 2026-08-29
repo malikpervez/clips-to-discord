@@ -11,6 +11,62 @@ internal sealed record RoutingRouteDraft(
     RoutingMissingOutputBehavior OnMissingOutput,
     bool FileIntoLibrary);
 
+internal interface IRoutingRouteMutationAuthority
+{
+    bool CanMutate(
+        RoutingSnapshotDocument snapshot,
+        CancellationToken cancellationToken = default);
+}
+
+internal interface IRoutingConnectionMembership
+{
+    bool IsReady(
+        RoutingDestinationKind destination,
+        string connectionId,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// The durable cutover marker and the exact migration route it committed are the authority for
+/// route editing. Evaluating an already-loaded snapshot keeps this check on the same generation
+/// that a route command is about to replace.
+/// </summary>
+internal sealed class CommittedRoutingRouteMutationAuthority : IRoutingRouteMutationAuthority
+{
+    private readonly LegacyRoutingMigrationMarkerStore _markers;
+
+    internal CommittedRoutingRouteMutationAuthority(LegacyRoutingMigrationMarkerStore markers)
+    {
+        _markers = markers ?? throw new ArgumentNullException(nameof(markers));
+    }
+
+    public bool CanMutate(
+        RoutingSnapshotDocument snapshot,
+        CancellationToken cancellationToken = default) =>
+        IsCutoverCommitted(_markers, snapshot, cancellationToken);
+
+    internal static bool IsCutoverCommitted(
+        LegacyRoutingMigrationMarkerStore markers,
+        RoutingSnapshotDocument snapshot,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(markers);
+        ArgumentNullException.ThrowIfNull(snapshot);
+        var loaded = markers.Load(cancellationToken);
+        if (!loaded.LoadedFromDisk ||
+            loaded.Document?.Phase != LegacyRoutingMigrationMarkerPhase.Committed)
+        {
+            return false;
+        }
+
+        var migrationRoute = snapshot.Routes.SingleOrDefault(route =>
+            route.RouteId == loaded.Document.Route.RouteId);
+        return migrationRoute is not null &&
+               LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
+                   migrationRoute, loaded.Document.Route);
+    }
+}
+
 /// <summary>
 /// Small CAS-safe command surface for route configuration. It deliberately owns only the
 /// immutable routing snapshot; starting or stopping a processing runtime is a separate opt-in
@@ -21,19 +77,32 @@ internal sealed class RoutingRouteManager
     private const int MaximumSaveAttempts = 4;
     private readonly RoutingSnapshotStore _store;
     private readonly Func<DateTimeOffset> _clock;
+    private readonly IRoutingRouteMutationAuthority _mutationAuthority;
+    private readonly IRoutingConnectionMembership? _connectionMembership;
 
     internal RoutingRouteManager(
         RoutingSnapshotStore? store = null,
-        Func<DateTimeOffset>? clock = null)
+        Func<DateTimeOffset>? clock = null,
+        IRoutingRouteMutationAuthority? mutationAuthority = null,
+        IRoutingConnectionMembership? connectionMembership = null)
     {
         _store = store ?? new RoutingSnapshotStore();
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
+        _mutationAuthority = mutationAuthority ?? CreateDefaultMutationAuthority(_store.Path);
+        _connectionMembership = connectionMembership;
     }
 
     internal RoutingDocumentLoadResult<RoutingSnapshotDocument> Load(
         CancellationToken cancellationToken = default) => _store.Load(cancellationToken);
 
     internal string SnapshotPath => _store.Path;
+
+    internal bool CanMutate(CancellationToken cancellationToken = default)
+    {
+        var loaded = _store.Load(cancellationToken);
+        return loaded.LoadedFromDisk && loaded.Document is not null &&
+               _mutationAuthority.CanMutate(loaded.Document, cancellationToken);
+    }
 
     internal Task<RoutingSnapshotDocument> LoadOrCreateAsync(
         CancellationToken cancellationToken = default) =>
@@ -56,14 +125,21 @@ internal sealed class RoutingRouteManager
             var current = loaded.Status switch
             {
                 RoutingDocumentLoadStatus.Loaded when loaded.Document is not null => loaded.Document,
-                RoutingDocumentLoadStatus.Missing =>
-                    await _store.LoadOrCreateAsync(createdUtc, cancellationToken).ConfigureAwait(false),
+                RoutingDocumentLoadStatus.Missing when _mutationAuthority.CanMutate(
+                    RoutingSnapshotModel.CreateEmpty(createdUtc), cancellationToken) =>
+                        await _store.LoadOrCreateAsync(createdUtc, cancellationToken)
+                            .ConfigureAwait(false),
+                RoutingDocumentLoadStatus.Missing => throw new InvalidOperationException(
+                    "Routes cannot be changed until the safe legacy cutover is committed."),
                 _ => throw new InvalidDataException(
                     $"Routes cannot be changed because routing state is {loaded.Status}.")
             };
 
             if (current.Routes.Any(route => route.RouteId == routeId))
                 return current.Routes.Single(route => route.RouteId == routeId);
+
+            RequireMutationAllowed(current, cancellationToken);
+            RequireConnectionReady(draft, cancellationToken);
 
             var route = CreateRoute(
                 draft,
@@ -139,6 +215,7 @@ internal sealed class RoutingRouteManager
                 throw new InvalidDataException(
                     $"Routes cannot be changed because routing state is {loaded.Status}.");
             var current = loaded.Document;
+            RequireMutationAllowed(current, cancellationToken);
             if (!precondition(current.Routes)) throw new InvalidOperationException(failureMessage);
             var routes = mutate(current.Routes);
             if (RoutingStructural.SequenceEqual(current.Routes, routes)) return;
@@ -286,6 +363,42 @@ internal sealed class RoutingRouteManager
 
     private static int NextPriority(IReadOnlyList<RoutingRoute> routes) =>
         routes.Count == 0 ? 0 : checked(routes.Max(route => route.Priority) + 1);
+
+    private void RequireMutationAllowed(
+        RoutingSnapshotDocument snapshot,
+        CancellationToken cancellationToken)
+    {
+        if (!_mutationAuthority.CanMutate(snapshot, cancellationToken))
+        {
+            throw new InvalidOperationException(
+                "Routes cannot be changed until the safe legacy cutover is committed.");
+        }
+    }
+
+    private void RequireConnectionReady(
+        RoutingRouteDraft draft,
+        CancellationToken cancellationToken)
+    {
+        if (draft.Destination is not { } destination) return;
+        var connectionId = draft.ConnectionId!;
+        if (_connectionMembership is null ||
+            !_connectionMembership.IsReady(destination, connectionId, cancellationToken))
+        {
+            throw new InvalidOperationException(
+                "The selected destination connection is missing or needs attention.");
+        }
+    }
+
+    private static IRoutingRouteMutationAuthority CreateDefaultMutationAuthority(
+        string snapshotPath)
+    {
+        var directory = Path.GetDirectoryName(snapshotPath)
+            ?? throw new InvalidOperationException("The routing state directory is unavailable.");
+        return new CommittedRoutingRouteMutationAuthority(
+            new LegacyRoutingMigrationMarkerStore(Path.Combine(
+                directory,
+                LegacyRoutingMigrationMarkerStore.FileName)));
+    }
 
     private static void ValidateDraft(RoutingRouteDraft draft)
     {

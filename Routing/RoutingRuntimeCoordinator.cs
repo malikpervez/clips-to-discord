@@ -259,7 +259,7 @@ internal sealed class RoutingRuntimeCoordinator
                         : RoutingRuntimeTransitionStatus.RoutingStartFailedRecoveryNeeded,
                     error: exception);
             }
-            if (!permit.Enabled)
+            if (!permit.Enabled || !permit.HasRequiredSourceCoverage)
             {
                 var recovery = await RollBackRoutingStartAsync(runtimeMayBeActive: false)
                     .ConfigureAwait(false);

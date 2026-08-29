@@ -15,6 +15,8 @@ internal static class DiscordConnectionCatalogTests
         await AssertCiphertextOnlyAndStableIdentityAsync(Path.Combine(root, "secure"));
         await AssertReferencesBlockCredentialChangesAsync(Path.Combine(root, "references"));
         await AssertLegacyImportAndCutoverAreOrderedAsync(Path.Combine(root, "legacy"));
+        await AssertLocalOnlyCutoverDoesNotImportDormantWebhookAsync(
+            Path.Combine(root, "local-only"));
         await AssertUnsafeCutoverLeavesLegacyAuthoritativeAsync(Path.Combine(root, "blocked"));
         await AssertCorruptCatalogFailsClosedAsync(Path.Combine(root, "corrupt"));
         AssertDormantLegacyWebhookIsNotStaged(root);
@@ -179,6 +181,52 @@ internal static class DiscordConnectionCatalogTests
                fixture.RouteStore.Load().Status == RoutingDocumentLoadStatus.Missing &&
                settings.UploadToDiscord && settings.WebhookUrl == Webhook,
             "A blocked cutover may stage only encrypted connection state and must leave the legacy route authoritative.");
+    }
+
+    private static async Task AssertLocalOnlyCutoverDoesNotImportDormantWebhookAsync(
+        string root)
+    {
+        var fixture = Fixture(root, new Guid("87654321-4321-4321-4321-ba0987654321"));
+        var clips = Path.Combine(root, "clips");
+        Directory.CreateDirectory(clips);
+        var settings = Settings(clips, Webhook) with { UploadToDiscord = false };
+
+        var directImport = await fixture.Catalog.EnsureLegacyConnectionAsync(settings, Now);
+        Assert(directImport.Status == DiscordConnectionMutationStatus.InvalidInput &&
+               fixture.Catalog.Inspect().Connections.Count == 0,
+            "The catalog itself must reject importing a dormant webhook while Discord uploads are disabled.");
+
+        var marker = new LegacyRoutingMigrationMarkerStore(
+            Path.Combine(root, "routing", LegacyRoutingMigrationMarkerStore.FileName));
+        var adapter = new LegacyDiscordConnectionCutoverAdapter(
+            fixture.Catalog,
+            new LegacyRoutingMigrationCoordinator(fixture.RouteStore, marker));
+        var result = await adapter.ExecuteAsync(
+            settings, State(clips), legacyWorkerQuiesced: true, Now.AddMinutes(1));
+        var route = fixture.RouteStore.Load().Document!.Routes.Single();
+        Assert(result.Status == LegacyDiscordConnectionCutoverStatus.Completed &&
+               result.MayReleaseLegacyOwnership && result.Connection is null &&
+               fixture.Catalog.Inspect().Connections.Count == 0 &&
+               route.Source == RoutingRouteSource.Migration &&
+               route.Kind == RoutingRouteKind.Fallback &&
+               route.Actions.Count == 1 &&
+               route.Actions[0] is
+               {
+                   Kind: RoutingActionKind.FileIntoLibrary,
+                   LibraryArea: RoutingLibraryArea.LocalOnly,
+                   ConnectionId: null
+               },
+            "Local-only cutover must remain connectionless and preserve only File into Library behavior.");
+        var durableText = string.Join('\n',
+            File.Exists(fixture.ConnectionStore.Path)
+                ? File.ReadAllText(fixture.ConnectionStore.Path)
+                : string.Empty,
+            File.ReadAllText(fixture.RouteStore.Path),
+            File.ReadAllText(marker.Path));
+        Assert(!durableText.Contains(Webhook, StringComparison.Ordinal) &&
+               !durableText.Contains("catalog-secret-token", StringComparison.Ordinal) &&
+               !durableText.Contains("api/webhooks", StringComparison.OrdinalIgnoreCase),
+            "A dormant Local-only webhook must never enter connection, route, or cutover state.");
     }
 
     private static async Task AssertCorruptCatalogFailsClosedAsync(string root)

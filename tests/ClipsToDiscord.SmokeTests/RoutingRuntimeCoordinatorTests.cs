@@ -11,6 +11,7 @@ internal static class RoutingRuntimeCoordinatorTests
         await AssertPreparationFailureRestoresLegacyAsync();
         await AssertPreparationCancellationRestoresLegacyAsync();
         await AssertRejectedGateRestoresLegacyAsync();
+        await AssertMissingSourceCoverageRestoresLegacyAsync();
         await AssertRoutingStartFailureRestoresLegacyAsync();
         await AssertCancellationAfterLegacyStopRestoresLegacyAsync();
         await AssertRoutingStopFailureNeverStartsLegacyAsync();
@@ -134,6 +135,28 @@ internal static class RoutingRuntimeCoordinatorTests
                    fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy &&
                    fixture.Legacy.StartCalls == 1,
                 "A fail-closed feature gate must restore the legacy watcher without starting routing.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static async Task AssertMissingSourceCoverageRestoresLegacyAsync()
+    {
+        var fixture = Fixture.Create();
+        fixture.Routing.CoveredLegacySources =
+            new HashSet<ClipCaptureSource> { ClipCaptureSource.Nvidia };
+        try
+        {
+            var result = await fixture.CreateCoordinator(new(true)).StartAsync();
+            Assert(result.Status == RoutingRuntimeTransitionStatus.GateRejectedLegacyRestored &&
+                   result.GateInspection?.State == RoutingRuntimeGateState.Enabled &&
+                   result.GateInspection.RequiredLegacySource == ClipCaptureSource.SteelSeriesGg &&
+                   !result.GateInspection.HasRequiredSourceCoverage &&
+                   fixture.Routing.StartCalls == 0 && fixture.Legacy.StartCalls == 1 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
+                "Even an inspection labelled Enabled must roll back when its registered adapters do not cover the legacy watched source.");
         }
         finally
         {
@@ -366,6 +389,14 @@ internal static class RoutingRuntimeCoordinatorTests
     {
         internal RoutingRuntimeGateState GateState { get; set; } =
             RoutingRuntimeGateState.Enabled;
+        internal ClipCaptureSource RequiredLegacySource { get; set; } =
+            ClipCaptureSource.SteelSeriesGg;
+        internal IReadOnlySet<ClipCaptureSource> CoveredLegacySources { get; set; } =
+            new HashSet<ClipCaptureSource>
+            {
+                ClipCaptureSource.SteelSeriesGg,
+                ClipCaptureSource.Nvidia
+            };
         internal Exception? StartError { get; set; }
         internal Exception? PrepareError { get; set; }
         internal Action? DuringPrepare { get; set; }
@@ -393,7 +424,9 @@ internal static class RoutingRuntimeCoordinatorTests
             0,
             GateState == RoutingRuntimeGateState.Enabled ? 1 : null,
             GateState == RoutingRuntimeGateState.Enabled ? "test-fingerprint" : null,
-            ownership.Epoch);
+            ownership.Epoch,
+            RequiredLegacySource,
+            CoveredLegacySources);
 
         public ValueTask StartAsync(
             ClipProcessingOwnershipLease ownership,
