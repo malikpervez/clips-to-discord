@@ -730,6 +730,9 @@ try
     RoutingMigrationTests.Run(Path.Combine(temporaryRoot, "routing-migration"));
     TraceSmokeStep("ClipCord 2.0 routing runtime bridge");
     RoutingRuntimeBridgeTests.Run(Path.Combine(temporaryRoot, "routing-runtime-bridge"));
+    TraceSmokeStep("ClipCord 2.0 watched-folder routing shadow");
+    await RoutingWatchedFolderShadowTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-watched-shadow"));
     RoutingRuntimeCoordinatorTests.Run();
     RoutingExecutorTests.Run(Path.Combine(temporaryRoot, "routing-executor"));
     RoutingOperatorTests.Run(Path.Combine(temporaryRoot, "routing-operator"));
@@ -7696,9 +7699,15 @@ static async Task AssertCaptureSourceDiscoveryAsync(string root)
     await workerStore.LoadOrInitializeAsync(
         workerRoot, _ => { }, CancellationToken.None, ClipCaptureSource.Nvidia);
     await File.WriteAllBytesAsync(workerClip, [230, 9, 9, 9]);
+    var blockingRoutingShadow = new BlockingRoutingWatchedFolderObserver();
     using (var workerCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
     {
-        var worker = new UploaderWorker(workerSettings, _ => { }, workerStore);
+        var worker = new UploaderWorker(
+            workerSettings,
+            _ => { },
+            workerStore,
+            routingWatchedFolderObserver: blockingRoutingShadow,
+            routingWatchedFolderObservationTimeout: TimeSpan.FromMilliseconds(100));
         var run = worker.RunAsync(workerCancellation.Token);
         var expectedArchive = Path.Combine(workerRoot, "local-only", "Duskfade");
         await WaitUntilAsync(
@@ -7724,6 +7733,9 @@ static async Task AssertCaptureSourceDiscoveryAsync(string root)
             "Gallery must list an NVIDIA clip archived to Local only.");
         Assert(ClipEditProcessor.ValidateLocalOnlySource(workerRoot, archived).FullName == archived,
             "The editor must accept an NVIDIA clip archived to Local only.");
+        Assert(blockingRoutingShadow.Calls == 1 &&
+               blockingRoutingShadow.CancellationObserved,
+            "A stuck shadow observation must time out and must not block the legacy archive.");
     }
 
     // A pending move recovered after the clips folder changed must archive beside the clip

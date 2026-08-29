@@ -158,6 +158,20 @@ soak tests remain phase gates before release.
   source type. Activation evidence now carries the exact normalized legacy source from durable
   `WatchState` plus an immutable set of sources covered by registered routing adapters; incomplete
   coverage is rejected and legacy ownership is restored before routing can start.
+- A first watched-folder comparison seam is now available but remains disabled by default. When a
+  developer explicitly selects Shadow mode, the existing legacy watcher stays the sole scanner and
+  owner: after it has accepted a stable, hashed SteelSeries or NVIDIA clip, a fail-open observer runs
+  the pure route evaluator and appends a bounded, path-free per-occurrence summary to a separate
+  shadow document. Equal content at a second path is marked as duplicate evidence without discarding
+  that occurrence's route and filing projection. Observation itself has a bounded timeout; a slow or
+  failed comparison yields to the unchanged legacy path.
+  Shadow mode cannot create production outbox work, call a provider, move or claim a file, alter the
+  legacy decision, or advertise routing source coverage. Active mode is intentionally rejected.
+- The shadow document is comparison evidence, not the future watched-source journal. Live activation
+  still requires a durable occurrence journal with explicit source provenance, exact SteelSeries and
+  NVIDIA containment/reparse validation, post-probe identity revalidation, watched-source resolver
+  and filer implementations, an execution barrier, cross-restart ownership authority, and an
+  explicit source-switch transaction. Migration hash exclusions must be consumed before planning.
 
 ## Invariants
 

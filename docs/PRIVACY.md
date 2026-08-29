@@ -29,6 +29,11 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
   marker that binds the preserved Discord or Local-only fallback to the exact watcher state
 - When the routing runtime is eventually enabled, bounded local delivery plans, approval/retry
   state, content hashes, and opaque provider receipt references needed for crash-safe recovery
+- In developer-enabled watched-folder Shadow mode only, a bounded local comparison document with
+  opaque source/content digests, capture-source kind, parsed game name, duration and dimensions,
+  matched route identifiers, and destination/output summaries. It contains no clip path or filename,
+  webhook URL, token, uploader name, or provider receipt. Shadow mode is off by default and never
+  uploads, moves, claims, or deletes a clip.
 - Path/length/timestamp keys used only to preserve the initial do-not-upload baseline
 - SHA-256 hashes of clip contents used for stable duplicate detection
 - Pending archive moves
@@ -60,6 +65,9 @@ The About page computes its status locally. **Copy diagnostics** places a fixed,
 
 - Existing clips are ignored during the initial baseline.
 - New top-level `.mp4` clips are read after the source application finishes writing them. When the capture source is set to NVIDIA, the configured folder is the one holding your per-game recording folders — for a default NVIDIA install that is `Videos\NVIDIA`. ClipCord then reads new `.mp4` clips exactly one level inside it, in each `<game>` subfolder. Nothing deeper is scanned, files sitting loose in the configured folder are ignored, and its own `uploaded`, `local-only`, and `.clipcord-editing` folders are never treated as capture folders.
+- Developer-enabled watched-folder Shadow mode reuses that same legacy scan and stable content hash;
+  it does not run a second scanner. Its evaluator output is retained only as local comparison evidence
+  and cannot replace the established Discord or Local-only processing path.
 - Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
 - In local-only mode, newly detected originals move into local `local-only\<game name>` subfolders without being sent to Discord.
 - User-requested Gallery edits stage beneath `.clipcord-editing` in the configured clips folder so the watcher ignores them and the final archive move stays on the same volume. Failed or cancelled pre-upload edits clean their stage and leave the original unchanged; confirmed uploads persist a recovery record before archive or Recycle Bin work.

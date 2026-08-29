@@ -10,7 +10,9 @@ internal sealed class UploaderWorker(
     Func<DiscordWebhookClient>? discordClientFactory = null,
     ActivityHistoryStore? activityHistory = null,
     EditedClipDispositionProcessor? editedClipDispositionProcessor = null,
-    IFavoritesService? favorites = null)
+    IFavoritesService? favorites = null,
+    IRoutingWatchedFolderObserver? routingWatchedFolderObserver = null,
+    TimeSpan? routingWatchedFolderObservationTimeout = null)
 {
     private const int UploadWorkerCount = 2;
     private readonly WatchStateStore _stateStore = stateStore ?? new WatchStateStore();
@@ -25,6 +27,10 @@ internal sealed class UploaderWorker(
     private readonly ConcurrentDictionary<string, DateTime> _lastReadinessLog = new(StringComparer.OrdinalIgnoreCase);
     private readonly EditedClipDispositionProcessor _editedClipDispositionProcessor =
         editedClipDispositionProcessor ?? new EditedClipDispositionProcessor(favorites: favorites);
+    private readonly IRoutingWatchedFolderObserver _routingWatchedFolderObserver =
+        routingWatchedFolderObserver ?? DisabledRoutingWatchedFolderObserver.Instance;
+    private readonly TimeSpan _routingWatchedFolderObservationTimeout =
+        ValidateRoutingShadowTimeout(routingWatchedFolderObservationTimeout);
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -144,6 +150,13 @@ internal sealed class UploaderWorker(
 
             try
             {
+                await ObserveRoutingShadowAsync(
+                    RoutingWatchedFolderCandidate.Create(
+                        settings,
+                        clip,
+                        fileKey,
+                        contentHash),
+                    cancellationToken);
                 await writer.WriteAsync(
                     new QueuedClip(clip.FullName, clip.Name, fileKey, contentHash, clip.Length),
                     cancellationToken);
@@ -173,6 +186,52 @@ internal sealed class UploaderWorker(
                 Error: exception.Message));
             Log.Error($"Could not inspect clip {Path.GetFileName(path)}; retrying later.", exception);
         }
+    }
+
+    private async Task ObserveRoutingShadowAsync(
+        RoutingWatchedFolderCandidate candidate,
+        CancellationToken cancellationToken)
+    {
+        using var observationCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        observationCancellation.CancelAfter(_routingWatchedFolderObservationTimeout);
+        try
+        {
+            _ = await _routingWatchedFolderObserver.ObserveAsync(
+                    candidate,
+                    observationCancellation.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (observationCancellation.IsCancellationRequested)
+        {
+            Log.Info(
+                $"Routing shadow observation timed out for {Path.GetFileName(candidate.FilePath)}; legacy processing will continue.");
+        }
+        catch (Exception exception)
+        {
+            // Shadow observation is deliberately fail-open while the legacy watcher owns the
+            // pipeline. A failed comparison must never prevent or replace the existing
+            // upload/local-only decision.
+            Log.Error(
+                $"Routing shadow observation failed for {Path.GetFileName(candidate.FilePath)}; legacy processing will continue.",
+                exception);
+        }
+    }
+
+    private static TimeSpan ValidateRoutingShadowTimeout(TimeSpan? value)
+    {
+        var timeout = value ?? TimeSpan.FromSeconds(30);
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(2))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(routingWatchedFolderObservationTimeout),
+                "The routing shadow observation timeout must be greater than zero and no more than two minutes.");
+        }
+        return timeout;
     }
 
     private async Task ConsumeQueueAsync(

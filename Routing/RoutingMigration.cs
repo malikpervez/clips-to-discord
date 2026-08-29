@@ -394,7 +394,7 @@ internal static class LegacyRoutingMigrationPlanner
         return true;
     }
 
-    private static string CreateSourceFingerprint(
+    internal static string CreateSourceFingerprint(
         LegacyRoutingMode mode,
         string clipsFolder,
         ClipCaptureSource captureSource,
