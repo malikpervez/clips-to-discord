@@ -135,7 +135,8 @@ internal static class CaptureJournalCaptureCommit
         string libraryRoot,
         string clipId,
         bool failIfProjectMissing,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? beforeMutation = null)
     {
         var load = CaptureJournalStore.Load(libraryRoot, clipId, cancellationToken);
         if (!load.LoadedFromDisk || load.Document is null) return null;
@@ -158,7 +159,8 @@ internal static class CaptureJournalCaptureCommit
                 libraryRoot,
                 current,
                 project?.CameraLayerPath,
-                cancellationToken)
+                cancellationToken,
+                beforeMutation)
             .ConfigureAwait(false);
     }
 
@@ -166,11 +168,13 @@ internal static class CaptureJournalCaptureCommit
         string libraryRoot,
         CaptureJournalDocument current,
         string? cameraLayerPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? beforeMutation = null)
     {
         var clipId = current.Clip.ClipId;
         if (current.State == CaptureJournalState.OriginalCommitted)
         {
+            RequireMutationAllowed(cancellationToken, beforeMutation);
             current = await CaptureJournalStore.BeginCameraAsync(
                     libraryRoot,
                     clipId,
@@ -180,6 +184,7 @@ internal static class CaptureJournalCaptureCommit
         }
         if (string.IsNullOrWhiteSpace(cameraLayerPath))
         {
+            RequireMutationAllowed(cancellationToken, beforeMutation);
             return await CaptureJournalStore.FailRenditionsAsync(
                     libraryRoot,
                     clipId,
@@ -197,6 +202,7 @@ internal static class CaptureJournalCaptureCommit
                     cameraLayerPath,
                     cancellationToken)
                 .ConfigureAwait(false);
+            RequireMutationAllowed(cancellationToken, beforeMutation);
             current = await CaptureJournalStore.AttachCameraAsync(
                     libraryRoot,
                     clipId,
@@ -212,7 +218,8 @@ internal static class CaptureJournalCaptureCommit
         string libraryRoot,
         string clipId,
         CancellationToken cancellationToken = default,
-        bool processingSettled = false)
+        bool processingSettled = false,
+        Action? beforeMutation = null)
     {
         var journalLoad = CaptureJournalStore.Load(libraryRoot, clipId, cancellationToken);
         if (!journalLoad.LoadedFromDisk || journalLoad.Document is null) return null;
@@ -229,6 +236,7 @@ internal static class CaptureJournalCaptureCommit
         if (!renditionLoad.LoadedFromDisk || renditionLoad.Document is null)
         {
             if (!processingSettled) return current;
+            RequireMutationAllowed(cancellationToken, beforeMutation);
             return await CaptureJournalStore.FailRenditionsAsync(
                     libraryRoot,
                     clipId,
@@ -264,6 +272,7 @@ internal static class CaptureJournalCaptureCommit
                     path,
                     cancellationToken)
                 .ConfigureAwait(false);
+            RequireMutationAllowed(cancellationToken, beforeMutation);
             current = await CaptureJournalStore.AttachRenditionAsync(
                     libraryRoot,
                     clipId,
@@ -287,6 +296,7 @@ internal static class CaptureJournalCaptureCommit
                               SilhouetteRenditionAggregateState.Ready;
         if (current.State == CaptureJournalState.CameraPending && terminalFailure)
         {
+            RequireMutationAllowed(cancellationToken, beforeMutation);
             current = await CaptureJournalStore.FailRenditionsAsync(
                     libraryRoot,
                     clipId,
@@ -296,6 +306,15 @@ internal static class CaptureJournalCaptureCommit
                 .ConfigureAwait(false);
         }
         return current;
+    }
+
+    private static void RequireMutationAllowed(
+        CancellationToken cancellationToken,
+        Action? beforeMutation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        beforeMutation?.Invoke();
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     private static IReadOnlyList<string> GetRequestedRenditions(CaptureSettings settings)

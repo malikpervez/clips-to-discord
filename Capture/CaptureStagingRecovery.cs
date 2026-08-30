@@ -9,8 +9,11 @@ internal static class CaptureStagingRecovery
     internal static int RemoveOrphanedManualCaptures(
         string libraryRoot,
         DateTimeOffset? now = null,
-        TimeSpan? minimumAge = null)
+        TimeSpan? minimumAge = null,
+        CancellationToken cancellationToken = default,
+        Action? beforeDelete = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(libraryRoot)) return 0;
 
         var stagingPath = CaptureLibraryLayout.GetStagingDirectory(libraryRoot);
@@ -53,6 +56,7 @@ internal static class CaptureStagingRecovery
 
         foreach (var candidate in candidates)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (!IsOwnedCaptureStage(candidate) ||
@@ -64,6 +68,8 @@ internal static class CaptureStagingRecovery
                     continue;
                 }
 
+                beforeDelete?.Invoke();
+                cancellationToken.ThrowIfCancellationRequested();
                 candidate.Delete();
                 removed++;
             }
@@ -80,8 +86,11 @@ internal static class CaptureStagingRecovery
     internal static int RemoveOrphanedReactionCameraProjects(
         string libraryRoot,
         DateTimeOffset? now = null,
-        TimeSpan? minimumAge = null)
+        TimeSpan? minimumAge = null,
+        CancellationToken cancellationToken = default,
+        Action? beforeDelete = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(libraryRoot)) return 0;
         DirectoryInfo projectsDirectory;
         try
@@ -120,6 +129,7 @@ internal static class CaptureStagingRecovery
         var removed = 0;
         foreach (var candidate in candidates)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (!IsOwnedTemporaryProject(candidate) ||
@@ -138,7 +148,14 @@ internal static class CaptureStagingRecovery
                 {
                     continue;
                 }
-                foreach (var file in entries.Cast<FileInfo>()) file.Delete();
+                foreach (var file in entries.Cast<FileInfo>())
+                {
+                    beforeDelete?.Invoke();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    file.Delete();
+                }
+                beforeDelete?.Invoke();
+                cancellationToken.ThrowIfCancellationRequested();
                 candidate.Delete(recursive: false);
                 removed++;
             }

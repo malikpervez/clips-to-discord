@@ -38,6 +38,8 @@ internal sealed class CaptureView : UserControl
     private readonly IReplayCaptureController? _replayController;
     private readonly IReactionCameraController? _reactionCameraController;
     private readonly Action<CaptureSettings>? _saveSettings;
+    private readonly Func<bool> _captureLibraryAccessAllowed;
+    private readonly Func<string, bool>? _repairCaptureLibraryRoot;
     private readonly BrandedScrollHost _scrollHost;
     private readonly ActivityListPanel _content;
     private readonly RoundedPanel _statusPill;
@@ -73,6 +75,8 @@ internal sealed class CaptureView : UserControl
     private Label? _landscapeOutputHelper;
     private Label? _portraitOutputHelper;
     private readonly CaptureFieldDisplay _libraryRootText;
+    private readonly OutlineButton _changeLibraryRootButton;
+    private readonly OutlineButton _openLibraryRootButton;
     private readonly Label _estimateValue;
     private readonly Label _estimateRange;
     private Label? _estimateMemoryLabel;
@@ -96,7 +100,9 @@ internal sealed class CaptureView : UserControl
         CaptureSettings? settings = null,
         bool engineAvailable = false,
         Action<CaptureSettings>? saveSettings = null,
-        IManualCaptureRecorder? manualRecorder = null)
+        IManualCaptureRecorder? manualRecorder = null,
+        Func<bool>? captureLibraryAccessAllowed = null,
+        Func<string, bool>? repairCaptureLibraryRoot = null)
     {
         _externalSettings = externalSettings;
         _settings = CaptureSettings.Normalize(settings);
@@ -105,6 +111,8 @@ internal sealed class CaptureView : UserControl
         _replayController = manualRecorder as IReplayCaptureController;
         _reactionCameraController = manualRecorder as IReactionCameraController;
         _saveSettings = saveSettings;
+        _captureLibraryAccessAllowed = captureLibraryAccessAllowed ?? (() => true);
+        _repairCaptureLibraryRoot = repairCaptureLibraryRoot;
         _state = !_engineAvailable
             ? CaptureViewState.Unavailable
             : _settings.InstantReplayEnabled ? CaptureViewState.Armed : CaptureViewState.Off;
@@ -221,6 +229,11 @@ internal sealed class CaptureView : UserControl
             "Opens the reusable landscape and portrait layout editor when that editor is connected.";
         _libraryRootText = CreateReadOnlyField("CaptureLibraryRootField", _settings.LibraryRoot, FigmaIconAsset.Folder);
         _libraryRootText.AccessibleName = "Capture library folder";
+        _changeLibraryRootButton = CreateButton("Change folder", "ChangeCaptureFolderButton", 104);
+        _changeLibraryRootButton.Click += ChangeLibraryRoot;
+        _openLibraryRootButton = CreateButton("Open folder", "OpenCaptureFolderButton", 100);
+        _openLibraryRootButton.LeadingGlyph = BrandGlyph.External;
+        _openLibraryRootButton.Click += OpenLibraryRoot;
         _estimateValue = CreateLabel("CaptureEstimatedSizeValue", string.Empty, 22f, FontStyle.Bold, ClipCordTheme.TextPrimary);
         SizeChanged += (_, _) => QueueResponsiveTypography();
         _estimateValue.TextChanged += (_, _) => FitEstimateValueTypography();
@@ -297,6 +310,8 @@ internal sealed class CaptureView : UserControl
     {
         _content.Reflow();
         _scrollHost.RefreshContentLayout();
+        UpdateManualRecorderState();
+        UpdateRuntimeState();
         UpdateStorageStatus();
     }
 
@@ -701,13 +716,8 @@ internal sealed class CaptureView : UserControl
         folder.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleUi(112)));
         folder.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleUi(108)));
         folder.Controls.Add(_libraryRootText, 0, 0);
-        var change = CreateButton("Change folder", "ChangeCaptureFolderButton", 104);
-        change.Click += ChangeLibraryRoot;
-        folder.Controls.Add(change, 1, 0);
-        var open = CreateButton("Open folder", "OpenCaptureFolderButton", 100);
-        open.LeadingGlyph = BrandGlyph.External;
-        open.Click += OpenLibraryRoot;
-        folder.Controls.Add(open, 2, 0);
+        folder.Controls.Add(_changeLibraryRootButton, 1, 0);
+        folder.Controls.Add(_openLibraryRootButton, 2, 0);
         layout.Controls.Add(folder, 0, 1);
         layout.Controls.Add(_storageStatus, 0, 2);
         card.Controls.Add(layout);
@@ -895,7 +905,11 @@ internal sealed class CaptureView : UserControl
 
     private void UpdateSilhouetteOutputConfiguration(ToggleSwitch changedToggle)
     {
-        if (_updating || _silhouetteOutputGuardBusy) return;
+        if (_updating || _silhouetteOutputGuardBusy || !HasCaptureLibraryAccess())
+        {
+            if (!_updating) ApplySettingsToControls();
+            return;
+        }
         if (!_landscapeSilhouetteToggle.Checked && !_portraitSilhouetteToggle.Checked)
         {
             // The composition pipeline needs a deterministic output shape whenever Reaction
@@ -924,6 +938,7 @@ internal sealed class CaptureView : UserControl
 
     private void EditSilhouetteLayouts(object? sender, EventArgs eventArgs)
     {
+        if (!HasCaptureLibraryAccess()) return;
         var handler = EditSilhouetteLayoutsRequested;
         if (handler is not null)
         {
@@ -941,6 +956,11 @@ internal sealed class CaptureView : UserControl
 
     private async Task ToggleReactionCameraAsync(bool enable)
     {
+        if (!HasCaptureLibraryAccess())
+        {
+            ApplySettingsToControls();
+            return;
+        }
         _cameraToggleBusy = true;
         UpdateRuntimeState();
         try
@@ -1088,6 +1108,11 @@ internal sealed class CaptureView : UserControl
 
     private async Task ToggleInstantReplayAsync(bool enable)
     {
+        if (!HasCaptureLibraryAccess())
+        {
+            ApplySettingsToControls();
+            return;
+        }
         if (_replayController is null)
         {
             UpdateConfiguration(_settings with { InstantReplayEnabled = enable });
@@ -1193,7 +1218,7 @@ internal sealed class CaptureView : UserControl
 
     private async Task ChooseManualCaptureTargetAsync()
     {
-        if (_manualRecorder is null) return;
+        if (_manualRecorder is null || !HasCaptureLibraryAccess()) return;
         try
         {
             _chooseCaptureTargetButton.Enabled = false;
@@ -1223,7 +1248,7 @@ internal sealed class CaptureView : UserControl
 
     private async Task ToggleManualRecordingAsync()
     {
-        if (_manualRecorder is null) return;
+        if (_manualRecorder is null || !HasCaptureLibraryAccess()) return;
         try
         {
             _manualRecordButton.Enabled = false;
@@ -1335,11 +1360,13 @@ internal sealed class CaptureView : UserControl
 
     private void ChangeLibraryRoot(object? sender, EventArgs eventArgs)
     {
+        var accessAllowed = HasCaptureLibraryAccess();
+        if (!accessAllowed && _repairCaptureLibraryRoot is null) return;
         using var dialog = new FolderBrowserDialog
         {
             Description = "Choose where ClipCord stores its Library, Exports, and project data.",
             UseDescriptionForTitle = true,
-            InitialDirectory = Directory.Exists(_settings.LibraryRoot)
+            InitialDirectory = accessAllowed && Directory.Exists(_settings.LibraryRoot)
                 ? _settings.LibraryRoot
                 : Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
             ShowNewFolderButton = true
@@ -1356,14 +1383,49 @@ internal sealed class CaptureView : UserControl
                 MessageBoxIcon.Warning);
             return;
         }
+        if (!accessAllowed)
+        {
+            bool repaired;
+            try
+            {
+                repaired = _repairCaptureLibraryRoot?.Invoke(candidate) == true;
+            }
+            catch (Exception exception)
+            {
+                repaired = false;
+                Log.Error("ClipCord could not restore Capture library access.", exception);
+            }
+            if (!repaired)
+            {
+                MessageBox.Show(
+                    this,
+                    "That folder does not match the Capture library ClipCord previously approved. Choose the original folder or review Capture after restarting ClipCord.",
+                    "Capture library needs attention",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                ApplySettingsToControls();
+                return;
+            }
+
+            _settings = CaptureSettings.Normalize(_settings with { LibraryRoot = candidate });
+            SettingsChanged?.Invoke(_settings);
+            ApplySettingsToControls();
+            MessageBox.Show(
+                this,
+                "The Capture library folder was restored. Restart ClipCord to resume Capture.",
+                "Capture library restored",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
         UpdateConfiguration(_settings with { LibraryRoot = candidate });
     }
 
     private void OpenLibraryRoot(object? sender, EventArgs eventArgs)
     {
+        if (!HasCaptureLibraryAccess() || !Directory.Exists(_settings.LibraryRoot)) return;
         try
         {
-            Directory.CreateDirectory(_settings.LibraryRoot);
             Process.Start(new ProcessStartInfo("explorer.exe", _settings.LibraryRoot)
             {
                 UseShellExecute = true
@@ -1383,7 +1445,11 @@ internal sealed class CaptureView : UserControl
 
     private void UpdateConfiguration(CaptureSettings settings)
     {
-        if (_updating) return;
+        if (_updating || !HasCaptureLibraryAccess())
+        {
+            if (!_updating) ApplySettingsToControls();
+            return;
+        }
         var normalized = CaptureSettings.Normalize(settings);
         _saveSettings?.Invoke(normalized);
         _settings = normalized;
@@ -1424,6 +1490,7 @@ internal sealed class CaptureView : UserControl
 
     private void UpdateRuntimeState()
     {
+        var captureLibraryAllowed = HasCaptureLibraryAccess();
         var manualLocked = _manualRecorder is not null &&
             ManualCaptureStatePolicy.IsPipelineBusy(_manualRecorder.State);
         var replayStatus = _replayController?.ReplayStatus;
@@ -1432,7 +1499,7 @@ internal sealed class CaptureView : UserControl
             : replayStatus?.State is ReplayCaptureState.Starting or
                 ReplayCaptureState.Buffering or ReplayCaptureState.Saving or ReplayCaptureState.Stopping;
         var locked = replayLocked || manualLocked;
-        _instantReplayToggle.Enabled = _engineAvailable;
+        _instantReplayToggle.Enabled = _engineAvailable && captureLibraryAllowed;
         _instantReplayDescription.Text = _state switch
         {
             CaptureViewState.Unavailable => "Capture engine integration is still in progress. External clip sources are unaffected.",
@@ -1476,11 +1543,18 @@ internal sealed class CaptureView : UserControl
                 }
             }
         };
+        if (!captureLibraryAllowed)
+        {
+            _statusText.Text = "●  CAPTURE NEEDS ATTENTION";
+            _statusText.ForeColor = Amber;
+            _instantReplayDescription.Text =
+                "Capture is paused until the approved recording folder is restored and ClipCord restarts.";
+        }
         _statusPill.AccessibleDescription = _statusText.Text.Replace("●", string.Empty).Trim();
         _statusPill.Invalidate(true);
         foreach (var button in _durationButtons.Values.Concat(_resolutionButtons.Values).Concat(_fpsButtons.Values))
         {
-            button.Enabled = !locked;
+            button.Enabled = captureLibraryAllowed && !locked;
         }
         foreach (var control in new Control[]
                  {
@@ -1488,17 +1562,27 @@ internal sealed class CaptureView : UserControl
                      _gameAudioDevice, _microphoneDevice, _voiceChatDevice
                  })
         {
-            control.Enabled = !locked;
+            control.Enabled = captureLibraryAllowed && !locked;
         }
-        _changeShortcutButton.Enabled = true;
-        _saveHotkeyText.Enabled = true;
-        UpdateDeviceAvailability(locked);
+        _changeShortcutButton.Enabled = captureLibraryAllowed;
+        _saveHotkeyText.Enabled = captureLibraryAllowed;
+        UpdateDeviceAvailability(locked || !captureLibraryAllowed);
+        _libraryRootText.Enabled = captureLibraryAllowed;
+        _changeLibraryRootButton.Text = captureLibraryAllowed ? "Change folder" : "Restore folder";
+        _changeLibraryRootButton.AccessibleName = captureLibraryAllowed
+            ? "Change Capture library folder"
+            : "Restore folder";
+        _changeLibraryRootButton.Enabled = captureLibraryAllowed || _repairCaptureLibraryRoot is not null;
+        _changeLibraryRootButton.TabStop = _changeLibraryRootButton.Enabled;
+        _openLibraryRootButton.Enabled = captureLibraryAllowed && Directory.Exists(_settings.LibraryRoot);
+        _openLibraryRootButton.TabStop = _openLibraryRootButton.Enabled;
         var cameraRuntime = _reactionCameraController?.ReactionCameraStatus;
         var cameraReleaseNeedsAttention =
             cameraRuntime?.State == ReactionCameraRuntimeState.ReleaseNeedsAttention;
         // Pipeline configuration is locked while capture is active, but a live/enabled
         // camera must always remain independently switchable off for privacy.
-        _cameraToggle.Enabled = _engineAvailable &&
+        _cameraToggle.Enabled = captureLibraryAllowed &&
+            _engineAvailable &&
             !_cameraToggleBusy &&
             !cameraReleaseNeedsAttention &&
             (!locked || _cameraToggle.Checked || cameraRuntime?.IsActive == true);
@@ -1521,7 +1605,8 @@ internal sealed class CaptureView : UserControl
             }
         }
         _editSilhouetteLayoutsButton.Visible = cameraSelected;
-        var silhouetteControlsEnabled = _engineAvailable &&
+        var silhouetteControlsEnabled = captureLibraryAllowed &&
+            _engineAvailable &&
             _settings.IncludeReactionCamera &&
             !_cameraToggleBusy &&
             !cameraReleaseNeedsAttention &&
@@ -1598,10 +1683,12 @@ internal sealed class CaptureView : UserControl
                 ? $"{replayTarget.DisplayName}  ·  {replayTarget.Width}×{replayTarget.Height}"
             : "No game window selected";
         _chooseCaptureTargetButton.Enabled =
+            HasCaptureLibraryAccess() &&
             !ManualCaptureStatePolicy.IsPipelineBusy(_manualRecorder.State) &&
             !_settings.InstantReplayEnabled &&
             _replayController?.ReplayStatus.State is null or ReplayCaptureState.Off or ReplayCaptureState.Failed;
         _manualRecordButton.Enabled =
+            HasCaptureLibraryAccess() &&
             !_settings.InstantReplayEnabled &&
             (_replayController?.ReplayStatus.State is null or ReplayCaptureState.Off) &&
             ((_manualRecorder.State == ManualCaptureState.NoTarget &&
@@ -1798,6 +1885,14 @@ internal sealed class CaptureView : UserControl
 
     private void UpdateStorageStatus()
     {
+        if (!HasCaptureLibraryAccess())
+        {
+            _storageStatus.ForeColor = Amber;
+            _storageStatus.Text = _repairCaptureLibraryRoot is null
+                ? "Capture is unavailable until its approved recording folder is restored."
+                : "Restore the approved recording folder, then restart ClipCord to resume Capture.";
+            return;
+        }
         if (_settings.OverlapsExternalFolder(_externalSettings.ClipsFolder))
         {
             _storageStatus.ForeColor = Amber;
@@ -1825,6 +1920,19 @@ internal sealed class CaptureView : UserControl
         {
             _storageStatus.ForeColor = Amber;
             _storageStatus.Text = "ClipCord could not read available space for this recording folder.";
+        }
+    }
+
+    private bool HasCaptureLibraryAccess()
+    {
+        try
+        {
+            return _captureLibraryAccessAllowed();
+        }
+        catch (Exception exception)
+        {
+            Log.Error("ClipCord could not validate Capture library access.", exception);
+            return false;
         }
     }
 

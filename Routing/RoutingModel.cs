@@ -486,10 +486,26 @@ internal static class RoutingOutboxModel
     internal static RoutingOutboxDocument AppendEvaluatedPlan(
         RoutingOutboxDocument current,
         RoutingPlanProposal proposal,
+        DateTimeOffset now) =>
+        AppendEvaluatedPlan(current, proposal, now, now);
+
+    /// <summary>
+    /// Appends an already write-ahead-journaled proposal. Its decision timestamp is part of the
+    /// immutable ingress record, while the outbox envelope may need a later timestamp after a
+    /// concurrent writer advanced the document during crash-safe reconciliation.
+    /// </summary>
+    internal static RoutingOutboxDocument AppendEvaluatedPlan(
+        RoutingOutboxDocument current,
+        RoutingPlanProposal proposal,
+        DateTimeOffset planCreatedUtc,
         DateTimeOffset now)
     {
         Validate(current);
         ArgumentNullException.ThrowIfNull(proposal);
+        var immutablePlanUtc = RoutingValidation.Utc(planCreatedUtc);
+        var appendUtc = RoutingValidation.Utc(now);
+        RoutingValidation.Require(appendUtc >= immutablePlanUtc,
+            "A journaled routing plan cannot be appended before it was created.");
         RoutingValidation.Require(proposal.PlanId != Guid.Empty,
             "An evaluated routing plan id is missing.");
         RoutingValidation.RequireOpaqueId(proposal.SourceClipId, 256,
@@ -588,14 +604,14 @@ internal static class RoutingOutboxModel
             matchedRouteIds.ToArray(),
             resolutions.ToArray(),
             latentAuthorizations.ToArray(),
-            RoutingValidation.Utc(now));
+            immutablePlanUtc);
         var candidate = current with
         {
             Generation = RoutingValidation.NextGeneration(current.Generation),
             Plans = current.Plans.Concat([planDecision]).ToArray(),
             Deliveries = current.Deliveries.Concat(deliveries).ToArray(),
             FileDispositions = current.FileDispositions.Concat(dispositions).ToArray(),
-            UpdatedUtc = RoutingValidation.Utc(now)
+            UpdatedUtc = appendUtc
         };
         Validate(candidate);
         ValidateSuccessor(current, candidate);

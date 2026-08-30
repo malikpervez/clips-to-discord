@@ -37,11 +37,13 @@ internal sealed class LegacyRoutingActivationEvidenceSource : ILegacyRoutingActi
     private readonly WatchStateStore _watchState;
     private readonly Func<AppSettings> _settingsProvider;
     private readonly Func<IReadOnlyList<string>> _discordConnectionIdsProvider;
+    private readonly Func<RoutingCaptureLibraryBinding> _captureLibraryBindingProvider;
 
     internal LegacyRoutingActivationEvidenceSource(
         WatchStateStore watchState,
         Func<AppSettings> settingsProvider,
-        Func<IReadOnlyList<string>> discordConnectionIdsProvider)
+        Func<IReadOnlyList<string>> discordConnectionIdsProvider,
+        Func<RoutingCaptureLibraryBinding> captureLibraryBindingProvider)
     {
         _watchState = watchState ?? throw new ArgumentNullException(nameof(watchState));
         _settingsProvider = settingsProvider ??
@@ -49,6 +51,9 @@ internal sealed class LegacyRoutingActivationEvidenceSource : ILegacyRoutingActi
         _discordConnectionIdsProvider = discordConnectionIdsProvider ??
                                         throw new ArgumentNullException(
                                             nameof(discordConnectionIdsProvider));
+        _captureLibraryBindingProvider = captureLibraryBindingProvider ??
+                                         throw new ArgumentNullException(
+                                             nameof(captureLibraryBindingProvider));
     }
 
     public LegacyRoutingActivationEvidence Inspect()
@@ -70,12 +75,16 @@ internal sealed class LegacyRoutingActivationEvidenceSource : ILegacyRoutingActi
             var connectionIds = _discordConnectionIdsProvider()?.ToArray() ??
                                 throw new InvalidDataException(
                                     "The legacy connection evidence is missing.");
+            var captureLibraryBinding = _captureLibraryBindingProvider() ??
+                                        throw new InvalidDataException(
+                                            "The Capture library identity evidence is missing.");
             var readiness = LegacyRoutingMigrationPlanner.Evaluate(
                 new LegacyRoutingMigrationInput(
                     settings,
                     state.State,
                     LegacyWorkerQuiesced: true,
-                    connectionIds),
+                    connectionIds,
+                    captureLibraryBinding),
                 EvaluationTimestamp);
             return new LegacyRoutingActivationEvidence(
                 LegacyRoutingActivationEvidenceStatus.Loaded,

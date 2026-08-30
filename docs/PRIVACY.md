@@ -25,10 +25,22 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
 - The Discord webhook URL encrypted with Windows DPAPI for the current user
 - Additional named Discord connections encrypted with Windows DPAPI for the current user; route
   files contain only random opaque connection identifiers, never webhook URLs or tokens
-- Local route definitions and, only during the final routing activation flow, a legacy-cutover
-  marker that binds the preserved Discord or Local-only fallback to the exact watcher state
-- When the routing runtime is eventually enabled, bounded local delivery plans, approval/retry
-  state, content hashes, and opaque provider receipt references needed for crash-safe recovery
+- Local route definitions, the crash-resumable legacy-cutover marker (prepared, aborting, or
+  committed), and a durable execution-authority record that binds active Routing to the exact
+  migrated watcher source and ClipCord Capture library. The Capture binding consists only of two
+  one-way SHA-256 fingerprints for the canonical location and Windows directory identity; neither
+  record stores the Capture library path, Windows user name, native file id, or a Discord secret.
+  While ClipCord is running, it also keeps a local Windows directory handle open to prevent that
+  authorized folder from being silently renamed or replaced between checks. The handle is released
+  at shutdown and never leaves the computer. ClipCord rechecks this local authority while Capture
+  is running; if it is lost, ClipCord unregisters the replay shortcut and terminates the isolated
+  recording process without finalizing or promoting an in-progress clip into the untrusted folder.
+- Bounded local delivery plans, approval/retry state, content hashes, and opaque provider receipt
+  references needed to resume active Routing without repeating a confirmed Discord delivery
+- Immutable watched-source journal entries containing the clip's relative path and display filename,
+  parsed game, source kind, duration, dimensions, stable file identity, content hash, matched plan,
+  and opaque source/migration identities. The configured absolute watched root is not copied into
+  those journal entries.
 - In developer-enabled watched-folder Shadow mode only, a bounded local comparison document with
   opaque source/content digests, capture-source kind, parsed game name, duration and dimensions,
   matched route identifiers, and destination/output summaries. It contains no clip path or filename,
@@ -37,6 +49,9 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
 - Path/length/timestamp keys used only to preserve the initial do-not-upload baseline
 - SHA-256 hashes of clip contents used for stable duplicate detection
 - Pending archive moves
+- A separate Routing-owned recovery record for explicit Gallery edited uploads, containing only the
+  local source/archive paths and content hashes needed to finish filing an upload after Discord has
+  confirmed it. It does not contain a webhook URL or token.
 - The last automatic update-check time and optional skipped/reminder version
 - A verified installer temporarily staged under `updates\v<version>` only after the user chooses **Install update**
 - Operational logs
@@ -68,6 +83,11 @@ The About page computes its status locally. **Copy diagnostics** places a fixed,
 - Developer-enabled watched-folder Shadow mode reuses that same legacy scan and stable content hash;
   it does not run a second scanner. Its evaluator output is retained only as local comparison evidence
   and cannot replace the established Discord or Local-only processing path.
+- After the one-time Routing activation succeeds, ClipCord's active watched-folder adapters replace
+  the legacy scan for new SteelSeries or NVIDIA clips. Each physical occurrence is validated beneath
+  the configured source root, recorded in the local write-ahead journal, planned before delivery,
+  and moved only after its required actions reach a durable terminal state. On restart, ClipCord
+  resumes those journal and outbox records rather than treating the clip as new work.
 - Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
 - In local-only mode, newly detected originals move into local `local-only\<game name>` subfolders without being sent to Discord.
 - User-requested Gallery edits stage beneath `.clipcord-editing` in the configured clips folder so the watcher ignores them and the final archive move stays on the same volume. Failed or cancelled pre-upload edits clean their stage and leave the original unchanged; confirmed uploads persist a recovery record before archive or Recycle Bin work.

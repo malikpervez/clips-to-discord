@@ -114,6 +114,7 @@ internal static class DiscordConnectionCatalogTests
         Directory.CreateDirectory(clips);
         var settings = Settings(clips, Webhook);
         var state = State(clips);
+        var captureLibraryBinding = CaptureLibraryBinding(root);
         var coordinator = new LegacyRoutingMigrationCoordinator(
             fixture.RouteStore,
             new LegacyRoutingMigrationMarkerStore(
@@ -121,7 +122,11 @@ internal static class DiscordConnectionCatalogTests
         var adapter = new LegacyDiscordConnectionCutoverAdapter(
             fixture.Catalog, coordinator);
         var first = await adapter.ExecuteAsync(
-            settings, state, legacyWorkerQuiesced: true, Now);
+            settings,
+            state,
+            legacyWorkerQuiesced: true,
+            captureLibraryBinding,
+            Now);
         Assert(first.Status == LegacyDiscordConnectionCutoverStatus.Completed &&
                first.MayReleaseLegacyOwnership &&
                first.Cutover!.Status == LegacyRoutingCutoverResultStatus.Committed &&
@@ -152,7 +157,11 @@ internal static class DiscordConnectionCatalogTests
                 new LegacyRoutingMigrationMarkerStore(Path.Combine(
                     root, "routing", LegacyRoutingMigrationMarkerStore.FileName))));
         var second = await restarted.ExecuteAsync(
-            settings, state, legacyWorkerQuiesced: true, Now.AddMinutes(1));
+            settings,
+            state,
+            legacyWorkerQuiesced: true,
+            captureLibraryBinding,
+            Now.AddMinutes(1));
         Assert(second.MayReleaseLegacyOwnership &&
                second.Cutover!.Status == LegacyRoutingCutoverResultStatus.AlreadyCommitted &&
                second.Connection!.ConnectionId == first.Connection.ConnectionId &&
@@ -165,6 +174,7 @@ internal static class DiscordConnectionCatalogTests
         var fixture = Fixture(root, new Guid("fedcba98-7654-3210-aaaa-bbbbbbbbbbbb"));
         var clips = Path.Combine(root, "clips");
         Directory.CreateDirectory(clips);
+        var captureLibraryBinding = CaptureLibraryBinding(root);
         var settings = Settings(clips, Webhook);
         var marker = new LegacyRoutingMigrationMarkerStore(
             Path.Combine(root, "routing", LegacyRoutingMigrationMarkerStore.FileName));
@@ -172,7 +182,11 @@ internal static class DiscordConnectionCatalogTests
             fixture.Catalog,
             new LegacyRoutingMigrationCoordinator(fixture.RouteStore, marker));
         var result = await adapter.ExecuteAsync(
-            settings, State(clips), legacyWorkerQuiesced: false, Now);
+            settings,
+            State(clips),
+            legacyWorkerQuiesced: false,
+            captureLibraryBinding,
+            Now);
         Assert(!result.MayReleaseLegacyOwnership &&
                result.Cutover!.Status == LegacyRoutingCutoverResultStatus.Blocked &&
                result.Cutover.Readiness.Status ==
@@ -189,6 +203,7 @@ internal static class DiscordConnectionCatalogTests
         var fixture = Fixture(root, new Guid("87654321-4321-4321-4321-ba0987654321"));
         var clips = Path.Combine(root, "clips");
         Directory.CreateDirectory(clips);
+        var captureLibraryBinding = CaptureLibraryBinding(root);
         var settings = Settings(clips, Webhook) with { UploadToDiscord = false };
 
         var directImport = await fixture.Catalog.EnsureLegacyConnectionAsync(settings, Now);
@@ -202,7 +217,11 @@ internal static class DiscordConnectionCatalogTests
             fixture.Catalog,
             new LegacyRoutingMigrationCoordinator(fixture.RouteStore, marker));
         var result = await adapter.ExecuteAsync(
-            settings, State(clips), legacyWorkerQuiesced: true, Now.AddMinutes(1));
+            settings,
+            State(clips),
+            legacyWorkerQuiesced: true,
+            captureLibraryBinding,
+            Now.AddMinutes(1));
         var route = fixture.RouteStore.Load().Document!.Routes.Single();
         Assert(result.Status == LegacyDiscordConnectionCutoverStatus.Completed &&
                result.MayReleaseLegacyOwnership && result.Connection is null &&
@@ -374,6 +393,13 @@ internal static class DiscordConnectionCatalogTests
         PendingLocalOnlyMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
         PendingEditedUploads = []
     };
+
+    private static RoutingCaptureLibraryBinding CaptureLibraryBinding(string root)
+    {
+        var captureLibraryRoot = Path.Combine(root, "capture-library");
+        Directory.CreateDirectory(captureLibraryRoot);
+        return RoutingCaptureLibraryBindingModel.Create(captureLibraryRoot);
+    }
 
     private static void Assert(bool condition, string message)
     {

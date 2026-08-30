@@ -23,6 +23,8 @@ internal static class RoutingExecutorTests
         await AssertRecoveryBacklogDoesNotStarveDeliveriesAsync(
             Path.Combine(testRoot, "recovery-fairness"));
         await AssertGateRevocationStopsBeforeProviderAsync(Path.Combine(testRoot, "gate"));
+        await AssertCapturePermitRevocationBeforeAttemptLeavesOutboxUnchangedAsync(
+            Path.Combine(testRoot, "capture-permit"));
         await AssertCaptureJournalImplementationsAsync(Path.Combine(testRoot, "capture"));
         await AssertDerivedCaptureJournalArtifactResolutionAsync(
             Path.Combine(testRoot, "capture-derived"));
@@ -382,12 +384,53 @@ internal static class RoutingExecutorTests
             new RecordingResolver(),
             new RecordingFiler(),
             Gate,
-            utcNow: () => At(10));
+            utcNow: () => At(10),
+            captureLibraryPermit: CurrentCaptureLibraryPermit());
         _ = await executor.RunOnceAsync();
         var delivery = seeded.Store.Load().Document!.Deliveries.Single();
         Assert(provider.Calls == 0 && delivery.State == PlannedDeliveryState.Failed &&
                delivery.ErrorCode == "routing-disabled-before-provider",
             "A revoked ownership/feature gate after StartDelivery must stop before the provider call.");
+    }
+
+    private static async Task AssertCapturePermitRevocationBeforeAttemptLeavesOutboxUnchangedAsync(
+        string root)
+    {
+        var seeded = await SeedAsync(root, includeDelivery: true);
+        var before = File.ReadAllBytes(seeded.Store.Path);
+        var expected = new RoutingCaptureLibraryBinding(Hash('A'), Hash('B'));
+        var mismatch = expected with { NativeDirectoryIdentityFingerprint = Hash('C') };
+        var current = expected;
+        var permit = new RoutingCaptureLibraryPermit(
+            expected,
+            () => Volatile.Read(ref current));
+        var provider = new RecordingProvider((_, _, _) =>
+            RoutingDeliveryAttemptResult.Confirmed("discord:must-not-run"));
+        var filer = new RecordingFiler();
+        var resolver = new RecordingResolver(delivery =>
+        {
+            Volatile.Write(ref current, mismatch);
+            return CreateResolvedArtifact(delivery);
+        });
+        using var executor = new RoutingOutboxExecutor(
+            seeded.Store,
+            provider,
+            resolver,
+            filer,
+            () => true,
+            utcNow: () => At(10),
+            captureLibraryPermit: permit);
+
+        await AssertThrowsAsync<RoutingCaptureLibraryPermitException>(
+            () => executor.RunOnceAsync(),
+            "Live Capture-library revocation must abort before a delivery attempt is persisted.");
+        var after = File.ReadAllBytes(seeded.Store.Path);
+        var delivery = seeded.Store.Load().Document!.Deliveries.Single();
+        Assert(before.SequenceEqual(after) &&
+               delivery.State == PlannedDeliveryState.Ready &&
+               delivery.CurrentAttemptId is null &&
+               provider.Calls == 0 && filer.FileCalls == 0 && filer.RecoveryCalls == 0,
+            "Revocation after artifact resolution must leave the outbox byte-identical and prevent every provider or filer side effect.");
     }
 
     private static async Task AssertCaptureJournalImplementationsAsync(string root)
@@ -590,7 +633,16 @@ internal static class RoutingExecutorTests
             () => true,
             maximumSideEffects,
             Guid.NewGuid,
-            () => At(10));
+            () => At(10),
+            captureLibraryPermit: CurrentCaptureLibraryPermit());
+
+    private static RoutingCaptureLibraryPermit CurrentCaptureLibraryPermit()
+    {
+        var binding = new RoutingCaptureLibraryBinding(
+            new string('A', 64),
+            new string('B', 64));
+        return new RoutingCaptureLibraryPermit(binding, () => binding);
+    }
 
     private static async Task<SeededPlan> SeedAsync(
         string root,
@@ -745,6 +797,22 @@ internal static class RoutingExecutorTests
         try
         {
             action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+        throw new InvalidOperationException(message);
+    }
+
+    private static async Task AssertThrowsAsync<TException>(
+        Func<Task> action,
+        string message)
+        where TException : Exception
+    {
+        try
+        {
+            await action();
         }
         catch (TException)
         {

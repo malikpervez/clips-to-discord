@@ -41,6 +41,7 @@ internal enum LegacyRoutingCutoverResultStatus
 internal enum LegacyRoutingMigrationMarkerPhase
 {
     Prepared,
+    Aborting,
     Committed
 }
 
@@ -52,7 +53,8 @@ internal sealed record LegacyRoutingMigrationInput(
     AppSettings Settings,
     WatchState WatchState,
     bool LegacyWorkerQuiesced,
-    IReadOnlyList<string> DiscordConnectionIds);
+    IReadOnlyList<string> DiscordConnectionIds,
+    RoutingCaptureLibraryBinding CaptureLibraryBinding);
 
 internal sealed record LegacyContentHashExclusions(
     IReadOnlyList<string> Known,
@@ -74,6 +76,7 @@ internal sealed record LegacyRoutingMigrationPlan(
     LegacyRoutingMode Mode,
     LegacyRoutingCutoverScope Scope,
     string SourceFingerprint,
+    RoutingCaptureLibraryBinding CaptureLibraryBinding,
     RoutingRoute Route,
     LegacyContentHashExclusions ContentHashExclusions);
 
@@ -104,6 +107,7 @@ internal sealed record LegacyRoutingMigrationMarker(
     LegacyRoutingCutoverScope Scope,
     string SourceFingerprint,
     string PayloadFingerprint,
+    RoutingCaptureLibraryBinding CaptureLibraryBinding,
     RoutingRoute Route,
     LegacyContentHashExclusions ContentHashExclusions,
     DateTimeOffset CreatedUtc,
@@ -124,7 +128,8 @@ internal static class LegacyRoutingMigrationPlanner
         DateTimeOffset? now = null)
     {
         ArgumentNullException.ThrowIfNull(input);
-        if (input.Settings is null || input.WatchState is null || input.DiscordConnectionIds is null)
+        if (input.Settings is null || input.WatchState is null ||
+            input.DiscordConnectionIds is null || input.CaptureLibraryBinding is null)
         {
             return Blocked(LegacyRoutingCutoverReadinessStatus.InvalidLegacySettings,
                 "The legacy migration input is incomplete.");
@@ -133,6 +138,16 @@ internal static class LegacyRoutingMigrationPlanner
         {
             return Blocked(LegacyRoutingCutoverReadinessStatus.LegacyWorkerActive,
                 "The legacy watcher must be stopped before routing cutover.");
+        }
+
+        try
+        {
+            RoutingCaptureLibraryBindingModel.Validate(input.CaptureLibraryBinding);
+        }
+        catch (InvalidDataException)
+        {
+            return Blocked(LegacyRoutingCutoverReadinessStatus.InvalidLegacySettings,
+                "The Capture library identity required for Routing is invalid.");
         }
 
         var state = input.WatchState;
@@ -211,6 +226,7 @@ internal static class LegacyRoutingMigrationPlanner
             input.Settings.ClipsFolder,
             input.Settings.CaptureSource,
             connectionId,
+            input.CaptureLibraryBinding,
             exclusions!);
         var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
         var routeId = DeterministicGuid(fingerprint, "route");
@@ -276,6 +292,7 @@ internal static class LegacyRoutingMigrationPlanner
             mode,
             LegacyRoutingCutoverScope.FutureClipsOnly,
             fingerprint,
+            input.CaptureLibraryBinding,
             route,
             exclusions!);
         return new LegacyRoutingCutoverReadiness(
@@ -399,16 +416,20 @@ internal static class LegacyRoutingMigrationPlanner
         string clipsFolder,
         ClipCaptureSource captureSource,
         string? connectionId,
+        RoutingCaptureLibraryBinding captureLibraryBinding,
         LegacyContentHashExclusions exclusions)
     {
+        RoutingCaptureLibraryBindingModel.Validate(captureLibraryBinding);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        Append(hash, "clipcord-legacy-routing-v1");
+        Append(hash, "clipcord-legacy-routing-v2");
         Append(hash, mode.ToString());
         Append(hash, Path.GetFullPath(clipsFolder).TrimEnd(
             Path.DirectorySeparatorChar,
             Path.AltDirectorySeparatorChar).ToUpperInvariant());
         Append(hash, AppSettings.NormalizeCaptureSource(captureSource).ToString());
         Append(hash, connectionId ?? string.Empty);
+        Append(hash, captureLibraryBinding.CanonicalPathFingerprint);
+        Append(hash, captureLibraryBinding.NativeDirectoryIdentityFingerprint);
         foreach (var value in exclusions.Known) Append(hash, "known:" + value);
         foreach (var value in exclusions.Uploaded) Append(hash, "uploaded:" + value);
         foreach (var value in exclusions.LocalOnly) Append(hash, "local:" + value);
@@ -437,14 +458,17 @@ internal static class LegacyRoutingMigrationPlanner
         string sourceFingerprint,
         LegacyRoutingMode mode,
         LegacyRoutingCutoverScope scope,
+        RoutingCaptureLibraryBinding captureLibraryBinding,
         RoutingRoute route,
         LegacyContentHashExclusions exclusions)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        Append(hash, "clipcord-legacy-marker-payload-v1");
+        Append(hash, "clipcord-legacy-marker-payload-v2");
         Append(hash, sourceFingerprint);
         Append(hash, mode.ToString());
         Append(hash, scope.ToString());
+        Append(hash, captureLibraryBinding.CanonicalPathFingerprint);
+        Append(hash, captureLibraryBinding.NativeDirectoryIdentityFingerprint);
         Append(hash, route.RouteId.ToString("N"));
         Append(hash, route.Name);
         Append(hash, route.Enabled.ToString(CultureInfo.InvariantCulture));
@@ -535,8 +559,10 @@ internal static class LegacyRoutingMigrationMarkerModel
                 plan.SourceFingerprint,
                 plan.Mode,
                 plan.Scope,
+                plan.CaptureLibraryBinding,
                 plan.Route,
                 plan.ContentHashExclusions),
+            plan.CaptureLibraryBinding,
             plan.Route,
             plan.ContentHashExclusions,
             CreatedUtc: timestamp,
@@ -562,6 +588,57 @@ internal static class LegacyRoutingMigrationMarkerModel
         return committed;
     }
 
+    internal static LegacyRoutingMigrationMarker BeginAbort(
+        LegacyRoutingMigrationMarker prepared,
+        DateTimeOffset? now = null)
+    {
+        Validate(prepared);
+        RoutingValidation.Require(prepared.Phase == LegacyRoutingMigrationMarkerPhase.Prepared,
+            "Only a prepared legacy migration can begin rollback.");
+        var aborting = prepared with
+        {
+            Generation = RoutingValidation.NextGeneration(prepared.Generation),
+            Phase = LegacyRoutingMigrationMarkerPhase.Aborting,
+            UpdatedUtc = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow)
+        };
+        ValidateSuccessor(prepared, aborting);
+        return aborting;
+    }
+
+    internal static LegacyRoutingMigrationMarker RestartPrepared(
+        LegacyRoutingMigrationMarker aborting,
+        LegacyRoutingMigrationPlan plan,
+        DateTimeOffset? now = null)
+    {
+        Validate(aborting);
+        ArgumentNullException.ThrowIfNull(plan);
+        RoutingValidation.Require(aborting.Phase == LegacyRoutingMigrationMarkerPhase.Aborting,
+            "Only a rolled-back legacy migration can prepare a replacement plan.");
+        var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
+        var prepared = new LegacyRoutingMigrationMarker(
+            LegacyRoutingMigrationMarkerStore.CurrentSchemaVersion,
+            RoutingValidation.NextGeneration(aborting.Generation),
+            plan.MigrationId,
+            LegacyRoutingMigrationMarkerPhase.Prepared,
+            plan.Mode,
+            plan.Scope,
+            plan.SourceFingerprint,
+            LegacyRoutingMigrationPlanner.CreatePayloadFingerprint(
+                plan.SourceFingerprint,
+                plan.Mode,
+                plan.Scope,
+                plan.CaptureLibraryBinding,
+                plan.Route,
+                plan.ContentHashExclusions),
+            plan.CaptureLibraryBinding,
+            plan.Route,
+            plan.ContentHashExclusions,
+            aborting.CreatedUtc,
+            timestamp);
+        ValidateSuccessor(aborting, prepared);
+        return prepared;
+    }
+
     internal static void Validate(LegacyRoutingMigrationMarker marker)
     {
         ArgumentNullException.ThrowIfNull(marker);
@@ -577,13 +654,15 @@ internal static class LegacyRoutingMigrationMarkerModel
             "legacy routing source fingerprint");
         RoutingValidation.RequireSha256(marker.PayloadFingerprint,
             "legacy routing payload fingerprint");
+        RoutingCaptureLibraryBindingModel.Validate(marker.CaptureLibraryBinding);
         RoutingValidation.RequireUtc(marker.CreatedUtc, "legacy routing marker creation timestamp");
         RoutingValidation.RequireUtc(marker.UpdatedUtc, "legacy routing marker update timestamp");
         RoutingValidation.Require(marker.UpdatedUtc >= marker.CreatedUtc,
             "The legacy routing marker timestamps are inconsistent.");
         RoutingValidation.Require(
-            marker.Phase == LegacyRoutingMigrationMarkerPhase.Prepared && marker.Generation == 1 ||
-            marker.Phase == LegacyRoutingMigrationMarkerPhase.Committed && marker.Generation == 2,
+            marker.Phase == LegacyRoutingMigrationMarkerPhase.Prepared && marker.Generation >= 1 ||
+            marker.Phase == LegacyRoutingMigrationMarkerPhase.Aborting && marker.Generation >= 2 ||
+            marker.Phase == LegacyRoutingMigrationMarkerPhase.Committed && marker.Generation >= 2,
             "The legacy routing marker phase and generation are inconsistent.");
         ValidateExclusions(marker.ContentHashExclusions);
         ValidateMigrationRoute(marker.Route, marker.Mode);
@@ -592,6 +671,7 @@ internal static class LegacyRoutingMigrationMarkerModel
                 marker.SourceFingerprint,
                 marker.Mode,
                 marker.Scope,
+                marker.CaptureLibraryBinding,
                 marker.Route,
                 marker.ContentHashExclusions),
             "The legacy routing marker payload fingerprint does not match its durable plan.");
@@ -614,7 +694,7 @@ internal static class LegacyRoutingMigrationMarkerModel
     {
         Validate(current);
         Validate(candidate);
-        RoutingValidation.Require(
+        var committing =
             current.Phase == LegacyRoutingMigrationMarkerPhase.Prepared &&
             candidate.Phase == LegacyRoutingMigrationMarkerPhase.Committed &&
             candidate.Generation == current.Generation + 1 &&
@@ -622,9 +702,29 @@ internal static class LegacyRoutingMigrationMarkerModel
             candidate.Mode == current.Mode && candidate.Scope == current.Scope &&
             candidate.SourceFingerprint == current.SourceFingerprint &&
             candidate.PayloadFingerprint == current.PayloadFingerprint &&
+            candidate.CaptureLibraryBinding == current.CaptureLibraryBinding &&
             candidate.Route == current.Route &&
             candidate.ContentHashExclusions == current.ContentHashExclusions &&
-            candidate.CreatedUtc == current.CreatedUtc && candidate.UpdatedUtc >= current.UpdatedUtc,
+            candidate.CreatedUtc == current.CreatedUtc && candidate.UpdatedUtc >= current.UpdatedUtc;
+        var beginningAbort =
+            current.Phase == LegacyRoutingMigrationMarkerPhase.Prepared &&
+            candidate.Phase == LegacyRoutingMigrationMarkerPhase.Aborting &&
+            candidate.Generation == current.Generation + 1 &&
+            candidate.MigrationId == current.MigrationId &&
+            candidate.Mode == current.Mode && candidate.Scope == current.Scope &&
+            candidate.SourceFingerprint == current.SourceFingerprint &&
+            candidate.PayloadFingerprint == current.PayloadFingerprint &&
+            candidate.CaptureLibraryBinding == current.CaptureLibraryBinding &&
+            candidate.Route == current.Route &&
+            candidate.ContentHashExclusions == current.ContentHashExclusions &&
+            candidate.CreatedUtc == current.CreatedUtc && candidate.UpdatedUtc >= current.UpdatedUtc;
+        var restartingPrepared =
+            current.Phase == LegacyRoutingMigrationMarkerPhase.Aborting &&
+            candidate.Phase == LegacyRoutingMigrationMarkerPhase.Prepared &&
+            candidate.Generation == current.Generation + 1 &&
+            candidate.CreatedUtc == current.CreatedUtc && candidate.UpdatedUtc >= current.UpdatedUtc;
+        RoutingValidation.Require(
+            committing || beginningAbort || restartingPrepared,
             "The legacy routing marker successor changed immutable cutover state.");
     }
 
@@ -729,7 +829,7 @@ internal static class LegacyRoutingMigrationMarkerModel
 /// </summary>
 internal sealed class LegacyRoutingMigrationMarkerStore
 {
-    internal const int CurrentSchemaVersion = 1;
+    internal const int CurrentSchemaVersion = 2;
     internal const int MaximumDocumentBytes = 8 * 1024 * 1024;
     internal const string FileName = ".legacy-cutover.json";
 
@@ -771,9 +871,10 @@ internal sealed class LegacyRoutingMigrationMarkerStore
 }
 
 /// <summary>
-/// Crash-safe two-phase cutover. Prepared is written before the route; Committed is written only
-/// after the exact route is durable. The legacy runtime remains authoritative until a later
-/// integration explicitly consumes the committed marker.
+/// Crash-safe cutover. Prepared is written before the route; Committed is written only after the
+/// exact route is durable and becomes a no-Legacy recovery fence. A stale reversible preparation
+/// moves through Aborting while its exact route is removed before the latest legacy state is
+/// prepared again.
 /// </summary>
 internal sealed class LegacyRoutingMigrationCoordinator
 {
@@ -806,12 +907,33 @@ internal sealed class LegacyRoutingMigrationCoordinator
                 {
                     return VerifyCommitted(marker, readiness, cancellationToken);
                 }
-                if (!readiness.CanCommit || readiness.Plan!.SourceFingerprint != marker.SourceFingerprint ||
+                if (marker.Phase == LegacyRoutingMigrationMarkerPhase.Aborting ||
+                    !readiness.CanCommit ||
+                    readiness.Plan!.SourceFingerprint != marker.SourceFingerprint ||
                     readiness.Plan.MigrationId != marker.MigrationId)
                 {
-                    return Result(LegacyRoutingCutoverResultStatus.StateConflict,
-                        "The prepared cutover no longer matches the quiesced legacy state.",
-                        readiness, marker);
+                    try
+                    {
+                        var rollback = await RollBackAndReprepareAsync(
+                                marker,
+                                readiness,
+                                timestamp,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        if (rollback is not null)
+                        {
+                            return Result(
+                                rollback.Value.Status,
+                                rollback.Value.Reason,
+                                readiness,
+                                rollback.Value.Marker);
+                        }
+                        continue;
+                    }
+                    catch (RoutingConcurrencyException) when (attempt < 7)
+                    {
+                        continue;
+                    }
                 }
             }
             else if (loadedMarker.Status != RoutingDocumentLoadStatus.Missing)
@@ -844,7 +966,7 @@ internal sealed class LegacyRoutingMigrationCoordinator
                 continue;
             }
             var durablePrepared = currentMarker.Document;
-            var routeResult = await EnsureRouteAsync(durablePrepared.Route, timestamp,
+            var routeResult = await EnsureRouteAsync(durablePrepared, timestamp,
                 cancellationToken);
             if (routeResult is not null)
                 return Result(routeResult.Value.Status, routeResult.Value.Reason,
@@ -869,6 +991,120 @@ internal sealed class LegacyRoutingMigrationCoordinator
 
         return Result(LegacyRoutingCutoverResultStatus.StateConflict,
             "The migration state kept changing during cutover.", readiness, null);
+    }
+
+    /// <summary>
+    /// Prepared is not execution authority. If Legacy resumed after a crash and its exact state
+    /// changed, first persist an Aborting fence, then remove only the exact uncommitted migration
+    /// route, and finally prepare the newly drained state. Every crash point is replayable:
+    /// Aborting never permits route creation or Routing activation.
+    /// </summary>
+    private async Task<(
+        LegacyRoutingCutoverResultStatus Status,
+        string Reason,
+        LegacyRoutingMigrationMarker Marker)?> RollBackAndReprepareAsync(
+        LegacyRoutingMigrationMarker marker,
+        LegacyRoutingCutoverReadiness readiness,
+        DateTimeOffset timestamp,
+        CancellationToken cancellationToken)
+    {
+        var aborting = marker;
+        if (marker.Phase == LegacyRoutingMigrationMarkerPhase.Prepared)
+        {
+            aborting = await _markers.SaveAsync(
+                    LegacyRoutingMigrationMarkerModel.BeginAbort(marker, timestamp),
+                    marker.Generation,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else if (marker.Phase != LegacyRoutingMigrationMarkerPhase.Aborting)
+        {
+            return (
+                LegacyRoutingCutoverResultStatus.StateConflict,
+                "The migration marker cannot be rolled back safely.",
+                marker);
+        }
+
+        var cleanup = await RemoveExactPreparedRouteAsync(
+                aborting,
+                timestamp,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (cleanup is not null)
+        {
+            return (cleanup.Value.Status, cleanup.Value.Reason, aborting);
+        }
+        if (!readiness.CanCommit)
+        {
+            return (
+                LegacyRoutingCutoverResultStatus.Blocked,
+                readiness.Reason,
+                aborting);
+        }
+
+        _ = await _markers.SaveAsync(
+                LegacyRoutingMigrationMarkerModel.RestartPrepared(
+                    aborting,
+                    readiness.Plan!,
+                    timestamp),
+                aborting.Generation,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return null;
+    }
+
+    private async Task<(LegacyRoutingCutoverResultStatus Status, string Reason)?>
+        RemoveExactPreparedRouteAsync(
+            LegacyRoutingMigrationMarker abortingMarker,
+            DateTimeOffset timestamp,
+            CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            var loaded = _routes.Load(cancellationToken);
+            if (loaded.Status == RoutingDocumentLoadStatus.Missing) return null;
+            if (!loaded.LoadedFromDisk)
+            {
+                return (
+                    LegacyRoutingCutoverResultStatus.RoutingStateUnavailable,
+                    $"The route snapshot cannot be rolled back safely ({loaded.Status}).");
+            }
+
+            var document = loaded.Document!;
+            if (document.Routes.Count == 0) return null;
+            if (document.Routes.Count != 1 ||
+                !LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
+                    document.Routes[0],
+                    abortingMarker.Route))
+            {
+                return (
+                    LegacyRoutingCutoverResultStatus.StateConflict,
+                    "Migration rollback will not remove a non-equivalent route snapshot.");
+            }
+            var empty = RoutingSnapshotModel.ReplaceRoutes(
+                document,
+                [],
+                timestamp);
+            try
+            {
+                _ = await _routes.SaveAsync(
+                        empty,
+                        document.Generation,
+                        cancellationToken,
+                        beforeCommit: () => RequireMarkerCurrent(
+                            abortingMarker,
+                            LegacyRoutingMigrationMarkerPhase.Aborting))
+                    .ConfigureAwait(false);
+                return null;
+            }
+            catch (RoutingConcurrencyException) when (attempt < 5)
+            {
+                // Re-evaluate the winning route snapshot before removing anything.
+            }
+        }
+        return (
+            LegacyRoutingCutoverResultStatus.StateConflict,
+            "The route snapshot kept changing during migration rollback.");
     }
 
     private LegacyRoutingCutoverResult VerifyCommitted(
@@ -898,10 +1134,11 @@ internal sealed class LegacyRoutingMigrationCoordinator
     }
 
     private async Task<(LegacyRoutingCutoverResultStatus Status, string Reason)?> EnsureRouteAsync(
-        RoutingRoute planned,
+        LegacyRoutingMigrationMarker preparedMarker,
         DateTimeOffset timestamp,
         CancellationToken cancellationToken)
     {
+        var planned = preparedMarker.Route;
         for (var attempt = 0; attempt < 6; attempt++)
         {
             var loaded = _routes.Load(cancellationToken);
@@ -915,7 +1152,13 @@ internal sealed class LegacyRoutingMigrationCoordinator
                     UpdatedUtc: planned.ModifiedUtc);
                 try
                 {
-                    await _routes.SaveAsync(initial, expectedGeneration: 0, cancellationToken);
+                    await _routes.SaveAsync(
+                        initial,
+                        expectedGeneration: 0,
+                        cancellationToken,
+                        beforeCommit: () => RequireMarkerCurrent(
+                            preparedMarker,
+                            LegacyRoutingMigrationMarkerPhase.Prepared));
                     return null;
                 }
                 catch (RoutingConcurrencyException) when (attempt < 5)
@@ -941,7 +1184,13 @@ internal sealed class LegacyRoutingMigrationCoordinator
             var next = RoutingSnapshotModel.ReplaceRoutes(document, [planned], timestamp);
             try
             {
-                await _routes.SaveAsync(next, document.Generation, cancellationToken);
+                await _routes.SaveAsync(
+                    next,
+                    document.Generation,
+                    cancellationToken,
+                    beforeCommit: () => RequireMarkerCurrent(
+                        preparedMarker,
+                        LegacyRoutingMigrationMarkerPhase.Prepared));
                 return null;
             }
             catch (RoutingConcurrencyException) when (attempt < 5)
@@ -951,6 +1200,28 @@ internal sealed class LegacyRoutingMigrationCoordinator
         }
         return (LegacyRoutingCutoverResultStatus.StateConflict,
             "The route snapshot kept changing during cutover.");
+    }
+
+    private void RequireMarkerCurrent(
+        LegacyRoutingMigrationMarker expected,
+        LegacyRoutingMigrationMarkerPhase phase)
+    {
+        var current = _markers.Load(CancellationToken.None);
+        if (!current.LoadedFromDisk || current.Document is not
+            {
+                Phase: var currentPhase,
+                Generation: var currentGeneration,
+                MigrationId: var currentMigrationId,
+                PayloadFingerprint: var currentPayload
+            } ||
+            currentPhase != phase ||
+            currentGeneration != expected.Generation ||
+            currentMigrationId != expected.MigrationId ||
+            !currentPayload.Equals(expected.PayloadFingerprint, StringComparison.Ordinal))
+        {
+            throw new RoutingConcurrencyException(
+                "The migration marker changed before its route transaction committed.");
+        }
     }
 
     private static LegacyRoutingCutoverResult Result(

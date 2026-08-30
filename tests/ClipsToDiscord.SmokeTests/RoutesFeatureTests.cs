@@ -170,6 +170,9 @@ internal static class RoutesFeatureTests
         Directory.CreateDirectory(root);
         var clips = Path.Combine(root, "clips");
         Directory.CreateDirectory(clips);
+        var captureLibrary = Directory.CreateDirectory(
+            Path.Combine(root, "capture-library")).FullName;
+        var captureLibraryBinding = RoutingCaptureLibraryBindingModel.Create(captureLibrary);
         var settings = new AppSettings(
             clips,
             string.Empty,
@@ -189,7 +192,8 @@ internal static class RoutesFeatureTests
                 settings,
                 state,
                 LegacyWorkerQuiesced: true,
-                DiscordConnectionIds: []),
+                DiscordConnectionIds: [],
+                CaptureLibraryBinding: captureLibraryBinding),
             now);
         var plan = readiness.Plan ?? throw new InvalidOperationException(
             "The cutover-gate fixture could not produce a migration plan.");

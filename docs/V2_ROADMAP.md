@@ -149,15 +149,37 @@ soak tests remain phase gates before release.
 - Actions: save locally, Discord, YouTube, and TikTok draft/direct post.
 - Begin with guided recipes; add a visual Zapier-style builder only after common recipes are known.
 - The Discord-first foundation now includes crash-safe plans, encrypted named Discord connections,
-  operator retry/approval controls, and the Figma-aligned Routes editor. Connection staging is
-  available while route edits remain read-only until the final atomic cutover can preserve the
-  exact 1.x watcher state as an immutable fallback.
-- Live routing activation remains deliberately gated until SteelSeries/NVIDIA watched-folder clips
-  have the same durable ingestion and artifact-resolution path as ClipCord Capture. The legacy
-  watcher and routing runtime must never run concurrently, and activation must not drop an existing
-  source type. Activation evidence now carries the exact normalized legacy source from durable
-  `WatchState` plus an immutable set of sources covered by registered routing adapters; incomplete
-  coverage is rejected and legacy ownership is restored before routing can start.
+  operator retry/approval controls, the Figma-aligned Routes editor, and an active production
+  runtime shared by ClipCord Capture and the exact SteelSeries/NVIDIA watched-folder adapters.
+- The first activation quiesces the 1.x watcher, converts its initial ignored-file baseline to
+  content-hash exclusions, commits the equivalent Discord or File into Library route, and verifies
+  that snapshot before writing durable Routing execution authority. The prepared migration and
+  authority also carry privacy-safe hashes for the exact Capture library path and native Windows
+  directory identity. Cold startup verifies strict Capture settings and both hashes before orphan
+  cleanup, journal recovery, capture-host startup, Gallery access, outbox reconciliation, or active
+  Routing work. The live process retains a no-delete handle for that directory and shares one
+  renewable permit across capture, silhouette, Gallery, planning, delivery, and filing boundaries.
+  A lifetime monitor rechecks that permit while Capture is available. Losing settings, migration,
+  authority, or native-identity evidence revokes the hotkey, aborts the isolated recorder without
+  finalizing its active clip, and pauses every downstream path before another file or outbox
+  mutation. Bound repair accepts only the exact previously authorized directory. Before any
+  binding exists, reversible Legacy mode may validate and pin a user-selected ordinary directory
+  as fresh strict settings. Both repair paths require a restart before Capture components return.
+  A Legacy library switch is rejected while recording, replay, camera, or rendition work is active;
+  the candidate is pinned and recovered before its settings and live permit replace the old root.
+  A stale reversible preparation
+  passes through an `Aborting` marker, removes only its exact migration-owned route, and can then
+  re-plan from the latest drained Legacy state. Once the marker itself is committed, it becomes a
+  no-Legacy recovery fence even if a crash happens before the separate authority write; the next
+  launch resumes Routing under that fence. Unreadable or inconsistent migration/authority evidence
+  pauses processing instead of ever falling back to the legacy watcher.
+- One process-local ownership lease and one serialized outbox executor fence both source families.
+  Startup reconciles the Capture journal before admitting new watched-folder occurrences. Watched
+  clips are committed to an immutable, source-bound journal after containment, native-file identity,
+  stability, media, and post-probe identity checks; Capture clips enter through their existing
+  atomic project journal. Both paths resolve artifacts, persist planned deliveries before sends,
+  guard physical Discord deliveries with durable receipts, and file completed work through the same
+  route lifecycle.
 - A first watched-folder comparison seam is now available but remains disabled by default. When a
   developer explicitly selects Shadow mode, the existing legacy watcher stays the sole scanner and
   owner: after it has accepted a stable, hashed SteelSeries or NVIDIA clip, a fail-open observer runs
@@ -166,12 +188,12 @@ soak tests remain phase gates before release.
   that occurrence's route and filing projection. Observation itself has a bounded timeout; a slow or
   failed comparison yields to the unchanged legacy path.
   Shadow mode cannot create production outbox work, call a provider, move or claim a file, alter the
-  legacy decision, or advertise routing source coverage. Active mode is intentionally rejected.
-- The shadow document is comparison evidence, not the future watched-source journal. Live activation
-  still requires a durable occurrence journal with explicit source provenance, exact SteelSeries and
-  NVIDIA containment/reparse validation, post-probe identity revalidation, watched-source resolver
-  and filer implementations, an execution barrier, cross-restart ownership authority, and an
-  explicit source-switch transaction. Migration hash exclusions must be consumed before planning.
+  legacy decision, or advertise routing source coverage. It remains a separate developer comparison
+  aid and is not part of the active runtime.
+- Active authority deliberately freezes the legacy watched root, capture-source kind, Capture
+  library path/native directory identity, upload-mode switch, and legacy webhook identity. Those
+  fields require a future explicit source/destination switch transaction; unrelated preferences
+  remain editable while Routing continues processing.
 
 ## Invariants
 

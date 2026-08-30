@@ -20,6 +20,7 @@ internal static class RoutingRuntimeBridgeTests
         try
         {
             AssertOwnershipLeaseIsExclusive();
+            AssertCaptureLibraryPermitInspectionIsStatusBearing();
             await AssertActiveLegacyControllerCannotBeRevokedAsync(
                 Path.Combine(root, "active-legacy-owner"));
             AssertCutoverGateFailsClosed(Path.Combine(root, "gate"));
@@ -32,6 +33,8 @@ internal static class RoutingRuntimeBridgeTests
             await AssertEveryJournalStatePlansWithStableOutputsAsync(Path.Combine(root, "states"));
             await AssertReconciliationSkipsUnreadableBeforeValidAsync(Path.Combine(root, "reconcile-skip"));
             await AssertGateRevocationDuringPlanningPreventsAppendAsync(Path.Combine(root, "gate-revoke"));
+            await AssertCapturePermitRevocationAtCommitLeavesOutboxUnchangedAsync(
+                Path.Combine(root, "capture-permit-revoke"));
             await AssertUnrequestedFailedOutputUsesNotProducedAsync(Path.Combine(root, "unrequested-failure"));
             await AssertNonSourceEventsCannotCreatePlansAsync(Path.Combine(root, "non-source"));
             await AssertInvalidMediaAndPlannerLiesAreRejectedAsync(Path.Combine(root, "validation"));
@@ -55,15 +58,25 @@ internal static class RoutingRuntimeBridgeTests
         var stateStore = CreateLegacyStateStore(root, drained);
         var currentSettings = CreateLegacySettings(root);
         IReadOnlyList<string> connectionIds = [];
+        var captureLibraryBinding = CreateCaptureLibraryBinding(root);
         var evidence = new LegacyRoutingActivationEvidenceSource(
             stateStore,
             () => currentSettings,
-            () => connectionIds);
-        var migrationPlan = CreateMigrationPlan(currentSettings, drained, connectionIds);
+            () => connectionIds,
+            () => captureLibraryBinding);
+        var migrationPlan = CreateMigrationPlan(
+            currentSettings,
+            drained,
+            connectionIds,
+            captureLibraryBinding);
         var migrationRoute = migrationPlan.Route;
         var snapshotStore = CreateSnapshotStore(root, migrationRoute);
         var marker = new LegacyRoutingMigrationMarkerStore(
             Path.Combine(root, LegacyRoutingMigrationMarkerStore.FileName));
+        var committedMarker = LegacyRoutingMigrationMarkerModel.Commit(
+            LegacyRoutingMigrationMarkerModel.CreatePrepared(migrationPlan, Now),
+            Now.AddSeconds(1));
+        var authority = CreateAuthorityStore(root, committedMarker);
         var ownership = new ClipProcessingOwnershipCoordinator();
         Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var routingLease) &&
                routingLease is not null,
@@ -76,30 +89,54 @@ internal static class RoutingRuntimeBridgeTests
                RoutingRuntimeGateState.DisabledByDefault,
             "The routing runtime feature gate must be disabled by default.");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   false, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
+                   false, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   authority).State ==
                RoutingRuntimeGateState.DisabledByDefault,
             "A committed marker must not override the explicit disabled default.");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   authority).State ==
                RoutingRuntimeGateState.MigrationMarkerMissing,
             "A requested cutover without a committed marker must fail closed.");
 
         File.WriteAllText(marker.Path, "status=committed");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   authority).State ==
                RoutingRuntimeGateState.MigrationMarkerNotCommitted,
             "A lookalike or old migration marker must not activate routing.");
 
         File.Delete(marker.Path);
         marker = CreateMarkerStore(root, migrationPlan, commit: false);
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   authority).State ==
                RoutingRuntimeGateState.MigrationMarkerNotCommitted,
             "A valid but merely prepared migration marker must not activate routing.");
         var prepared = marker.Load().Document!;
         _ = marker.SaveAsync(
             LegacyRoutingMigrationMarkerModel.Commit(prepared, Now.AddSeconds(1)),
             prepared.Generation).GetAwaiter().GetResult();
+        var missingAuthority = new RoutingExecutionAuthorityStore(Path.Combine(
+            root,
+            "missing-authority",
+            RoutingExecutionAuthorityStore.FileName));
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   missingAuthority).State ==
+               RoutingRuntimeGateState.ExecutionAuthorityUnavailable,
+            "A committed migration without sticky execution authority must keep routing disabled.");
+        var corruptAuthority = new RoutingExecutionAuthorityStore(Path.Combine(
+            root,
+            "corrupt-authority",
+            RoutingExecutionAuthorityStore.FileName));
+        Directory.CreateDirectory(Path.GetDirectoryName(corruptAuthority.Path)!);
+        File.WriteAllText(corruptAuthority.Path, "{ not valid authority json");
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   corruptAuthority).State ==
+               RoutingRuntimeGateState.ExecutionAuthorityUnavailable,
+            "Corrupt sticky authority must fail closed instead of falling back to migration evidence.");
         var pending = CreateLegacyState(root);
         pending.PendingMoves.Add(Path.Combine(root, "pending-uploaded.mp4"));
         pending.PendingLocalOnlyMoves.Add(Path.Combine(root, "pending-local.mp4"));
@@ -109,7 +146,8 @@ internal static class RoutingRuntimeBridgeTests
         });
         stateStore.Save(pending);
         var blocked = RoutingRuntimeFeatureGate.Evaluate(
-            true, marker, snapshotStore, evidence, owned, FullLegacyCoverage);
+            true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+            authority);
         Assert(blocked.State == RoutingRuntimeGateState.LegacyQueuesPending &&
                blocked.PendingLegacyMoves == 1 &&
                blocked.PendingLegacyLocalOnlyMoves == 1 &&
@@ -118,7 +156,8 @@ internal static class RoutingRuntimeBridgeTests
 
         File.WriteAllText(stateStore.StatePath, "{\"version\":4}");
         Assert(RoutingRuntimeFeatureGate.Evaluate(
-                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage).State ==
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   authority).State ==
                RoutingRuntimeGateState.LegacyStateUnavailable,
             "Missing legacy queue state must fail closed rather than being treated as empty.");
 
@@ -129,7 +168,8 @@ internal static class RoutingRuntimeBridgeTests
             snapshotStore,
             evidence,
             owned,
-            new HashSet<ClipCaptureSource> { ClipCaptureSource.Nvidia });
+            new HashSet<ClipCaptureSource> { ClipCaptureSource.Nvidia },
+            authority);
         var missingInspection = missingCoverage.Inspect();
         Assert(missingInspection.State == RoutingRuntimeGateState.SourceCoverageMissing &&
                missingInspection.RequiredLegacySource == ClipCaptureSource.SteelSeriesGg &&
@@ -140,14 +180,36 @@ internal static class RoutingRuntimeBridgeTests
             ClipCaptureSource.SteelSeriesGg
         };
         var copiedCoverage = RoutingRuntimeFeatureGate.Evaluate(
-            true, marker, snapshotStore, evidence, owned, mutableCoverage);
+            true, marker, snapshotStore, evidence, owned, mutableCoverage,
+            authority);
         mutableCoverage.Clear();
         Assert(copiedCoverage.Enabled,
             "The activation gate must freeze registered source coverage instead of retaining a caller-mutable set.");
         var enabled = RoutingRuntimeFeatureGate.Evaluate(
-            true, marker, snapshotStore, evidence, owned, FullLegacyCoverage);
-        Assert(enabled.Enabled,
+            true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+            authority);
+        Assert(enabled.Enabled &&
+               enabled.Inspect().ExecutionAuthorityActivationId ==
+               authority.Load().Document!.ActivationId,
             "Only an exact committed marker plus fully drained legacy queues may enable the gate.");
+        var mismatchedAuthority = CreateAuthorityStore(
+            Path.Combine(root, "mismatched-authority"),
+            committedMarker,
+            ClipCaptureSource.Nvidia);
+        Assert(RoutingRuntimeFeatureGate.Evaluate(
+                   true, marker, snapshotStore, evidence, owned, FullLegacyCoverage,
+                   mismatchedAuthority).State ==
+               RoutingRuntimeGateState.ExecutionAuthorityMismatch,
+            "Authority for a different watched-source adapter must not enable this migration.");
+        AssertThrows<InvalidDataException>(() => _ = RoutingRuntimeFeatureGate.Evaluate(
+                true,
+                marker,
+                snapshotStore,
+                evidence,
+                owned,
+                new HashSet<ClipCaptureSource> { (ClipCaptureSource)999 },
+                authority),
+            "Undefined runtime source coverage must be rejected before activation.");
         drained.KnownContentHashes.Add(new string('B', 64));
         stateStore.Save(drained);
         Assert(enabled.State == RoutingRuntimeGateState.MigrationEvidenceMismatch,
@@ -256,13 +318,20 @@ internal static class RoutingRuntimeBridgeTests
         var stateStore = CreateLegacyStateStore(root, state);
         var settings = CreateLegacySettings(root);
         IReadOnlyList<string> connectionIds = [];
-        var migrationPlan = CreateMigrationPlan(settings, state, connectionIds);
+        var captureLibraryBinding = CreateCaptureLibraryBinding(root);
+        var migrationPlan = CreateMigrationPlan(
+            settings,
+            state,
+            connectionIds,
+            captureLibraryBinding);
         var marker = CreateMarkerStore(root, migrationPlan, commit: true);
+        var authority = CreateAuthorityStore(root, marker.Load().Document!);
         var snapshotStore = CreateSnapshotStore(root, migrationPlan.Route);
         var evidence = new LegacyRoutingActivationEvidenceSource(
             stateStore,
             () => settings,
-            () => connectionIds);
+            () => connectionIds,
+            () => captureLibraryBinding);
         var ownership = new ClipProcessingOwnershipCoordinator();
         Assert(ownership.TryAcquire(
                    ClipProcessingRuntimeOwner.Legacy,
@@ -331,7 +400,8 @@ internal static class RoutingRuntimeBridgeTests
                 snapshotStore,
                 evidence,
                 callerLease,
-                FullLegacyCoverage);
+                FullLegacyCoverage,
+                authority);
             Assert(blockedGate.State == RoutingRuntimeGateState.OwnershipUnavailable,
                 "Direct caller-handle revocation must not enable routing while the legacy watcher continues.");
 
@@ -355,7 +425,8 @@ internal static class RoutingRuntimeBridgeTests
                 snapshotStore,
                 evidence,
                 routingLease,
-                FullLegacyCoverage);
+                FullLegacyCoverage,
+                authority);
             Assert(enabledGate.Enabled,
                 "Exact cutover evidence may enable routing after legacy shutdown releases ownership.");
         }
@@ -380,13 +451,20 @@ internal static class RoutingRuntimeBridgeTests
         var stateStore = CreateLegacyStateStore(root, state);
         var settings = CreateLegacySettings(root, uploadToDiscord: true);
         IReadOnlyList<string> connectionIds = ["discord.connection.original"];
-        var plan = CreateMigrationPlan(settings, state, connectionIds);
+        var captureLibraryBinding = CreateCaptureLibraryBinding(root);
+        var plan = CreateMigrationPlan(
+            settings,
+            state,
+            connectionIds,
+            captureLibraryBinding);
         var routes = CreateSnapshotStore(root, plan.Route);
         var markers = CreateMarkerStore(root, plan, commit: true);
+        var authority = CreateAuthorityStore(root, markers.Load().Document!);
         var evidence = new LegacyRoutingActivationEvidenceSource(
             stateStore,
             () => settings,
-            () => connectionIds);
+            () => connectionIds,
+            () => captureLibraryBinding);
         var ownership = new ClipProcessingOwnershipCoordinator();
         Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var lease) &&
                lease is not null,
@@ -399,7 +477,8 @@ internal static class RoutingRuntimeBridgeTests
             routes,
             evidence,
             owned,
-            FullLegacyCoverage);
+            FullLegacyCoverage,
+            authority);
         Assert(gate.Enabled,
             "Exact current Discord connection evidence must authorize its committed marker.");
         connectionIds = ["discord.connection.changed"];
@@ -1164,10 +1243,12 @@ internal static class RoutingRuntimeBridgeTests
         var legacyStateStore = CreateLegacyStateStore(stateDirectory, legacyState);
         var legacySettings = CreateLegacySettings(stateDirectory);
         IReadOnlyList<string> connectionIds = [];
+        var captureLibraryBinding = CreateCaptureLibraryBinding(stateDirectory);
         var migrationPlan = CreateMigrationPlan(
             legacySettings,
             legacyState,
-            connectionIds);
+            connectionIds,
+            captureLibraryBinding);
         var snapshot = new RoutingSnapshotDocument(
             RoutingSnapshotStore.CurrentSchemaVersion,
             Generation: 1,
@@ -1178,10 +1259,12 @@ internal static class RoutingRuntimeBridgeTests
         var outboxStore = new RoutingOutboxStore(Path.Combine(stateDirectory, "outbox.json"));
         await snapshotStore.SaveAsync(snapshot, expectedGeneration: 0);
         var marker = CreateMarkerStore(stateDirectory, migrationPlan, commit: true);
+        var authority = CreateAuthorityStore(stateDirectory, marker.Load().Document!);
         var evidence = new LegacyRoutingActivationEvidenceSource(
             legacyStateStore,
             () => legacySettings,
-            () => connectionIds);
+            () => connectionIds,
+            () => captureLibraryBinding);
         var ownership = new ClipProcessingOwnershipCoordinator();
         if (!ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var routingLease) ||
             routingLease is null)
@@ -1195,7 +1278,8 @@ internal static class RoutingRuntimeBridgeTests
             snapshotStore,
             evidence,
             routingLease,
-            FullLegacyCoverage);
+            FullLegacyCoverage,
+            authority);
         Assert(gate.Enabled, "The focused runtime fixture must carry explicit safe cutover evidence.");
         return new Fixture(
             root,
@@ -1259,17 +1343,78 @@ internal static class RoutingRuntimeBridgeTests
     private static LegacyRoutingMigrationPlan CreateMigrationPlan(
         AppSettings settings,
         WatchState state,
-        IReadOnlyList<string> connectionIds)
+        IReadOnlyList<string> connectionIds,
+        RoutingCaptureLibraryBinding captureLibraryBinding)
     {
         var readiness = LegacyRoutingMigrationPlanner.Evaluate(
             new LegacyRoutingMigrationInput(
                 settings,
                 state,
                 LegacyWorkerQuiesced: true,
-                connectionIds),
+                connectionIds,
+                captureLibraryBinding),
             Now);
         return readiness.Plan ?? throw new InvalidOperationException(
             $"The activation fixture migration plan is unavailable ({readiness.Status}).");
+    }
+
+    private static void AssertCaptureLibraryPermitInspectionIsStatusBearing()
+    {
+        var expected = new RoutingCaptureLibraryBinding(Hash('A'), Hash('B'));
+        var mismatch = expected with { NativeDirectoryIdentityFingerprint = Hash('C') };
+        var unavailableError = new InvalidDataException("Synthetic strict-settings failure.");
+        var permit = new RoutingCaptureLibraryPermit(expected, () => expected);
+        var mismatchPermit = new RoutingCaptureLibraryPermit(expected, () => mismatch);
+        var unavailablePermit = new RoutingCaptureLibraryPermit(
+            expected,
+            () => throw unavailableError);
+
+        var allowed = permit.Inspect();
+        var changed = mismatchPermit.Inspect();
+        var unavailable = unavailablePermit.Inspect();
+
+        Assert(allowed is { State: RoutingCaptureLibraryPermitState.Allowed, Error: null } &&
+               allowed.CurrentBinding == expected && permit.ExpectedBinding == expected &&
+               changed is { State: RoutingCaptureLibraryPermitState.Mismatch, Error: null } &&
+               changed.CurrentBinding == mismatch &&
+               unavailable.State == RoutingCaptureLibraryPermitState.Unavailable &&
+               unavailable.CurrentBinding is null &&
+               ReferenceEquals(unavailable.Error, unavailableError),
+            "Capture-library permit inspection must distinguish allowed, mismatched, and unavailable live evidence while retaining one immutable expected binding.");
+    }
+
+    private static async Task AssertCapturePermitRevocationAtCommitLeavesOutboxUnchangedAsync(
+        string root)
+    {
+        var fixture = await CreateFixtureAsync(root, reactionCamera: false);
+        _ = await fixture.OutboxStore.LoadOrCreateAsync(Now);
+        var before = File.ReadAllBytes(fixture.OutboxStore.Path);
+        var expected = RoutingCaptureLibraryBindingModel.Create(fixture.LibraryRoot);
+        var mismatch = expected with { NativeDirectoryIdentityFingerprint = Hash('C') };
+        var revokeAtCommit = false;
+        var checksAfterPlanner = 0;
+        var permit = new RoutingCaptureLibraryPermit(
+            expected,
+            () => !revokeAtCommit || Interlocked.Increment(ref checksAfterPlanner) == 1
+                ? expected
+                : mismatch);
+        var planner = new MutatingPlanner(() => revokeAtCommit = true);
+
+        await AssertThrowsAsync<RoutingCaptureLibraryPermitException>(
+            () => fixture.CreateBridge(planner, permit).PlanAsync(SourceEvent(fixture.Item)),
+            "Revoking the Capture-library identity at the durable commit boundary must fail closed.");
+        var after = File.ReadAllBytes(fixture.OutboxStore.Path);
+        var persisted = fixture.OutboxStore.Load().Document!;
+        Assert(planner.Calls == 1 && checksAfterPlanner >= 2 &&
+               before.SequenceEqual(after) && persisted.Plans.Count == 0,
+            "A Capture-library revocation inside the outbox CAS boundary must leave the outbox byte-identical and append no plan.");
+    }
+
+    private static RoutingCaptureLibraryBinding CreateCaptureLibraryBinding(string root)
+    {
+        var captureLibraryRoot = Path.Combine(root, "capture-library");
+        Directory.CreateDirectory(captureLibraryRoot);
+        return RoutingCaptureLibraryBindingModel.Create(captureLibraryRoot);
     }
 
     private static LegacyRoutingMigrationMarkerStore CreateMarkerStore(
@@ -1291,6 +1436,22 @@ internal static class RoutingRuntimeBridgeTests
         return store;
     }
 
+    private static RoutingExecutionAuthorityStore CreateAuthorityStore(
+        string root,
+        LegacyRoutingMigrationMarker committedMarker,
+        ClipCaptureSource requiredLegacySource = ClipCaptureSource.SteelSeriesGg)
+    {
+        Directory.CreateDirectory(root);
+        var store = new RoutingExecutionAuthorityStore(
+            Path.Combine(root, RoutingExecutionAuthorityStore.FileName));
+        var document = RoutingExecutionAuthorityModel.Create(
+            committedMarker,
+            requiredLegacySource,
+            Now.AddSeconds(2));
+        _ = store.CommitAsync(document).GetAwaiter().GetResult();
+        return store;
+    }
+
     private static RoutingRuntimeSourceEvent SourceEvent(
         CaptureJournalReconciliationItem item) => new(
         RoutingRuntimeSourceEventKind.SourceClipCommitted,
@@ -1308,13 +1469,16 @@ internal static class RoutingRuntimeBridgeTests
         ClipProcessingOwnershipCoordinator Ownership,
         ClipProcessingOwnershipLease RoutingLease)
     {
-        internal RoutingRuntimeBridge CreateBridge(IRoutingRuntimePlanner planner) => new(
+        internal RoutingRuntimeBridge CreateBridge(
+            IRoutingRuntimePlanner planner,
+            RoutingCaptureLibraryPermit? captureLibraryPermit = null) => new(
             LibraryRoot,
             SnapshotStore,
             OutboxStore,
             planner,
             Gate,
-            () => Now.AddSeconds(1));
+            () => Now.AddSeconds(1),
+            captureLibraryPermit);
     }
 
     private sealed class RecordingPlanner : IRoutingRuntimePlanner
@@ -1402,6 +1566,22 @@ internal static class RoutingRuntimeBridgeTests
         }
         throw new InvalidOperationException(message);
     }
+
+    private static void AssertThrows<TException>(Action action, string message)
+        where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+        throw new InvalidOperationException(message);
+    }
+
+    private static string Hash(char value) => new(value, 64);
 
     private static void Assert(bool condition, string message)
     {

@@ -1029,11 +1029,13 @@ internal sealed class LegacyDiscordConnectionCutoverAdapter
         AppSettings settings,
         WatchState watchState,
         bool legacyWorkerQuiesced,
+        RoutingCaptureLibraryBinding captureLibraryBinding,
         DateTimeOffset? now = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(watchState);
+        RoutingCaptureLibraryBindingModel.Validate(captureLibraryBinding);
         DiscordConnectionSummary? connection = null;
         IReadOnlyList<string> connectionIds = [];
         if (settings.UploadToDiscord)
@@ -1059,7 +1061,8 @@ internal sealed class LegacyDiscordConnectionCutoverAdapter
                     settings,
                     watchState,
                     legacyWorkerQuiesced,
-                    connectionIds),
+                    connectionIds,
+                    captureLibraryBinding),
                 now,
                 cancellationToken)
             .ConfigureAwait(false);

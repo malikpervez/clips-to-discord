@@ -152,6 +152,8 @@ internal enum RoutingRuntimeGateState
     RoutingSnapshotUnavailable,
     MigrationRouteMismatch,
     SourceCoverageMissing,
+    ExecutionAuthorityUnavailable,
+    ExecutionAuthorityMismatch,
     Enabled
 }
 
@@ -168,6 +170,7 @@ internal sealed class RoutingRuntimeFeatureGate
     private readonly ILegacyRoutingActivationEvidenceSource? _activationEvidence;
     private readonly ClipProcessingOwnershipLease? _ownership;
     private readonly IReadOnlySet<ClipCaptureSource> _coveredLegacySources;
+    private readonly RoutingExecutionAuthorityStore? _executionAuthority;
 
     private RoutingRuntimeFeatureGate(
         bool requestedEnabled,
@@ -175,16 +178,22 @@ internal sealed class RoutingRuntimeFeatureGate
         RoutingSnapshotStore? routingSnapshots,
         ILegacyRoutingActivationEvidenceSource? activationEvidence,
         ClipProcessingOwnershipLease? ownership,
-        IReadOnlySet<ClipCaptureSource> coveredLegacySources)
+        IReadOnlySet<ClipCaptureSource> coveredLegacySources,
+        RoutingExecutionAuthorityStore? executionAuthority)
     {
         _requestedEnabled = requestedEnabled;
         _migrationMarkers = migrationMarkers;
         _routingSnapshots = routingSnapshots;
         _activationEvidence = activationEvidence;
         _ownership = ownership;
-        _coveredLegacySources = coveredLegacySources
-            .Select(AppSettings.NormalizeCaptureSource)
-            .ToFrozenSet();
+        foreach (var source in coveredLegacySources)
+        {
+            RoutingValidation.Require(
+                Enum.IsDefined(source) && AppSettings.NormalizeCaptureSource(source) == source,
+                "Routing runtime source coverage contains an unsupported adapter claim.");
+        }
+        _coveredLegacySources = coveredLegacySources.ToFrozenSet();
+        _executionAuthority = executionAuthority;
     }
 
     internal static RoutingRuntimeFeatureGate Disabled { get; } = new(
@@ -193,7 +202,8 @@ internal sealed class RoutingRuntimeFeatureGate
         routingSnapshots: null,
         activationEvidence: null,
         ownership: null,
-        coveredLegacySources: FrozenSet<ClipCaptureSource>.Empty);
+        coveredLegacySources: FrozenSet<ClipCaptureSource>.Empty,
+        executionAuthority: null);
 
     internal RoutingRuntimeGateState State => Inspect().State;
     internal int PendingLegacyMoves => Inspect().PendingLegacyMoves;
@@ -208,7 +218,8 @@ internal sealed class RoutingRuntimeFeatureGate
         RoutingSnapshotStore routingSnapshots,
         ILegacyRoutingActivationEvidenceSource activationEvidence,
         ClipProcessingOwnershipLease ownership,
-        IReadOnlySet<ClipCaptureSource> coveredLegacySources)
+        IReadOnlySet<ClipCaptureSource> coveredLegacySources,
+        RoutingExecutionAuthorityStore? executionAuthority = null)
     {
         ArgumentNullException.ThrowIfNull(migrationMarkers);
         ArgumentNullException.ThrowIfNull(routingSnapshots);
@@ -221,7 +232,8 @@ internal sealed class RoutingRuntimeFeatureGate
             routingSnapshots,
             activationEvidence,
             ownership,
-            coveredLegacySources);
+            coveredLegacySources,
+            executionAuthority);
     }
 
     internal RoutingRuntimeGateInspection Inspect()
@@ -238,6 +250,15 @@ internal sealed class RoutingRuntimeFeatureGate
         {
             return Inspection(RoutingRuntimeGateState.OwnershipUnavailable);
         }
+
+        var executionAuthority = _executionAuthority?.Inspect();
+        if (executionAuthority is null || !executionAuthority.RoutingRequired ||
+            executionAuthority.Document is null)
+        {
+            return Inspection(RoutingRuntimeGateState.ExecutionAuthorityUnavailable,
+                ownership.Epoch);
+        }
+        var authorityDocument = executionAuthority.Document;
 
         var markerStore = _migrationMarkers;
         if (markerStore is null)
@@ -257,6 +278,20 @@ internal sealed class RoutingRuntimeFeatureGate
                 RoutingRuntimeGateState.MigrationMarkerNotCommitted,
                 ownership.Epoch);
         }
+        if (authorityDocument.MigrationId != marker.Document.MigrationId ||
+            !authorityDocument.MigrationPayloadFingerprint.Equals(
+                marker.Document.PayloadFingerprint, StringComparison.OrdinalIgnoreCase) ||
+            !authorityDocument.SourceFingerprint.Equals(
+                marker.Document.SourceFingerprint, StringComparison.OrdinalIgnoreCase) ||
+            authorityDocument.CaptureLibraryBinding !=
+            marker.Document.CaptureLibraryBinding)
+        {
+            return Inspection(
+                RoutingRuntimeGateState.ExecutionAuthorityMismatch,
+                ownership.Epoch,
+                marker.Document.PayloadFingerprint,
+                executionAuthorityActivationId: authorityDocument.ActivationId);
+        }
 
         var evidence = _activationEvidence?.Inspect();
         if (evidence is null || !evidence.Loaded)
@@ -273,6 +308,16 @@ internal sealed class RoutingRuntimeFeatureGate
         var requiredLegacySource = legacyState.State is null
             ? (ClipCaptureSource?)null
             : AppSettings.NormalizeCaptureSource(legacyState.State.CaptureSource);
+        if (requiredLegacySource is not { } authoritySource ||
+            authoritySource != authorityDocument.RequiredLegacySource)
+        {
+            return Inspection(
+                RoutingRuntimeGateState.ExecutionAuthorityMismatch,
+                ownership.Epoch,
+                marker.Document.PayloadFingerprint,
+                requiredLegacySource: requiredLegacySource,
+                executionAuthorityActivationId: authorityDocument.ActivationId);
+        }
         var pendingMoves = legacyState.PendingMoves;
         var pendingLocalOnlyMoves = legacyState.PendingLocalOnlyMoves;
         var pendingEditedUploads = legacyState.PendingEditedUploads;
@@ -290,7 +335,8 @@ internal sealed class RoutingRuntimeFeatureGate
                 marker.Document.PayloadFingerprint,
                 ownership.Epoch,
                 requiredLegacySource,
-                _coveredLegacySources);
+                _coveredLegacySources,
+                authorityDocument.ActivationId);
         }
 
         var readiness = evidence.Readiness!;
@@ -298,6 +344,7 @@ internal sealed class RoutingRuntimeFeatureGate
         if (!readiness.CanCommit || plan is null ||
             plan.MigrationId != marker.Document.MigrationId ||
             plan.Mode != marker.Document.Mode || plan.Scope != marker.Document.Scope ||
+            plan.CaptureLibraryBinding != marker.Document.CaptureLibraryBinding ||
             !plan.SourceFingerprint.Equals(
                 marker.Document.SourceFingerprint,
                 StringComparison.Ordinal) ||
@@ -358,7 +405,8 @@ internal sealed class RoutingRuntimeFeatureGate
             marker.Document.PayloadFingerprint,
             ownership.Epoch,
             requiredLegacySource,
-            _coveredLegacySources);
+            _coveredLegacySources,
+            authorityDocument.ActivationId);
     }
 
     private RoutingRuntimeGateInspection Inspection(
@@ -366,7 +414,8 @@ internal sealed class RoutingRuntimeFeatureGate
         long? ownershipEpoch = null,
         string? markerPayloadFingerprint = null,
         long? routingGeneration = null,
-        ClipCaptureSource? requiredLegacySource = null) => new(
+        ClipCaptureSource? requiredLegacySource = null,
+        Guid? executionAuthorityActivationId = null) => new(
         state,
         0,
         0,
@@ -376,7 +425,8 @@ internal sealed class RoutingRuntimeFeatureGate
         markerPayloadFingerprint,
         ownershipEpoch,
         requiredLegacySource,
-        _coveredLegacySources);
+        _coveredLegacySources,
+        executionAuthorityActivationId);
 }
 
 internal sealed record RoutingRuntimeGateInspection(
@@ -389,7 +439,8 @@ internal sealed record RoutingRuntimeGateInspection(
     string? MarkerPayloadFingerprint,
     long? OwnershipEpoch,
     ClipCaptureSource? RequiredLegacySource,
-    IReadOnlySet<ClipCaptureSource> CoveredLegacySources)
+    IReadOnlySet<ClipCaptureSource> CoveredLegacySources,
+    Guid? ExecutionAuthorityActivationId = null)
 {
     internal bool HasRequiredSourceCoverage =>
         RequiredLegacySource is { } required && CoveredLegacySources.Contains(required);
@@ -404,6 +455,8 @@ internal sealed record RoutingRuntimeGateInspection(
 
     internal bool SameAuthority(RoutingRuntimeGateInspection other) =>
         other.Enabled &&
+        ExecutionAuthorityActivationId is not null &&
+        ExecutionAuthorityActivationId == other.ExecutionAuthorityActivationId &&
         MarkerPayloadFingerprint == other.MarkerPayloadFingerprint &&
         OwnershipEpoch == other.OwnershipEpoch &&
         RequiredLegacySource == other.RequiredLegacySource &&
@@ -440,6 +493,7 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
     private readonly RoutingOutboxStore _outboxStore;
     private readonly IRoutingRuntimePlanner _planner;
     private readonly RoutingRuntimeFeatureGate _featureGate;
+    private readonly RoutingCaptureLibraryPermit _captureLibraryPermit;
     private readonly Func<DateTimeOffset> _utcNow;
 
     internal RoutingRuntimeBridge(
@@ -448,7 +502,8 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
         RoutingOutboxStore outboxStore,
         IRoutingRuntimePlanner planner,
         RoutingRuntimeFeatureGate? featureGate = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        RoutingCaptureLibraryPermit? captureLibraryPermit = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(libraryRoot);
         _libraryRoot = Path.GetFullPath(libraryRoot);
@@ -456,10 +511,17 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
         _outboxStore = outboxStore ?? throw new ArgumentNullException(nameof(outboxStore));
         _planner = planner ?? throw new ArgumentNullException(nameof(planner));
         _featureGate = featureGate ?? RoutingRuntimeFeatureGate.Disabled;
+        var initialBinding = captureLibraryPermit is null
+            ? RoutingCaptureLibraryBindingModel.Create(_libraryRoot)
+            : null;
+        _captureLibraryPermit = captureLibraryPermit ?? new RoutingCaptureLibraryPermit(
+            initialBinding!,
+            () => RoutingCaptureLibraryBindingModel.Create(_libraryRoot));
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
     internal RoutingRuntimeFeatureGate FeatureGate => _featureGate;
+    internal RoutingCaptureLibraryPermit CaptureLibraryPermit => _captureLibraryPermit;
 
     public async ValueTask ReconcileAsync(
         CaptureJournalReconciliationItem item,
@@ -499,6 +561,7 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
                 null,
                 null);
         }
+        _ = _captureLibraryPermit.RequireCurrent("Capture journal validation");
         if (sourceEvent.Kind is not RoutingRuntimeSourceEventKind.SourceClipCommitted and
             not RoutingRuntimeSourceEventKind.CaptureJournalReconciled)
         {
@@ -524,8 +587,12 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
                 null);
         }
         var snapshot = loadedSnapshot.Document;
+        _ = _captureLibraryPermit.RequireCurrent("Routing outbox planning admission");
         var admission = await _outboxStore.PrepareForPlanningAsync(
-                _utcNow(), cancellationToken)
+                _utcNow(),
+                cancellationToken,
+                () => _captureLibraryPermit.RequireCurrent(
+                    "Routing outbox planning-admission commit"))
             .ConfigureAwait(false);
         var current = admission.Document;
         if (TryFindExistingPlan(current, sourceClipId, out var existingPlan))
@@ -619,10 +686,13 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
                         null,
                         current.Generation);
                 }
+                _ = _captureLibraryPermit.RequireCurrent("Routing outbox plan commit");
                 var saved = await _outboxStore.SaveAsync(
                         candidate,
                         current.Generation,
-                        cancellationToken)
+                        cancellationToken,
+                        () => _captureLibraryPermit.RequireCurrent(
+                            "Routing outbox plan commit"))
                     .ConfigureAwait(false);
                 return new RoutingRuntimePlanResult(
                     RoutingRuntimePlanStatus.Planned,
@@ -706,10 +776,14 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
             if (!authority.SameAuthority(_featureGate.Inspect())) return;
             try
             {
+                _ = _captureLibraryPermit.RequireCurrent(
+                    "Routing outbox artifact reconciliation");
                 _ = await _outboxStore.SaveAsync(
                         candidate,
                         current.Generation,
-                        cancellationToken)
+                        cancellationToken,
+                        () => _captureLibraryPermit.RequireCurrent(
+                            "Routing outbox artifact-reconciliation commit"))
                     .ConfigureAwait(false);
                 return;
             }

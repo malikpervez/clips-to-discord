@@ -325,13 +325,17 @@ internal sealed class RoutingOutboxCompactor(
 
     internal async Task<RoutingOutboxAdmissionResult> PrepareForPlanningAsync(
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? beforeMutation = null)
     {
         var archivedCount = 0;
         RoutingOutboxDocument? current = null;
         for (var batch = 0; batch < MaximumBatchesPerAdmission; batch++)
         {
-            current = await outboxStore.LoadOrCreateAsync(now, cancellationToken)
+            current = await outboxStore.LoadOrCreateAsync(
+                    now,
+                    cancellationToken,
+                    beforeMutation)
                 .ConfigureAwait(false);
             var bytes = outboxStore.MeasureSerializedBytes(current);
             // Preserve 256 KiB for the next ordinary plan. A larger single proposal is rejected
@@ -340,7 +344,11 @@ internal sealed class RoutingOutboxCompactor(
             if (bytes <= outboxStore.PlanningAdmissionLimitBytes - reserve)
                 return new RoutingOutboxAdmissionResult(current, true, archivedCount);
 
-            var result = await CompactBatchAsync(current, now, cancellationToken)
+            var result = await CompactBatchAsync(
+                    current,
+                    now,
+                    cancellationToken,
+                    beforeMutation)
                 .ConfigureAwait(false);
             current = result.Document;
             archivedCount += result.ArchivedPlanCount;
@@ -354,7 +362,10 @@ internal sealed class RoutingOutboxCompactor(
             }
         }
 
-        current ??= await outboxStore.LoadOrCreateAsync(now, cancellationToken)
+        current ??= await outboxStore.LoadOrCreateAsync(
+                now,
+                cancellationToken,
+                beforeMutation)
             .ConfigureAwait(false);
         return new RoutingOutboxAdmissionResult(
             current,
@@ -374,7 +385,8 @@ internal sealed class RoutingOutboxCompactor(
     private async Task<RoutingOutboxAdmissionResult> CompactBatchAsync(
         RoutingOutboxDocument initial,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? beforeMutation = null)
     {
         var current = initial;
         for (var attempt = 0; attempt < MaximumSaveAttempts; attempt++)
@@ -391,19 +403,29 @@ internal sealed class RoutingOutboxCompactor(
                 return new RoutingOutboxAdmissionResult(current, false, 0);
 
             foreach (var archive in selected)
+            {
+                beforeMutation?.Invoke();
                 await archiveStore.PersistExactAsync(archive, cancellationToken)
                     .ConfigureAwait(false);
+            }
             var candidate = RoutingArchiveModel.RemoveArchivedPlans(current, selected, now);
             try
             {
                 var saved = await outboxStore.SaveCompactedAsync(
-                        candidate, current.Generation, selected, cancellationToken)
+                        candidate,
+                        current.Generation,
+                        selected,
+                        cancellationToken,
+                        beforeMutation)
                     .ConfigureAwait(false);
                 return new RoutingOutboxAdmissionResult(saved, true, selected.Length);
             }
             catch (RoutingConcurrencyException) when (attempt < MaximumSaveAttempts - 1)
             {
-                current = await outboxStore.LoadOrCreateAsync(now, cancellationToken)
+                current = await outboxStore.LoadOrCreateAsync(
+                        now,
+                        cancellationToken,
+                        beforeMutation)
                     .ConfigureAwait(false);
             }
         }

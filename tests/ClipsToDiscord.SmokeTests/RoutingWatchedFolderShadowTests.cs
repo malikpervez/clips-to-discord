@@ -398,6 +398,9 @@ internal static class RoutingWatchedFolderShadowTests
         Action<WatchState>? configureState = null)
     {
         var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var captureLibrary = Directory.CreateDirectory(
+            Path.Combine(root, "capture-library")).FullName;
+        var captureLibraryBinding = RoutingCaptureLibraryBindingModel.Create(captureLibrary);
         var routing = Directory.CreateDirectory(Path.Combine(root, "routing")).FullName;
         var settings = Settings(clips, upload, source);
         var state = State(clips, source);
@@ -428,7 +431,8 @@ internal static class RoutingWatchedFolderShadowTests
                     settings,
                     state,
                     LegacyWorkerQuiesced: true,
-                    connectionIds),
+                    connectionIds,
+                    captureLibraryBinding),
                 Now)
             .GetAwaiter().GetResult();
         Assert(cutover.IsCommitted,

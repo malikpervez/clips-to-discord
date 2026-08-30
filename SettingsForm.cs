@@ -234,6 +234,8 @@ internal sealed class SettingsForm : Form
     private readonly bool _captureEngineAvailable;
     private readonly Action<CaptureSettings>? _saveCaptureSettings;
     private readonly IManualCaptureRecorder? _manualCaptureRecorder;
+    private readonly Func<bool>? _captureLibraryAccessAllowed;
+    private readonly Func<string, bool>? _repairCaptureLibraryRoot;
     private readonly string _silhouetteSettingsDirectory;
     private readonly DiscordConnectionCatalog? _discordConnectionCatalog;
     private readonly RoutingRouteManager? _routingRouteManager;
@@ -288,7 +290,9 @@ internal sealed class SettingsForm : Form
         IManualCaptureRecorder? manualCaptureRecorder = null,
         string? silhouetteSettingsDirectory = null,
         DiscordConnectionCatalog? discordConnectionCatalog = null,
-        RoutingRouteManager? routingRouteManager = null)
+        RoutingRouteManager? routingRouteManager = null,
+        Func<bool>? captureLibraryAccessAllowed = null,
+        Func<string, bool>? repairCaptureLibraryRoot = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -305,6 +309,8 @@ internal sealed class SettingsForm : Form
         _captureEngineAvailable = captureEngineAvailable;
         _saveCaptureSettings = saveCaptureSettings;
         _manualCaptureRecorder = manualCaptureRecorder;
+        _captureLibraryAccessAllowed = captureLibraryAccessAllowed;
+        _repairCaptureLibraryRoot = repairCaptureLibraryRoot;
         _discordConnectionCatalog = discordConnectionCatalog;
         _routingRouteManager = routingRouteManager;
         _silhouetteSettingsDirectory = Path.GetFullPath(
@@ -543,7 +549,9 @@ internal sealed class SettingsForm : Form
             _initialCaptureSettings,
             _captureEngineAvailable,
             _saveCaptureSettings,
-            _manualCaptureRecorder);
+            _manualCaptureRecorder,
+            _captureLibraryAccessAllowed,
+            _repairCaptureLibraryRoot);
         var routeManager = _routingRouteManager ?? new RoutingRouteManager(
             connectionMembership: _discordConnectionCatalog);
         _routesPage = new RoutesView(
@@ -568,7 +576,8 @@ internal sealed class SettingsForm : Form
             _thumbnailProvider,
             _favorites,
             _initialCaptureSettings.LibraryRoot,
-            _appliedSettings.CaptureSource);
+            _appliedSettings.CaptureSource,
+            _captureLibraryAccessAllowed);
         _capturePage.SettingsChanged += settings => _galleryPage.SetCaptureLibraryRoot(settings.LibraryRoot);
         _galleryPage.SetEmbeddedHeaderVisible(false);
         _galleryPage.HeaderChanged += (title, subtitle) =>

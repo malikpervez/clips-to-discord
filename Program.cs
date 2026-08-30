@@ -19,6 +19,16 @@ internal static class Program
                 Environment.ExitCode = SilhouetteWorkerProcess.InvalidArgumentsExitCode;
                 return;
             }
+            // Establish process-tree containment before RunAsync can open or mutate the Capture
+            // library. The Job handle remains statically rooted until Windows exits this worker.
+            if (!SilhouetteWorkerJobLifetime.TryEstablish(out var containmentError))
+            {
+                Log.Error(
+                    $"ClipCord could not establish silhouette worker containment: {containmentError}");
+                Environment.ExitCode =
+                    SilhouetteWorkerProcess.LifetimeAuthorityFailedExitCode;
+                return;
+            }
             Environment.ExitCode = SilhouetteWorkerProcess.RunAsync(
                     silhouetteWorkerOptions!)
                 .GetAwaiter()

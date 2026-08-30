@@ -11,7 +11,8 @@ internal static class CaptureJournalStartupRecovery
     internal static async Task RecoverAsync(
         string libraryRoot,
         DateTimeOffset existingJournalCutoffUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? beforeMutation = null)
     {
         if (existingJournalCutoffUtc.Offset != TimeSpan.Zero)
         {
@@ -19,7 +20,9 @@ internal static class CaptureJournalStartupRecovery
                 "The capture-journal recovery cutoff must be UTC.",
                 nameof(existingJournalCutoffUtc));
         }
-        var promotionHandler = new OriginalPromotionHandler(libraryRoot);
+        var promotionHandler = new OriginalPromotionHandler(
+            libraryRoot,
+            beforeMutation);
         string? cursor = null;
         do
         {
@@ -37,7 +40,8 @@ internal static class CaptureJournalStartupRecovery
 
         var projectionHandler = new JournalProjectionHandler(
             libraryRoot,
-            existingJournalCutoffUtc);
+            existingJournalCutoffUtc,
+            beforeMutation);
         cursor = null;
         do
         {
@@ -55,7 +59,8 @@ internal static class CaptureJournalStartupRecovery
     }
 
     private sealed class OriginalPromotionHandler(
-        string libraryRoot) : ICaptureJournalOriginalPromotionReconciliationHandler
+        string libraryRoot,
+        Action? beforeMutation) : ICaptureJournalOriginalPromotionReconciliationHandler
     {
         public async ValueTask ReconcileAsync(
             CaptureJournalOriginalPromotionReconciliationItem item,
@@ -66,6 +71,7 @@ internal static class CaptureJournalStartupRecovery
                 var inspection = item.Inspection;
                 if (inspection.Status == CaptureJournalPromotionStatus.MoveRequired)
                 {
+                    RequireMutationAllowed(cancellationToken, beforeMutation);
                     inspection = await CaptureJournalPromotionIntentStore.PromoteOriginalAsync(
                             libraryRoot,
                             item.ClipId,
@@ -74,6 +80,7 @@ internal static class CaptureJournalStartupRecovery
                 }
                 if (inspection.Status == CaptureJournalPromotionStatus.DestinationReady)
                 {
+                    RequireMutationAllowed(cancellationToken, beforeMutation);
                     _ = await CaptureJournalPromotionIntentStore.CommitOriginalAsync(
                             libraryRoot,
                             item.ClipId,
@@ -87,6 +94,7 @@ internal static class CaptureJournalStartupRecovery
                 }
                 if (inspection.Status == CaptureJournalPromotionStatus.AlreadyJournaled)
                 {
+                    RequireMutationAllowed(cancellationToken, beforeMutation);
                     await CaptureJournalPromotionIntentStore.CompleteOriginalAsync(
                             libraryRoot,
                             item.ClipId,
@@ -111,7 +119,8 @@ internal static class CaptureJournalStartupRecovery
 
     private sealed class JournalProjectionHandler(
         string libraryRoot,
-        DateTimeOffset existingJournalCutoffUtc) : ICaptureJournalReconciliationHandler
+        DateTimeOffset existingJournalCutoffUtc,
+        Action? beforeMutation) : ICaptureJournalReconciliationHandler
     {
         public async ValueTask ReconcileAsync(
             CaptureJournalReconciliationItem item,
@@ -129,7 +138,8 @@ internal static class CaptureJournalStartupRecovery
                             item.ClipId,
                             failIfProjectMissing:
                                 current.CreatedUtc < existingJournalCutoffUtc,
-                            cancellationToken)
+                            cancellationToken,
+                            beforeMutation)
                         .ConfigureAwait(false) ?? current;
                 }
                 if (current.State == CaptureJournalState.CameraPending)
@@ -137,7 +147,8 @@ internal static class CaptureJournalStartupRecovery
                     _ = await CaptureJournalCaptureCommit.ReconcileRenditionsAsync(
                             libraryRoot,
                             item.ClipId,
-                            cancellationToken)
+                            cancellationToken,
+                            beforeMutation: beforeMutation)
                         .ConfigureAwait(false);
                 }
             }
@@ -154,5 +165,14 @@ internal static class CaptureJournalStartupRecovery
                     exception);
             }
         }
+    }
+
+    private static void RequireMutationAllowed(
+        CancellationToken cancellationToken,
+        Action? beforeMutation)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        beforeMutation?.Invoke();
+        cancellationToken.ThrowIfCancellationRequested();
     }
 }

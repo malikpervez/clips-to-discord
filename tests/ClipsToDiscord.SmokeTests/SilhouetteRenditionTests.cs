@@ -1360,7 +1360,12 @@ internal static class SilhouetteRenditionTests
         var absoluteRoot = Path.GetFullPath(Path.Combine(
             testRoot,
             "Library with spaces & shell metacharacters"));
+        Directory.CreateDirectory(absoluteRoot);
         var projectId = new string('a', 32);
+        var expectedBinding = RoutingCaptureLibraryBindingModel.Create(absoluteRoot);
+        using var parent = StartHarmlessWorkerParent();
+        var parentCreationTime = SilhouetteWorkerParentHandle.ReadCreationTimeFileTime(
+            parent.Id);
         var validArguments = new[]
         {
             SilhouetteWorkerLaunchOptions.WorkerArgument,
@@ -1368,12 +1373,35 @@ internal static class SilhouetteRenditionTests
             absoluteRoot,
             SilhouetteWorkerLaunchOptions.ProjectIdArgument,
             projectId,
+            SilhouetteWorkerLaunchOptions.ParentArgument,
+            parent.Id.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            SilhouetteWorkerLaunchOptions.ParentCreationArgument,
+            parentCreationTime.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            SilhouetteWorkerLaunchOptions.LibraryPathFingerprintArgument,
+            expectedBinding.CanonicalPathFingerprint,
+            SilhouetteWorkerLaunchOptions.LibraryIdentityFingerprintArgument,
+            expectedBinding.NativeDirectoryIdentityFingerprint,
             SilhouetteWorkerLaunchOptions.CpuArgument
         };
+        var parsedSuccessfully = SilhouetteWorkerLaunchOptions.TryParse(
+            validArguments,
+            out var parsed);
+        var parsedNoCpuSuccessfully = SilhouetteWorkerLaunchOptions.TryParse(
+            validArguments[..^1],
+            out var noCpu);
         Assert(
-            SilhouetteWorkerLaunchOptions.TryParse(validArguments, out var parsed) &&
-            parsed == new SilhouetteWorkerLaunchOptions(absoluteRoot, projectId, ForceCpu: true),
-            "The isolated silhouette worker must accept a fully-qualified root and exact lowercase 32-hex project id.");
+            validArguments.Length == 14 &&
+            parsedSuccessfully &&
+            parsed == new SilhouetteWorkerLaunchOptions(
+                absoluteRoot,
+                projectId,
+                ForceCpu: true,
+                parent.Id,
+                parentCreationTime,
+                expectedBinding) &&
+            parsedNoCpuSuccessfully &&
+            noCpu == parsed with { ForceCpu = false },
+            "The isolated silhouette worker must use strict 13/14-argument contracts carrying a real parent creation identity and exact existing-root binding.");
 
         foreach (var hostile in new[]
                  {
@@ -1384,7 +1412,40 @@ internal static class SilhouetteRenditionTests
                          Path.DirectorySeparatorChar + "rooted-but-not-fully-qualified"),
                      ReplaceArgument(validArguments, 4, new string('A', 32)),
                      ReplaceArgument(validArguments, 4, new string('a', 31)),
-                     ReplaceArgument(validArguments, 4, new string('a', 31) + "g")
+                     ReplaceArgument(validArguments, 4, new string('a', 31) + "g"),
+                     ReplaceArgument(validArguments, 6, "0"),
+                     ReplaceArgument(validArguments, 6, "-1"),
+                     ReplaceArgument(validArguments, 6, "+1"),
+                     ReplaceArgument(validArguments, 6, "not-a-process"),
+                     ReplaceArgument(
+                         validArguments,
+                         6,
+                         Environment.ProcessId.ToString(
+                             System.Globalization.CultureInfo.InvariantCulture)),
+                     ReplaceArgument(validArguments, 8, "0"),
+                     ReplaceArgument(validArguments, 8, "+1"),
+                     ReplaceArgument(
+                         validArguments,
+                         8,
+                         "0" + parentCreationTime.ToString(
+                             System.Globalization.CultureInfo.InvariantCulture)),
+                     ReplaceArgument(validArguments, 8, "not-a-filetime"),
+                     ReplaceArgument(
+                         validArguments,
+                         10,
+                         expectedBinding.CanonicalPathFingerprint.ToLowerInvariant()),
+                     ReplaceArgument(
+                         validArguments,
+                         12,
+                         expectedBinding.NativeDirectoryIdentityFingerprint[..^1]),
+                     validArguments.Where((_, index) => index is not (5 or 6)).ToArray(),
+                     validArguments
+                         .Concat([
+                             SilhouetteWorkerLaunchOptions.ParentArgument,
+                             parent.Id.ToString(
+                                 System.Globalization.CultureInfo.InvariantCulture)
+                         ])
+                         .ToArray()
                  })
         {
             Assert(
@@ -1400,7 +1461,10 @@ internal static class SilhouetteRenditionTests
             absoluteRoot,
             projectId,
             forceCpu: true,
-            executablePath);
+            executablePath,
+            parent.Id,
+            parentCreationTime,
+            expectedBinding);
         Assert(
             startInfo.FileName == executablePath &&
             !startInfo.UseShellExecute &&
@@ -1418,8 +1482,35 @@ internal static class SilhouetteRenditionTests
                 SilhouetteWorkerLaunch.CreateStartInfo(
                     absoluteRoot,
                     new string('A', 32),
-                    executablePath: executablePath)),
-            "Worker launch must use ArgumentList with no shell or flattened Arguments string, preserving even metacharacters as one inert root argument.");
+                    executablePath: executablePath)) &&
+            Throws<ArgumentOutOfRangeException>(() =>
+                SilhouetteWorkerLaunch.CreateStartInfo(
+                    absoluteRoot,
+                    projectId,
+                    executablePath: executablePath,
+                    parentProcessId: 0)),
+            "Worker launch must use ArgumentList with no shell or flattened Arguments string, preserve metacharacters as one inert root argument, and carry the validated parent and root authority evidence unchanged.");
+        parent.Kill(entireProcessTree: true);
+        Assert(parent.WaitForExit(5_000),
+            "The harmless silhouette worker parent fixture must terminate after the strict launch-contract checks.");
+    }
+
+    private static Process StartHarmlessWorkerParent()
+    {
+        var commandProcessor = Environment.GetEnvironmentVariable("ComSpec") ??
+            Path.Combine(Environment.SystemDirectory, "cmd.exe");
+        var startInfo = new ProcessStartInfo(commandProcessor)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("/d");
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add("ping -n 31 127.0.0.1 >nul");
+        return Process.Start(startInfo) ?? throw new InvalidOperationException(
+            "Windows did not start the harmless silhouette launch parent fixture.");
     }
 
     private static void AssertPackagedModelIntegrity()

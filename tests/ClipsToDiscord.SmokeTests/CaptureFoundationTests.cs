@@ -38,6 +38,7 @@ internal static class CaptureFoundationTests
         AssertReplaySaveFailureCleanup(testRoot);
         AssertReplayCameraPersistenceCannotBlockGameplay(testRoot);
         AssertGallerySourceProvenance(testRoot);
+        AssertCaptureLibraryUiContainment(testRoot);
     }
 
     private static void AssertCapabilityProbeShape()
@@ -4788,6 +4789,144 @@ internal static class CaptureFoundationTests
             Console.WriteLine(
                 "  (skipped the ClipCord Gallery symlink check: this Windows environment cannot create a test link)");
         }
+    }
+
+    private static void AssertCaptureLibraryUiContainment(string testRoot)
+    {
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var externalRoot = Directory.CreateDirectory(
+                    Path.Combine(testRoot, "capture-library-ui-external")).FullName;
+                var externalGame = Directory.CreateDirectory(
+                    Path.Combine(externalRoot, "local-only", "Valorant")).FullName;
+                File.WriteAllBytes(Path.Combine(externalGame, "external.mp4"), [1, 2, 3]);
+                var missingCaptureRoot = Path.Combine(testRoot, "capture-library-ui-missing");
+                var externalSettings = AppSettings.Empty with
+                {
+                    ClipsFolder = externalRoot,
+                    StartWithWindows = false
+                };
+                var captureSettings = CaptureSettings.Default with
+                {
+                    LibraryRoot = missingCaptureRoot
+                };
+
+                using (var capture = new CaptureView(
+                           externalSettings,
+                           captureSettings,
+                           engineAvailable: true,
+                           captureLibraryAccessAllowed: () => false))
+                {
+                    var open = FindControl(capture, "OpenCaptureFolderButton");
+                    var change = FindControl(capture, "ChangeCaptureFolderButton");
+                    var replay = FindControl(capture, "InstantReplayToggle");
+                    Assert(
+                        open is { Enabled: false } &&
+                        change is { Enabled: false } &&
+                        replay is { Enabled: false },
+                        "Denied Capture-library access must disable Capture and root actions when no repair callback exists.");
+
+                    var openMethod = typeof(CaptureView).GetMethod(
+                        "OpenLibraryRoot",
+                        System.Reflection.BindingFlags.Instance |
+                        System.Reflection.BindingFlags.NonPublic) ??
+                        throw new InvalidOperationException(
+                            "CaptureView.OpenLibraryRoot was not found for the containment probe.");
+                    openMethod.Invoke(capture, [null, EventArgs.Empty]);
+                    Assert(
+                        !Directory.Exists(missingCaptureRoot),
+                        "Denied Open folder must not create or otherwise touch a missing Capture library root.");
+                }
+
+                using (var repairableCapture = new CaptureView(
+                           externalSettings,
+                           captureSettings,
+                           engineAvailable: true,
+                           captureLibraryAccessAllowed: () => false,
+                           repairCaptureLibraryRoot: _ => false))
+                {
+                    var change = FindControl(repairableCapture, "ChangeCaptureFolderButton");
+                    Assert(
+                        change is { Enabled: true, Text: "Restore folder", AccessibleName: "Restore folder" },
+                        "A denied Capture view may expose only the explicitly supplied Restore folder repair action.");
+                }
+
+                using (var form = new SettingsForm(
+                           externalSettings,
+                           initialPage: SettingsPage.Capture,
+                           captureSettings: captureSettings,
+                           captureEngineAvailable: true,
+                           captureLibraryAccessAllowed: () => false))
+                {
+                    Assert(
+                        FindControl(form, "OpenCaptureFolderButton") is { Enabled: false } &&
+                        FindControl(form, "InstantReplayToggle") is { Enabled: false },
+                        "SettingsForm must thread denied Capture-library access into its Capture page.");
+                }
+
+                string? scannedExternalRoot = null;
+                string? scannedCaptureRoot = "not-called";
+                var externalClipsSeen = 0;
+                using var scanObserved = new ManualResetEventSlim();
+                using var gallery = new GalleryView(
+                    externalRoot,
+                    captureLibraryRoot: missingCaptureRoot,
+                    captureLibraryAccessAllowed: () => false,
+                    scanCatalog: (folder, cancellationToken, captureRoot, source) =>
+                    {
+                        scannedExternalRoot = folder;
+                        scannedCaptureRoot = captureRoot;
+                        var snapshot = GalleryCatalog.Scan(
+                            folder,
+                            cancellationToken,
+                            captureLibraryRoot: captureRoot,
+                            externalSource: source);
+                        externalClipsSeen = snapshot.Games
+                            .SelectMany(game => game.Clips)
+                            .Count(clip => clip.Source != GalleryClipSource.ClipCord);
+                        scanObserved.Set();
+                        return snapshot;
+                    });
+                gallery.Activate(externalRoot);
+                Assert(
+                    scanObserved.Wait(TimeSpan.FromSeconds(5)),
+                    "The denied Gallery scan containment probe did not complete.");
+                Assert(
+                    scannedExternalRoot == externalRoot &&
+                    scannedCaptureRoot is null &&
+                    externalClipsSeen == 1,
+                    "Denied Gallery access must omit the Capture root while retaining external uploaded/local-only discovery.");
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        Assert(
+            thread.Join(TimeSpan.FromSeconds(15)),
+            "Capture-library UI containment tests must complete without hanging the STA thread.");
+        if (failure is not null)
+        {
+            throw new InvalidOperationException(
+                "Capture-library UI containment failed.",
+                failure);
+        }
+    }
+
+    private static Control? FindControl(Control root, string name)
+    {
+        if (root.Name.Equals(name, StringComparison.Ordinal)) return root;
+        foreach (Control child in root.Controls)
+        {
+            var found = FindControl(child, name);
+            if (found is not null) return found;
+        }
+        return null;
     }
 
     private static void Assert(bool condition, string message)

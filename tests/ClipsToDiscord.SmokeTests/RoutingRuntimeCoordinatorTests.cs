@@ -7,15 +7,20 @@ internal static class RoutingRuntimeCoordinatorTests
     private static async Task RunAsync()
     {
         await AssertDefaultIsInertAsync();
-        await AssertSuccessfulCutoverAndStopAreIdempotentAsync();
+        await AssertColdStartAdoptsCommittedRoutingAsync();
+        AssertInvalidColdStartConstructionFailsClosed();
+        await AssertSuccessfulCutoverQuiescesWithoutLegacyAsync();
         await AssertPreparationFailureRestoresLegacyAsync();
         await AssertPreparationCancellationRestoresLegacyAsync();
-        await AssertRejectedGateRestoresLegacyAsync();
-        await AssertMissingSourceCoverageRestoresLegacyAsync();
-        await AssertRoutingStartFailureRestoresLegacyAsync();
+        await AssertDurablePreparationFailureFencesLegacyAsync();
+        await AssertDurablePreparationCancellationFencesLegacyAsync();
+        await AssertCommitFailureIsIrreversibleAndRetryableAsync();
+        await AssertCancellationAtCommitBoundaryNeverRestoresLegacyAsync();
+        await AssertRejectedGatePreservesRoutingAuthorityAsync();
+        await AssertMissingSourceCoveragePreservesRoutingAuthorityAsync();
+        await AssertRoutingStartFailurePreservesRoutingAndRetriesAsync();
         await AssertCancellationAfterLegacyStopRestoresLegacyAsync();
-        await AssertRoutingStopFailureNeverStartsLegacyAsync();
-        await AssertLegacyRestartFailureLeavesRoutingStoppedAsync();
+        await AssertRoutingStopFailureRetriesUnderRoutingAuthorityAsync();
     }
 
     private static async Task AssertDefaultIsInertAsync()
@@ -31,7 +36,8 @@ internal static class RoutingRuntimeCoordinatorTests
                    stop.Status == RoutingRuntimeTransitionStatus.DisabledByDefault &&
                    coordinator.State == RoutingRuntimeCoordinatorState.Disabled &&
                    fixture.Legacy.StopCalls == 0 && fixture.Legacy.StartCalls == 0 &&
-                   fixture.Routing.StartCalls == 0 && fixture.Routing.StopCalls == 0 &&
+                   fixture.Routing.CommitCalls == 0 && fixture.Routing.StartCalls == 0 &&
+                   fixture.Routing.StopCalls == 0 &&
                    fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
                 "The routing coordinator must be inert unless an explicit opt-in is supplied.");
         }
@@ -41,7 +47,7 @@ internal static class RoutingRuntimeCoordinatorTests
         }
     }
 
-    private static async Task AssertSuccessfulCutoverAndStopAreIdempotentAsync()
+    private static async Task AssertSuccessfulCutoverQuiescesWithoutLegacyAsync()
     {
         var fixture = Fixture.Create();
         try
@@ -55,22 +61,34 @@ internal static class RoutingRuntimeCoordinatorTests
                    coordinator.State == RoutingRuntimeCoordinatorState.RoutingActive &&
                    fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
                    fixture.Legacy.StopCalls == 1 && fixture.Legacy.StartCalls == 0 &&
-                   fixture.Routing.PrepareCalls == 1 && fixture.Routing.StartCalls == 1,
-                "A cutover must stop legacy first, start routing once, and make repeat starts inert.");
+                   fixture.Routing.PrepareCalls == 1 && fixture.Routing.CommitCalls == 1 &&
+                   fixture.Routing.StartCalls == 1,
+                $"A cutover must prepare, transfer, commit authority, and then start routing once " +
+                $"(start={started.Status}, repeat={repeatedStart.Status}, state={coordinator.State}, " +
+                $"owner={fixture.Ownership.Owner}, legacy-stop={fixture.Legacy.StopCalls}, " +
+                $"legacy-start={fixture.Legacy.StartCalls}, prepare={fixture.Routing.PrepareCalls}, " +
+                $"commit={fixture.Routing.CommitCalls}, routing-start={fixture.Routing.StartCalls}, " +
+                $"error={started.Error}).");
 
             var stopped = await coordinator.StopAsync();
             var repeatedStop = await coordinator.StopAsync();
             Assert(stopped.Status == RoutingRuntimeTransitionStatus.Stopped &&
                    repeatedStop.Status == RoutingRuntimeTransitionStatus.AlreadyStopped &&
-                   coordinator.State == RoutingRuntimeCoordinatorState.LegacyActive &&
-                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy &&
-                   fixture.Routing.StopCalls == 1 && fixture.Legacy.StartCalls == 1,
-                "Stopping routing must quiesce it before legacy restarts, and repeat stops must be inert.");
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingQuiesced &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   fixture.Routing.StopCalls == 1 && fixture.Legacy.StartCalls == 0,
+                "Stopping committed routing must quiesce it while preserving Routing ownership.");
+
+            var recovered = await coordinator.StartAsync();
+            Assert(recovered.Status == RoutingRuntimeTransitionStatus.Started &&
+                   fixture.Routing.PrepareCalls == 1 && fixture.Routing.CommitCalls == 2 &&
+                   fixture.Routing.StartCalls == 2 && fixture.Legacy.StartCalls == 0,
+                "A repeated start must recover Routing without re-preparing or reviving legacy.");
             Assert(fixture.Events.SequenceEqual([
-                       "legacy-stop", "routing-prepare", "routing-start", "routing-stop",
-                       "legacy-start"
+                       "legacy-stop", "routing-prepare", "routing-commit", "routing-start",
+                       "routing-stop", "routing-commit", "routing-start"
                    ]),
-                "Runtime lifecycle ordering must never overlap legacy and routing processing.");
+                "Authority commit must precede every routing start and legacy must stay fenced.");
         }
         finally
         {
@@ -89,7 +107,7 @@ internal static class RoutingRuntimeCoordinatorTests
                    RoutingRuntimeTransitionStatus.PreparationFailedLegacyRestored &&
                    result.Error == fixture.Routing.PrepareError &&
                    fixture.Routing.PrepareCalls == 1 &&
-                   fixture.Routing.StartCalls == 0 &&
+                   fixture.Routing.CommitCalls == 0 && fixture.Routing.StartCalls == 0 &&
                    fixture.Legacy.StartCalls == 1 &&
                    fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
                 "A durable cutover preparation failure must restore legacy before routing owns the pipeline.");
@@ -110,7 +128,7 @@ internal static class RoutingRuntimeCoordinatorTests
             await AssertThrowsAsync<OperationCanceledException>(() =>
                 fixture.CreateCoordinator(new(true)).StartAsync(cancellation.Token));
             Assert(fixture.Routing.PrepareCalls == 1 &&
-                   fixture.Routing.StartCalls == 0 &&
+                   fixture.Routing.CommitCalls == 0 && fixture.Routing.StartCalls == 0 &&
                    fixture.Legacy.StartCalls == 1 &&
                    fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
                 "Cancellation during durable preparation must restore legacy before it reaches the caller.");
@@ -121,20 +139,32 @@ internal static class RoutingRuntimeCoordinatorTests
         }
     }
 
-    private static async Task AssertRejectedGateRestoresLegacyAsync()
+    private static async Task AssertDurablePreparationFailureFencesLegacyAsync()
     {
         var fixture = Fixture.Create();
-        fixture.Routing.GateState = RoutingRuntimeGateState.MigrationMarkerMissing;
+        var failure = new IOException("failed after committed migration marker");
+        fixture.Routing.PreparationFence = true;
+        fixture.Routing.PrepareError = failure;
         try
         {
-            var result = await fixture.CreateCoordinator(new(true)).StartAsync();
-            Assert(result.Status == RoutingRuntimeTransitionStatus.GateRejectedLegacyRestored &&
-                   result.GateInspection?.State ==
-                   RoutingRuntimeGateState.MigrationMarkerMissing &&
-                   fixture.Routing.StartCalls == 0 &&
-                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy &&
-                   fixture.Legacy.StartCalls == 1,
-                "A fail-closed feature gate must restore the legacy watcher without starting routing.");
+            var coordinator = fixture.CreateCoordinator(new(true));
+            var result = await coordinator.StartAsync();
+            Assert(result.Status ==
+                       RoutingRuntimeTransitionStatus.PreparationFailedRecoveryNeeded &&
+                   ReferenceEquals(result.Error, failure) &&
+                   fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded,
+                "A preparation error after a durable committed marker must transfer into the Routing fence and must never restore Legacy.");
+
+            fixture.Routing.PrepareError = null;
+            var recovered = await coordinator.StartAsync();
+            Assert(recovered.Status == RoutingRuntimeTransitionStatus.Started &&
+                   fixture.Routing.PrepareCalls == 1 &&
+                   fixture.Routing.CommitCalls == 1 &&
+                   fixture.Routing.StartCalls == 1 &&
+                   fixture.Legacy.StartCalls == 0,
+                "Retry after a fenced preparation failure must continue at authority commit without preparing or reviving Legacy again.");
         }
         finally
         {
@@ -142,7 +172,198 @@ internal static class RoutingRuntimeCoordinatorTests
         }
     }
 
-    private static async Task AssertMissingSourceCoverageRestoresLegacyAsync()
+    private static async Task AssertDurablePreparationCancellationFencesLegacyAsync()
+    {
+        var fixture = Fixture.Create();
+        using var cancellation = new CancellationTokenSource();
+        fixture.Routing.PreparationFence = true;
+        fixture.Routing.IgnorePrepareCancellation = true;
+        fixture.Routing.DuringPrepare = cancellation.Cancel;
+        try
+        {
+            var coordinator = fixture.CreateCoordinator(new(true));
+            await AssertThrowsAsync<OperationCanceledException>(() =>
+                coordinator.StartAsync(cancellation.Token));
+            Assert(fixture.Routing.PrepareCalls == 1 &&
+                   fixture.Routing.CommitCalls == 1 &&
+                   fixture.Routing.StartCalls == 1 &&
+                   fixture.Routing.StopCalls == 1 &&
+                   fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded,
+                "Cancellation after successful committed-marker preparation must cross the non-cancellable authority boundary and quiesce Routing without Legacy fallback.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static async Task AssertColdStartAdoptsCommittedRoutingAsync()
+    {
+        var fixture = Fixture.CreateColdRouting();
+        try
+        {
+            var coordinator = fixture.CreateCoordinator(
+                new RoutingRuntimeCoordinatorOptions(
+                    RequestedEnabled: true,
+                    AuthorityAlreadyCommitted: true),
+                fixture.InitialRoutingOwnership);
+            Assert(coordinator.State == RoutingRuntimeCoordinatorState.RoutingQuiesced,
+                "Cold-start adoption must begin quiesced under the supplied Routing lease.");
+
+            var started = await coordinator.StartAsync();
+            var stopped = await coordinator.StopAsync();
+            Assert(started.Status == RoutingRuntimeTransitionStatus.Started &&
+                   stopped.Status == RoutingRuntimeTransitionStatus.Stopped &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingQuiesced &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   fixture.Legacy.StopCalls == 0 && fixture.Legacy.StartCalls == 0 &&
+                   fixture.Routing.PrepareCalls == 0 && fixture.Routing.CommitCalls == 1 &&
+                   fixture.Routing.StartCalls == 1 && fixture.Routing.StopCalls == 1 &&
+                   fixture.Events.SequenceEqual([
+                       "routing-commit", "routing-start", "routing-stop"
+                   ]),
+                "A restarted process must recommit, inspect, start, and quiesce Routing without touching legacy or migration preparation.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static void AssertInvalidColdStartConstructionFailsClosed()
+    {
+        var cold = Fixture.CreateColdRouting();
+        var otherCold = Fixture.CreateColdRouting();
+        try
+        {
+            AssertThrows<ArgumentException>(() => cold.CreateCoordinator(new(true)),
+                "Existing Routing ownership without explicit adoption must be rejected.");
+            AssertThrows<ArgumentException>(() => cold.CreateCoordinator(
+                    new RoutingRuntimeCoordinatorOptions(false, true),
+                    cold.InitialRoutingOwnership),
+                "Committed authority cannot be adopted while Routing is disabled.");
+            AssertThrows<ArgumentException>(() => cold.CreateCoordinator(
+                    new RoutingRuntimeCoordinatorOptions(true, false),
+                    cold.InitialRoutingOwnership),
+                "A Routing lease cannot be supplied without committed-authority adoption.");
+            AssertThrows<ArgumentException>(() => cold.CreateCoordinator(
+                    new RoutingRuntimeCoordinatorOptions(true, true),
+                    otherCold.InitialRoutingOwnership),
+                "A current Routing lease issued by another coordinator must be rejected.");
+            Assert(cold.Legacy.StopCalls == 0 && cold.Legacy.StartCalls == 0 &&
+                   cold.Routing.PrepareCalls == 0 && cold.Routing.CommitCalls == 0 &&
+                   cold.Routing.StartCalls == 0 && cold.Routing.StopCalls == 0 &&
+                   cold.Ownership.Owner == ClipProcessingRuntimeOwner.Routing,
+                "Rejected cold-start construction must not touch either runtime or release Routing ownership.");
+        }
+        finally
+        {
+            cold.Dispose();
+            otherCold.Dispose();
+        }
+
+        var legacy = Fixture.Create();
+        try
+        {
+            AssertThrows<ArgumentException>(() => legacy.CreateCoordinator(
+                    new RoutingRuntimeCoordinatorOptions(true, true)),
+                "Committed-authority adoption without a Routing lease must be rejected.");
+            Assert(legacy.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy &&
+                   legacy.Legacy.StopCalls == 0 && legacy.Legacy.StartCalls == 0,
+                "A missing cold-start lease must fail before disturbing legacy ownership.");
+        }
+        finally
+        {
+            legacy.Dispose();
+        }
+    }
+
+    private static async Task AssertCommitFailureIsIrreversibleAndRetryableAsync()
+    {
+        var fixture = Fixture.Create();
+        fixture.Routing.CommitError = new IOException("commit outcome ambiguous");
+        try
+        {
+            var coordinator = fixture.CreateCoordinator(new(true));
+            var failed = await coordinator.StartAsync();
+            Assert(failed.Status ==
+                   RoutingRuntimeTransitionStatus.AuthorityCommitFailedRecoveryNeeded &&
+                   failed.Error == fixture.Routing.CommitError &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded &&
+                   fixture.Routing.CommitCalls == 1 && fixture.Routing.StartCalls == 0 &&
+                   fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing,
+                "An ambiguous authority commit must permanently fence legacy processing.");
+
+            fixture.Routing.CommitError = null;
+            var recovered = await coordinator.StartAsync();
+            Assert(recovered.Status == RoutingRuntimeTransitionStatus.Started &&
+                   fixture.Routing.CommitCalls == 2 && fixture.Routing.StartCalls == 1 &&
+                   fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing,
+                "Retry must converge through the idempotent commit under Routing ownership.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static async Task AssertCancellationAtCommitBoundaryNeverRestoresLegacyAsync()
+    {
+        var fixture = Fixture.Create();
+        using var cancellation = new CancellationTokenSource();
+        fixture.Routing.DuringCommit = cancellation.Cancel;
+        try
+        {
+            var coordinator = fixture.CreateCoordinator(new(true));
+            await AssertThrowsAsync<OperationCanceledException>(() =>
+                coordinator.StartAsync(cancellation.Token));
+            Assert(fixture.Routing.CommitCalls == 1 && fixture.Routing.StartCalls == 1 &&
+                   fixture.Routing.StopCalls == 1 && fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded,
+                "Cancellation at the commit boundary must quiesce Routing without reviving legacy.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static async Task AssertRejectedGatePreservesRoutingAuthorityAsync()
+    {
+        var fixture = Fixture.Create();
+        fixture.Routing.GateState = RoutingRuntimeGateState.MigrationMarkerMissing;
+        try
+        {
+            var coordinator = fixture.CreateCoordinator(new(true));
+            var result = await coordinator.StartAsync();
+            Assert(result.Status == RoutingRuntimeTransitionStatus.GateRejectedRecoveryNeeded &&
+                   result.GateInspection?.State ==
+                   RoutingRuntimeGateState.MigrationMarkerMissing &&
+                   fixture.Routing.CommitCalls == 1 && fixture.Routing.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   fixture.Legacy.StartCalls == 0 &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded,
+                "A post-commit gate rejection must preserve sticky Routing ownership.");
+
+            var stopped = await coordinator.StopAsync();
+            Assert(stopped.Status == RoutingRuntimeTransitionStatus.Stopped &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingQuiesced &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   fixture.Legacy.StartCalls == 0,
+                "Shutdown after gate rejection must quiesce without reviving legacy.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static async Task AssertMissingSourceCoveragePreservesRoutingAuthorityAsync()
     {
         var fixture = Fixture.Create();
         fixture.Routing.CoveredLegacySources =
@@ -150,13 +371,14 @@ internal static class RoutingRuntimeCoordinatorTests
         try
         {
             var result = await fixture.CreateCoordinator(new(true)).StartAsync();
-            Assert(result.Status == RoutingRuntimeTransitionStatus.GateRejectedLegacyRestored &&
+            Assert(result.Status == RoutingRuntimeTransitionStatus.GateRejectedRecoveryNeeded &&
                    result.GateInspection?.State == RoutingRuntimeGateState.Enabled &&
                    result.GateInspection.RequiredLegacySource == ClipCaptureSource.SteelSeriesGg &&
                    !result.GateInspection.HasRequiredSourceCoverage &&
-                   fixture.Routing.StartCalls == 0 && fixture.Legacy.StartCalls == 1 &&
-                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
-                "Even an inspection labelled Enabled must roll back when its registered adapters do not cover the legacy watched source.");
+                   fixture.Routing.CommitCalls == 1 && fixture.Routing.StartCalls == 0 &&
+                   fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing,
+                "Missing adapter coverage after commit must fail closed under Routing ownership.");
         }
         finally
         {
@@ -164,20 +386,29 @@ internal static class RoutingRuntimeCoordinatorTests
         }
     }
 
-    private static async Task AssertRoutingStartFailureRestoresLegacyAsync()
+    private static async Task AssertRoutingStartFailurePreservesRoutingAndRetriesAsync()
     {
         var fixture = Fixture.Create();
         fixture.Routing.StartError = new InvalidOperationException("startup failed");
         try
         {
-            var result = await fixture.CreateCoordinator(new(true)).StartAsync();
+            var coordinator = fixture.CreateCoordinator(new(true));
+            var result = await coordinator.StartAsync();
             Assert(result.Status ==
-                   RoutingRuntimeTransitionStatus.RoutingStartFailedLegacyRestored &&
+                   RoutingRuntimeTransitionStatus.RoutingStartFailedRecoveryNeeded &&
                    result.Error == fixture.Routing.StartError &&
                    fixture.Routing.StopCalls == 1 &&
-                   fixture.Legacy.StartCalls == 1 &&
-                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
-                "A routing startup failure must quiesce partial routing work and restore legacy ownership.");
+                   fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing,
+                "A routing startup failure must quiesce partial work and retain Routing ownership.");
+
+            fixture.Routing.StartError = null;
+            var recovered = await coordinator.StartAsync();
+            Assert(recovered.Status == RoutingRuntimeTransitionStatus.Started &&
+                   fixture.Routing.CommitCalls == 2 && fixture.Routing.StartCalls == 2 &&
+                   fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing,
+                "Retry must restart Routing without preparation or a legacy handoff.");
         }
         finally
         {
@@ -195,6 +426,7 @@ internal static class RoutingRuntimeCoordinatorTests
             await AssertThrowsAsync<OperationCanceledException>(() =>
                 fixture.CreateCoordinator(new(true)).StartAsync(cancellation.Token));
             Assert(fixture.Routing.StartCalls == 0 &&
+                   fixture.Routing.CommitCalls == 0 &&
                    fixture.Legacy.StartCalls == 1 &&
                    fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
                 "Cancellation after legacy stops must roll back before it is observed by the caller.");
@@ -205,7 +437,7 @@ internal static class RoutingRuntimeCoordinatorTests
         }
     }
 
-    private static async Task AssertRoutingStopFailureNeverStartsLegacyAsync()
+    private static async Task AssertRoutingStopFailureRetriesUnderRoutingAuthorityAsync()
     {
         var fixture = Fixture.Create();
         try
@@ -216,39 +448,18 @@ internal static class RoutingRuntimeCoordinatorTests
 
             var result = await coordinator.StopAsync();
             Assert(result.Status == RoutingRuntimeTransitionStatus.RoutingStopFailed &&
-                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingActive &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded &&
                    fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
                    fixture.Legacy.StartCalls == 0,
-                "An uncertain routing stop must retain routing authority and must never overlap a legacy restart.");
-        }
-        finally
-        {
-            fixture.Dispose();
-        }
-    }
+                "An uncertain routing stop must retain routing authority and never overlap legacy.");
 
-    private static async Task AssertLegacyRestartFailureLeavesRoutingStoppedAsync()
-    {
-        var fixture = Fixture.Create();
-        try
-        {
-            var coordinator = fixture.CreateCoordinator(new(true));
-            _ = await coordinator.StartAsync();
-            fixture.Legacy.StartError = new InvalidOperationException("legacy restart failed");
-
-            var result = await coordinator.StopAsync();
-            Assert(result.Status == RoutingRuntimeTransitionStatus.LegacyRestartFailed &&
-                   coordinator.State == RoutingRuntimeCoordinatorState.LegacyRecoveryNeeded &&
-                   fixture.Routing.StopCalls == 1 &&
-                   fixture.Ownership.Owner is null,
-                "A failed legacy restart must leave routing stopped and expose recovery-needed state.");
-
-            fixture.Legacy.StartError = null;
-            var recovered = await coordinator.StopAsync();
-            Assert(recovered.Status == RoutingRuntimeTransitionStatus.Stopped &&
-                   coordinator.State == RoutingRuntimeCoordinatorState.LegacyActive &&
-                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
-                "A later stop/recovery attempt must safely reacquire legacy after the cause is corrected.");
+            fixture.Routing.StopError = null;
+            var recovered = await coordinator.StartAsync();
+            Assert(recovered.Status == RoutingRuntimeTransitionStatus.Started &&
+                   fixture.Routing.StopCalls == 2 && fixture.Routing.CommitCalls == 2 &&
+                   fixture.Routing.StartCalls == 2 && fixture.Legacy.StartCalls == 0 &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing,
+                "Retry must quiesce uncertain callbacks before recommitting and starting Routing.");
         }
         finally
         {
@@ -272,6 +483,20 @@ internal static class RoutingRuntimeCoordinatorTests
             $"Expected {typeof(TException).Name}, but the operation completed.");
     }
 
+    private static void AssertThrows<TException>(Action action, string message)
+        where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+        throw new InvalidOperationException(message);
+    }
+
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
@@ -283,18 +508,21 @@ internal static class RoutingRuntimeCoordinatorTests
             ClipProcessingOwnershipCoordinator ownership,
             FakeLegacyRuntime legacy,
             FakeRoutingRuntime routing,
-            List<string> events)
+            List<string> events,
+            ClipProcessingOwnershipLease? initialRoutingOwnership = null)
         {
             Ownership = ownership;
             Legacy = legacy;
             Routing = routing;
             Events = events;
+            InitialRoutingOwnership = initialRoutingOwnership;
         }
 
         internal ClipProcessingOwnershipCoordinator Ownership { get; }
         internal FakeLegacyRuntime Legacy { get; }
         internal FakeRoutingRuntime Routing { get; }
         internal List<string> Events { get; }
+        internal ClipProcessingOwnershipLease? InitialRoutingOwnership { get; }
 
         internal static Fixture Create()
         {
@@ -312,14 +540,36 @@ internal static class RoutingRuntimeCoordinatorTests
             return new Fixture(ownership, legacy, new FakeRoutingRuntime(events), events);
         }
 
+        internal static Fixture CreateColdRouting()
+        {
+            var ownership = new ClipProcessingOwnershipCoordinator();
+            Assert(ownership.TryAcquire(
+                       ClipProcessingRuntimeOwner.Routing,
+                       out var routingOwnership) && routingOwnership is not null,
+                "The cold-start fixture must acquire initial Routing ownership.");
+            var events = new List<string>();
+            return new Fixture(
+                ownership,
+                new FakeLegacyRuntime(ownership, initialOwnership: null, events),
+                new FakeRoutingRuntime(events),
+                events,
+                routingOwnership);
+        }
+
         internal RoutingRuntimeCoordinator CreateCoordinator(
-            RoutingRuntimeCoordinatorOptions options) => new(
+            RoutingRuntimeCoordinatorOptions options,
+            ClipProcessingOwnershipLease? initialRoutingOwnership = null) => new(
             Ownership,
             Legacy,
             Routing,
-            options);
+            options,
+            initialRoutingOwnership);
 
-        public void Dispose() => Legacy.Dispose();
+        public void Dispose()
+        {
+            Legacy.Dispose();
+            InitialRoutingOwnership?.Dispose();
+        }
     }
 
     private sealed class FakeLegacyRuntime : ILegacyClipProcessingRuntime, IDisposable
@@ -330,12 +580,12 @@ internal static class RoutingRuntimeCoordinatorTests
 
         internal FakeLegacyRuntime(
             ClipProcessingOwnershipCoordinator ownership,
-            ClipProcessingOwnershipLease initialOwnership,
+            ClipProcessingOwnershipLease? initialOwnership,
             List<string> events)
         {
             _ownership = ownership;
             _events = events;
-            Adopt(initialOwnership);
+            if (initialOwnership is not null) Adopt(initialOwnership);
         }
 
         internal int StopCalls { get; private set; }
@@ -400,7 +650,12 @@ internal static class RoutingRuntimeCoordinatorTests
         internal Exception? StartError { get; set; }
         internal Exception? PrepareError { get; set; }
         internal Action? DuringPrepare { get; set; }
+        internal bool PreparationFence { get; set; }
+        internal bool IgnorePrepareCancellation { get; set; }
         internal int PrepareCalls { get; private set; }
+        internal Exception? CommitError { get; set; }
+        internal Action? DuringCommit { get; set; }
+        internal int CommitCalls { get; private set; }
         internal Exception? StopError { get; set; }
         internal int StartCalls { get; private set; }
         internal int StopCalls { get; private set; }
@@ -410,23 +665,43 @@ internal static class RoutingRuntimeCoordinatorTests
             PrepareCalls++;
             events.Add("routing-prepare");
             DuringPrepare?.Invoke();
-            cancellationToken.ThrowIfCancellationRequested();
+            if (!IgnorePrepareCancellation) cancellationToken.ThrowIfCancellationRequested();
             if (PrepareError is not null) throw PrepareError;
             return ValueTask.CompletedTask;
         }
 
+        public bool RequiresRoutingFenceAfterPreparation() => PreparationFence;
+
+        public ValueTask CommitExecutionAuthorityAsync(
+            ClipProcessingOwnershipLease ownership)
+        {
+            CommitCalls++;
+            events.Add("routing-commit");
+            Assert(ownership.Owner == ClipProcessingRuntimeOwner.Routing && ownership.IsCurrent,
+                "Routing authority must commit with a current Routing lease.");
+            DuringCommit?.Invoke();
+            if (CommitError is not null) throw CommitError;
+            return ValueTask.CompletedTask;
+        }
+
         public RoutingRuntimeGateInspection InspectActivation(
-            ClipProcessingOwnershipLease ownership) => new(
-            GateState,
-            0,
-            0,
-            0,
-            0,
-            GateState == RoutingRuntimeGateState.Enabled ? 1 : null,
-            GateState == RoutingRuntimeGateState.Enabled ? "test-fingerprint" : null,
-            ownership.Epoch,
-            RequiredLegacySource,
-            CoveredLegacySources);
+            ClipProcessingOwnershipLease ownership)
+        {
+            Assert(CommitCalls > 0,
+                "Routing activation must never be inspected before sticky authority commit begins.");
+            return new RoutingRuntimeGateInspection(
+                GateState,
+                0,
+                0,
+                0,
+                0,
+                GateState == RoutingRuntimeGateState.Enabled ? 1 : null,
+                GateState == RoutingRuntimeGateState.Enabled ? "test-fingerprint" : null,
+                ownership.Epoch,
+                RequiredLegacySource,
+                CoveredLegacySources,
+                Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        }
 
         public ValueTask StartAsync(
             ClipProcessingOwnershipLease ownership,
@@ -434,6 +709,8 @@ internal static class RoutingRuntimeCoordinatorTests
         {
             StartCalls++;
             events.Add("routing-start");
+            Assert(CommitCalls > 0,
+                "Routing callbacks must not start before authority commit.");
             cancellationToken.ThrowIfCancellationRequested();
             if (StartError is not null) throw StartError;
             Assert(ownership.Owner == ClipProcessingRuntimeOwner.Routing && ownership.IsCurrent,

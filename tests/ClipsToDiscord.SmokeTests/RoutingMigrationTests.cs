@@ -11,6 +11,7 @@ internal static class RoutingMigrationTests
         AssertCommittedCutoverIsDurableAndIdempotent(testRoot);
         AssertPreparedCutoverResumesAfterRestart(testRoot);
         AssertRouteWrittenBeforeCommitResumesAfterRestart(testRoot);
+        AssertPreparedRollbackCrashWindowsResume(testRoot);
         AssertOrphanedEquivalentRouteIsAdopted(testRoot);
         AssertCorruptMarkerFailsClosed(testRoot);
         AssertValidShapeMarkerMutationFailsClosed(testRoot);
@@ -267,12 +268,107 @@ internal static class RoutingMigrationTests
         _ = conflictMarkers.SaveAsync(
             LegacyRoutingMigrationMarkerModel.CreatePrepared(readiness.Plan!, At(0)), 0)
             .GetAwaiter().GetResult();
-        var conflict = new LegacyRoutingMigrationCoordinator(conflictRoutes, conflictMarkers)
+        var superseded = new LegacyRoutingMigrationCoordinator(conflictRoutes, conflictMarkers)
             .ExecuteAsync(Input(Settings(clips, true), changedState, ["discord.friends"]), At(2))
             .GetAwaiter().GetResult();
-        Assert(conflict.Status == LegacyRoutingCutoverResultStatus.StateConflict &&
-               conflictRoutes.Load().Status == RoutingDocumentLoadStatus.Missing,
-            "A prepared transaction must not commit against changed legacy exclusion state.");
+        var supersededMarker = conflictMarkers.Load().Document!;
+        Assert(superseded.Status == LegacyRoutingCutoverResultStatus.Committed &&
+               supersededMarker.Phase == LegacyRoutingMigrationMarkerPhase.Committed &&
+               supersededMarker.Generation == 4 &&
+               supersededMarker.ContentHashExclusions.Known.Contains(Hash('9')) &&
+               conflictRoutes.Load().Document!.Routes.Single().RouteId ==
+               supersededMarker.Route.RouteId,
+            "A stale prepared-only transaction must durably abort and re-prepare the newly drained legacy state instead of conflicting forever.");
+    }
+
+    private static void AssertPreparedRollbackCrashWindowsResume(string root)
+    {
+        var test = Path.Combine(root, "prepared-rollback-crashes");
+        var clips = NewClipsRoot(test, "clips");
+        var oldInput = Input(Settings(clips, false), State(clips), []);
+        var oldPlan = LegacyRoutingMigrationPlanner.Evaluate(oldInput, At(0)).Plan!;
+        var changedState = State(clips);
+        changedState.LocalOnlyContentHashes.Add(Hash('7'));
+        var changedInput = Input(Settings(clips, false), changedState, []);
+
+        var afterAbort = Path.Combine(test, "after-abort-marker");
+        var (_, abortRoutes, abortMarkers) = Stores(afterAbort);
+        var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(oldPlan, At(0));
+        _ = abortMarkers.SaveAsync(prepared, 0).GetAwaiter().GetResult();
+        _ = abortRoutes.SaveAsync(new RoutingSnapshotDocument(
+                RoutingSnapshotStore.CurrentSchemaVersion,
+                1,
+                [prepared.Route],
+                prepared.Route.CreatedUtc,
+                prepared.Route.ModifiedUtc), 0)
+            .GetAwaiter().GetResult();
+        var aborting = LegacyRoutingMigrationMarkerModel.BeginAbort(prepared, At(1));
+        _ = abortMarkers.SaveAsync(aborting, prepared.Generation)
+            .GetAwaiter().GetResult();
+
+        var resumedAbort = new LegacyRoutingMigrationCoordinator(abortRoutes, abortMarkers)
+            .ExecuteAsync(changedInput, At(2)).GetAwaiter().GetResult();
+        var resumedAbortMarker = abortMarkers.Load().Document!;
+        Assert(resumedAbort.IsCommitted &&
+               resumedAbortMarker.Phase == LegacyRoutingMigrationMarkerPhase.Committed &&
+               resumedAbortMarker.Generation == 4 &&
+               resumedAbortMarker.ContentHashExclusions.LocalOnly.Contains(Hash('7')) &&
+               abortRoutes.Load().Document!.Routes.Single().RouteId ==
+               resumedAbortMarker.Route.RouteId,
+            "A crash after the durable Aborting fence must remove only the old exact route, re-prepare current exclusions, and commit.");
+
+        var afterCleanup = Path.Combine(test, "after-route-cleanup");
+        var (_, cleanupRoutes, cleanupMarkers) = Stores(afterCleanup);
+        _ = cleanupMarkers.SaveAsync(prepared, 0).GetAwaiter().GetResult();
+        var cleanupAborting = LegacyRoutingMigrationMarkerModel.BeginAbort(prepared, At(1));
+        _ = cleanupMarkers.SaveAsync(cleanupAborting, prepared.Generation)
+            .GetAwaiter().GetResult();
+        _ = cleanupRoutes.SaveAsync(RoutingSnapshotModel.CreateEmpty(At(1)), 0)
+            .GetAwaiter().GetResult();
+
+        var resumedCleanup = new LegacyRoutingMigrationCoordinator(
+                cleanupRoutes,
+                cleanupMarkers)
+            .ExecuteAsync(changedInput, At(3)).GetAwaiter().GetResult();
+        Assert(resumedCleanup.IsCommitted &&
+               cleanupMarkers.Load().Document is
+               {
+                   Phase: LegacyRoutingMigrationMarkerPhase.Committed,
+                   Generation: 4
+               } cleanedMarker &&
+               cleanedMarker.ContentHashExclusions.LocalOnly.Contains(Hash('7')) &&
+               cleanupRoutes.Load().Document!.Routes.Single().RouteId ==
+               cleanedMarker.Route.RouteId,
+            "A crash after exact route cleanup must resume from the Aborting marker without reviving or losing the stale route.");
+
+        var pendingTest = Path.Combine(test, "pending-work-during-abort");
+        var (_, pendingRoutes, pendingMarkers) = Stores(pendingTest);
+        _ = pendingMarkers.SaveAsync(prepared, 0).GetAwaiter().GetResult();
+        _ = pendingRoutes.SaveAsync(new RoutingSnapshotDocument(
+                RoutingSnapshotStore.CurrentSchemaVersion,
+                1,
+                [prepared.Route],
+                prepared.Route.CreatedUtc,
+                prepared.Route.ModifiedUtc), 0)
+            .GetAwaiter().GetResult();
+        var pendingState = State(clips);
+        pendingState.PendingLocalOnlyMoves.Add(Path.Combine(clips, "pending.mp4"));
+        var blocked = new LegacyRoutingMigrationCoordinator(pendingRoutes, pendingMarkers)
+            .ExecuteAsync(Input(Settings(clips, false), pendingState, []), At(2))
+            .GetAwaiter().GetResult();
+        Assert(blocked.Status == LegacyRoutingCutoverResultStatus.Blocked &&
+               pendingMarkers.Load().Document!.Phase ==
+               LegacyRoutingMigrationMarkerPhase.Aborting &&
+               pendingRoutes.Load().Document!.Routes.Count == 0,
+            "Pending Legacy work must leave a durable Aborting fence and an empty route snapshot until Legacy drains.");
+        pendingState.PendingLocalOnlyMoves.Clear();
+        pendingState.KnownContentHashes.Add(Hash('8'));
+        var afterDrain = new LegacyRoutingMigrationCoordinator(pendingRoutes, pendingMarkers)
+            .ExecuteAsync(Input(Settings(clips, false), pendingState, []), At(4))
+            .GetAwaiter().GetResult();
+        Assert(afterDrain.IsCommitted &&
+               pendingMarkers.Load().Document!.ContentHashExclusions.Known.Contains(Hash('8')),
+            "A later drained retry must leave Aborting, prepare the latest state, and commit without manual cleanup.");
     }
 
     private static void AssertOrphanedEquivalentRouteIsAdopted(string root)
@@ -400,7 +496,19 @@ internal static class RoutingMigrationTests
         AppSettings settings,
         WatchState state,
         IReadOnlyList<string> connectionIds,
-        bool quiesced = true) => new(settings, state, quiesced, connectionIds);
+        bool quiesced = true)
+    {
+        var captureLibraryRoot = Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(settings.ClipsFolder))!,
+            "capture-library");
+        Directory.CreateDirectory(captureLibraryRoot);
+        return new LegacyRoutingMigrationInput(
+            settings,
+            state,
+            quiesced,
+            connectionIds,
+            RoutingCaptureLibraryBindingModel.Create(captureLibraryRoot));
+    }
 
     private static AppSettings Settings(string clips, bool upload) => new(
         clips,

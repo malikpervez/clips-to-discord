@@ -878,7 +878,7 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
         RoutingOutputAvailability.PermanentlyMissing,
         "watched-output-not-produced");
 
-    private static RoutingWatchedFolderCandidate ValidateCandidate(
+    internal static RoutingWatchedFolderCandidate ValidateCandidate(
         RoutingWatchedFolderCandidate candidate)
     {
         RoutingValidation.RequireSha256(candidate.ContentSha256,
@@ -951,7 +951,7 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
         };
     }
 
-    private static async Task<RoutingWatchedFolderCandidate> RevalidateAfterProbeAsync(
+    internal static async Task<RoutingWatchedFolderCandidate> RevalidateAfterProbeAsync(
         RoutingWatchedFolderCandidate candidate,
         CancellationToken cancellationToken)
     {
@@ -968,7 +968,7 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
         return afterHash;
     }
 
-    private bool MatchesMarkerSource(
+    internal bool MatchesMarkerSource(
         LegacyRoutingMigrationMarker marker,
         RoutingWatchedFolderCandidate candidate,
         CancellationToken cancellationToken)
@@ -988,11 +988,12 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
             candidate.ClipsRoot,
             candidate.CaptureSource,
             connectionId,
+            marker.CaptureLibraryBinding,
             marker.ContentHashExclusions);
         return marker.SourceFingerprint.Equals(expected, StringComparison.Ordinal);
     }
 
-    private static RoutingWatchedShadowObservationKind? ClassifyLegacyExclusion(
+    internal static RoutingWatchedShadowObservationKind? ClassifyLegacyExclusion(
         LegacyContentHashExclusions exclusions,
         string contentSha256)
     {

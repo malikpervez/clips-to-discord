@@ -163,6 +163,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
     private readonly IRoutingArtifactResolver _artifactResolver;
     private readonly IRoutingLibraryFiler _libraryFiler;
     private readonly Func<bool> _canExecute;
+    private readonly RoutingCaptureLibraryPermit? _captureLibraryPermit;
     private readonly Func<Guid> _createAttemptId;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly int _maximumSideEffectsPerRun;
@@ -181,7 +182,8 @@ internal sealed class RoutingOutboxExecutor : IDisposable
         int maximumSideEffectsPerRun = 32,
         Func<Guid>? createAttemptId = null,
         Func<DateTimeOffset>? utcNow = null,
-        int? maximumRecoveryInspectionsPerRun = null)
+        int? maximumRecoveryInspectionsPerRun = null,
+        RoutingCaptureLibraryPermit? captureLibraryPermit = null)
     {
         if (maximumSideEffectsPerRun is < 1 or > 256)
             throw new ArgumentOutOfRangeException(nameof(maximumSideEffectsPerRun));
@@ -194,6 +196,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
         _artifactResolver = artifactResolver ?? throw new ArgumentNullException(nameof(artifactResolver));
         _libraryFiler = libraryFiler ?? throw new ArgumentNullException(nameof(libraryFiler));
         _canExecute = canExecute ?? throw new ArgumentNullException(nameof(canExecute));
+        _captureLibraryPermit = captureLibraryPermit;
         _maximumSideEffectsPerRun = maximumSideEffectsPerRun;
         _maximumRecoveryInspectionsPerRun = recoveryBudget;
         _createAttemptId = createAttemptId ?? Guid.NewGuid;
@@ -207,16 +210,22 @@ internal sealed class RoutingOutboxExecutor : IDisposable
         await _runGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!_canExecute()) return new RoutingExecutorRunResult(false, 0, 0, 0, 0);
+            if (!CanExecute()) return new RoutingExecutorRunResult(false, 0, 0, 0, 0);
 
             var transitions = 0;
             if (!_startupRecoveryApplied)
             {
+                RequireMutationPermit("Routing outbox startup creation");
                 var before = await _outboxStore.LoadOrCreateAsync(
-                        UtcNow(), cancellationToken)
+                        UtcNow(),
+                        cancellationToken,
+                        () => RequireMutationPermit("Routing outbox startup creation commit"))
                     .ConfigureAwait(false);
+                RequireMutationPermit("Routing outbox startup recovery");
                 var recovered = await _outboxStore.LoadAndRecoverAsync(
-                        UtcNow(), cancellationToken)
+                        UtcNow(),
+                        cancellationToken,
+                        () => RequireMutationPermit("Routing outbox startup recovery commit"))
                     .ConfigureAwait(false);
                 if (recovered.Generation != before.Generation) transitions++;
                 _startupRecoveryApplied = true;
@@ -232,15 +241,18 @@ internal sealed class RoutingOutboxExecutor : IDisposable
             // Recovery is a bounded read-only inspection lane, not part of the external-side-effect
             // budget. Runnable work leads and recovery catches up one-for-one, so large hash checks
             // cannot enter an upload's critical path and a steady upload queue cannot starve them.
-            while (_canExecute() &&
+            while (CanExecute() &&
                    (providerAttempts + fileAttempts < _maximumSideEffectsPerRun ||
                     recoveryInspections < _maximumRecoveryInspectionsPerRun &&
                     recoveryInspections < providerAttempts + fileAttempts) &&
                    transitionBudget-- > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                RequireMutationPermit("Routing outbox execution load");
                 var current = await _outboxStore.LoadOrCreateAsync(
-                        UtcNow(), cancellationToken)
+                        UtcNow(),
+                        cancellationToken,
+                        () => RequireMutationPermit("Routing outbox execution creation commit"))
                     .ConfigureAwait(false);
 
                 var sideEffectAttempts = providerAttempts + fileAttempts;
@@ -260,6 +272,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                     RoutingFileRecoveryResult result;
                     try
                     {
+                        RequireMutationPermit("Routing library recovery inspection");
                         result = await _libraryFiler.ReconcileAsync(
                                 recovery,
                                 CancellationToken.None)
@@ -308,6 +321,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                     RoutingResolvedArtifact artifact;
                     try
                     {
+                        RequireMutationPermit("Routing artifact resolution");
                         artifact = await _artifactResolver.ResolveAsync(
                                 readyDelivery,
                                 cancellationToken)
@@ -338,7 +352,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                     transitions++;
 
                     RoutingDeliveryAttemptResult outcome;
-                    if (!_canExecute())
+                    if (!CanExecute())
                     {
                         outcome = RoutingDeliveryAttemptResult.Failed(
                             "routing-disabled-before-provider");
@@ -348,6 +362,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                         providerAttempts++;
                         try
                         {
+                            RequireMutationPermit("Routing provider delivery");
                             outcome = await _provider.SendAsync(
                                     started,
                                     artifact,
@@ -407,7 +422,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                     transitions++;
 
                     RoutingFileAttemptResult outcome;
-                    if (!_canExecute())
+                    if (!CanExecute())
                     {
                         outcome = RoutingFileAttemptResult.Failed(
                             "routing-disabled-before-file");
@@ -416,6 +431,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                     {
                         try
                         {
+                            RequireMutationPermit("Routing library filing");
                             outcome = await _libraryFiler.FileAsync(
                                     started,
                                     CancellationToken.None)
@@ -494,7 +510,11 @@ internal sealed class RoutingOutboxExecutor : IDisposable
     {
         for (var attempt = 0; attempt < MaximumSaveAttempts; attempt++)
         {
-            var current = await _outboxStore.LoadOrCreateAsync(UtcNow(), cancellationToken)
+            RequireMutationPermit("Routing delivery attempt load");
+            var current = await _outboxStore.LoadOrCreateAsync(
+                    UtcNow(),
+                    cancellationToken,
+                    () => RequireMutationPermit("Routing delivery attempt creation commit"))
                 .ConfigureAwait(false);
             var delivery = current.Deliveries.SingleOrDefault(item => item.DeliveryId == deliveryId);
             if (delivery?.State != PlannedDeliveryState.Ready) return null;
@@ -502,8 +522,12 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                 current, deliveryId, attemptId, TransitionTime(current));
             try
             {
+                RequireMutationPermit("Routing delivery attempt commit");
                 var saved = await _outboxStore.SaveAsync(
-                        candidate, current.Generation, cancellationToken)
+                        candidate,
+                        current.Generation,
+                        cancellationToken,
+                        () => RequireMutationPermit("Routing delivery attempt commit"))
                     .ConfigureAwait(false);
                 return saved.Deliveries.Single(item => item.DeliveryId == deliveryId);
             }
@@ -522,7 +546,11 @@ internal sealed class RoutingOutboxExecutor : IDisposable
     {
         for (var attempt = 0; attempt < MaximumSaveAttempts; attempt++)
         {
-            var current = await _outboxStore.LoadOrCreateAsync(UtcNow(), cancellationToken)
+            RequireMutationPermit("Routing file attempt load");
+            var current = await _outboxStore.LoadOrCreateAsync(
+                    UtcNow(),
+                    cancellationToken,
+                    () => RequireMutationPermit("Routing file attempt creation commit"))
                 .ConfigureAwait(false);
             var disposition = current.FileDispositions.SingleOrDefault(
                 item => item.DispositionId == dispositionId);
@@ -531,8 +559,12 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                 current, dispositionId, attemptId, TransitionTime(current));
             try
             {
+                RequireMutationPermit("Routing file attempt commit");
                 var saved = await _outboxStore.SaveAsync(
-                        candidate, current.Generation, cancellationToken)
+                        candidate,
+                        current.Generation,
+                        cancellationToken,
+                        () => RequireMutationPermit("Routing file attempt commit"))
                     .ConfigureAwait(false);
                 return saved.FileDispositions.Single(item => item.DispositionId == dispositionId);
             }
@@ -659,14 +691,22 @@ internal sealed class RoutingOutboxExecutor : IDisposable
     {
         for (var attempt = 0; attempt < MaximumSaveAttempts; attempt++)
         {
-            var current = await _outboxStore.LoadOrCreateAsync(UtcNow(), cancellationToken)
+            RequireMutationPermit("Routing outbox transition load");
+            var current = await _outboxStore.LoadOrCreateAsync(
+                    UtcNow(),
+                    cancellationToken,
+                    () => RequireMutationPermit("Routing outbox transition creation commit"))
                 .ConfigureAwait(false);
             var candidate = mutation(current);
             if (ReferenceEquals(candidate, current) || candidate == current) return false;
             try
             {
+                RequireMutationPermit("Routing outbox transition commit");
                 _ = await _outboxStore.SaveAsync(
-                        candidate, current.Generation, cancellationToken)
+                        candidate,
+                        current.Generation,
+                        cancellationToken,
+                        () => RequireMutationPermit("Routing outbox transition commit"))
                     .ConfigureAwait(false);
                 return true;
             }
@@ -676,6 +716,19 @@ internal sealed class RoutingOutboxExecutor : IDisposable
             }
         }
         throw new RoutingConcurrencyException("The routing outbox kept changing during execution.");
+    }
+
+    private bool CanExecute() =>
+        _canExecute() && _captureLibraryPermit?.Inspect().Allowed == true;
+
+    private void RequireMutationPermit(string operation)
+    {
+        if (_captureLibraryPermit is null)
+        {
+            throw new InvalidDataException(
+                "The Routing executor has no Capture-library permit.");
+        }
+        _ = _captureLibraryPermit.RequireCurrent(operation);
     }
 
     private static bool DependenciesSettled(

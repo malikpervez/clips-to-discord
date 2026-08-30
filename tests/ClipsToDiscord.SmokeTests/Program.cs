@@ -24,6 +24,32 @@ try
     Application.EnableVisualStyles();
     Application.SetCompatibleTextRenderingDefault(false);
 
+    if (args.Length == 1 &&
+        args[0].Equals("--silhouette-job-kill-probe", StringComparison.Ordinal))
+    {
+        if (!SilhouetteWorkerJobLifetime.TryEstablish(out var error))
+        {
+            Console.Error.WriteLine(error);
+            Environment.ExitCode = 91;
+            return;
+        }
+        var commandProcessor = Environment.GetEnvironmentVariable("ComSpec") ??
+            Path.Combine(Environment.SystemDirectory, "cmd.exe");
+        var childStart = new ProcessStartInfo(commandProcessor)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        childStart.ArgumentList.Add("/d");
+        childStart.ArgumentList.Add("/c");
+        childStart.ArgumentList.Add("ping -n 31 127.0.0.1 >nul");
+        using var containedChild = Process.Start(childStart) ??
+            throw new InvalidOperationException(
+                "Windows did not start the harmless Job Object child probe.");
+        Console.WriteLine($"CHILD_PID={containedChild.Id}");
+        return;
+    }
+
     if (args.Length == 1 && args[0].Equals("--gallery-renditions", StringComparison.Ordinal))
     {
         var galleryRoot = Path.Combine(
@@ -59,6 +85,117 @@ try
         finally
         {
             try { if (Directory.Exists(captureRoot)) Directory.Delete(captureRoot, recursive: true); }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--capture-host-abort", StringComparison.Ordinal))
+    {
+        ReactionCameraStartupTests.RunCaptureLibraryAuthorityAbortOnly();
+        await CaptureHostAbortTests.RunAsync();
+        Console.WriteLine("Capture host authority-abort tests passed.");
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--routing-core", StringComparison.Ordinal))
+    {
+        var routingRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordRoutingCore",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(routingRoot);
+            RoutingFoundationTests.Run(Path.Combine(routingRoot, "foundation"));
+            RoutesFeatureTests.Run(Path.Combine(routingRoot, "routes-feature"));
+            RoutingArchiveTests.Run(Path.Combine(routingRoot, "archive"));
+            RoutingCaptureJournalTests.Run(Path.Combine(routingRoot, "capture-journal"));
+            RoutingEvaluatorTests.Run(Path.Combine(routingRoot, "evaluator"));
+            RoutingMigrationTests.Run(Path.Combine(routingRoot, "migration"));
+            RoutingRuntimeBridgeTests.Run(Path.Combine(routingRoot, "bridge"));
+            await RoutingWatchedFolderShadowTests.RunAsync(
+                Path.Combine(routingRoot, "watched-shadow"));
+            await RoutingExecutionAuthorityTests.RunAsync(
+                Path.Combine(routingRoot, "execution-authority"));
+            await RoutingCaptureLibraryBindingTests.RunAsync(
+                Path.Combine(routingRoot, "capture-library-binding"));
+            await RoutingWatchedSourceAdapterTests.RunAsync(
+                Path.Combine(routingRoot, "watched-source-adapters"));
+            await RoutingWatchedJournalTests.RunAsync(
+                Path.Combine(routingRoot, "watched-journal"));
+            await RoutingWatchedIngressTests.RunAsync(
+                Path.Combine(routingRoot, "watched-ingress"));
+            await RoutingWatchedFolderExecutorTests.RunAsync(
+                Path.Combine(routingRoot, "watched-executor"));
+            await RoutingWatchedFolderRuntimeHostTests.RunAsync(
+                Path.Combine(routingRoot, "watched-runtime-host"));
+            await RoutingCaptureJournalPumpTests.RunAsync(
+                Path.Combine(routingRoot, "capture-journal-pump"));
+            await RoutingProductionRuntimeTests.RunAsync(
+                Path.Combine(routingRoot, "production-runtime"));
+            await RoutingActiveWorkSessionTests.RunAsync(
+                Path.Combine(routingRoot, "active-work-session"));
+            await RoutingApplicationLifecycleTests.RunAsync(
+                Path.Combine(routingRoot, "application-lifecycle"));
+            await TrayProcessingOperationGateTests.RunAsync(
+                Path.Combine(routingRoot, "tray-operation-gate"));
+            RoutingDeliveryReceiptTests.Run(
+                Path.Combine(routingRoot, "delivery-receipts"));
+            RoutingRuntimeCoordinatorTests.Run();
+            RoutingExecutorTests.Run(Path.Combine(routingRoot, "executor"));
+            RoutingOperatorTests.Run(Path.Combine(routingRoot, "operator"));
+            await DiscordRoutingProviderTests.RunAsync(
+                Path.Combine(routingRoot, "discord-provider"));
+            await DiscordConnectionCatalogTests.RunAsync(
+                Path.Combine(routingRoot, "discord-connections"));
+            Console.WriteLine("Routing core tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(routingRoot))
+                {
+                    Directory.Delete(routingRoot, recursive: true);
+                }
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--tray-routing-coordination", StringComparison.Ordinal))
+    {
+        var routingRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordTrayRoutingCoordination",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(routingRoot);
+            await TrayProcessingOperationGateTests.RunAsync(
+                Path.Combine(routingRoot, "tray"));
+            await RoutingApplicationLifecycleTests.RunAsync(
+                Path.Combine(routingRoot, "lifecycle"));
+            await RoutingCaptureLibraryBindingTests.RunAsync(
+                Path.Combine(routingRoot, "capture-library-binding"));
+            await RoutingActiveWorkSessionTests.RunAsync(
+                Path.Combine(routingRoot, "active-work-session"));
+            Console.WriteLine("Tray routing coordination tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(routingRoot))
+                {
+                    Directory.Delete(routingRoot, recursive: true);
+                }
+            }
             catch { }
         }
         return;
@@ -733,6 +870,32 @@ try
     TraceSmokeStep("ClipCord 2.0 watched-folder routing shadow");
     await RoutingWatchedFolderShadowTests.RunAsync(
         Path.Combine(temporaryRoot, "routing-watched-shadow"));
+    await RoutingExecutionAuthorityTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-execution-authority"));
+    await RoutingCaptureLibraryBindingTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-capture-library-binding"));
+    await RoutingWatchedSourceAdapterTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-watched-source-adapters"));
+    await RoutingWatchedJournalTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-watched-journal"));
+    await RoutingWatchedIngressTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-watched-ingress"));
+    await RoutingWatchedFolderExecutorTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-watched-executor"));
+    await RoutingWatchedFolderRuntimeHostTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-watched-runtime-host"));
+    await RoutingCaptureJournalPumpTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-capture-journal-pump"));
+    await RoutingProductionRuntimeTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-production-runtime"));
+    await RoutingActiveWorkSessionTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-active-work-session"));
+    await RoutingApplicationLifecycleTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-application-lifecycle"));
+    await TrayProcessingOperationGateTests.RunAsync(
+        Path.Combine(temporaryRoot, "tray-processing-operation-gate"));
+    RoutingDeliveryReceiptTests.Run(
+        Path.Combine(temporaryRoot, "routing-delivery-receipts"));
     RoutingRuntimeCoordinatorTests.Run();
     RoutingExecutorTests.Run(Path.Combine(temporaryRoot, "routing-executor"));
     RoutingOperatorTests.Run(Path.Combine(temporaryRoot, "routing-operator"));

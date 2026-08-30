@@ -136,20 +136,28 @@ internal static class CaptureHostResponseFactory
 
 internal static class CaptureHostParentLifetime
 {
-    internal static async Task WatchAsync(int parentProcessId, Action parentExited)
+    internal static async Task WatchAsync(
+        int parentProcessId,
+        Action parentExited,
+        CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(parentProcessId);
         ArgumentNullException.ThrowIfNull(parentExited);
+        if (cancellationToken.IsCancellationRequested) return;
         try
         {
             using var parent = Process.GetProcessById(parentProcessId);
-            await parent.WaitForExitAsync().ConfigureAwait(false);
+            await parent.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (ArgumentException)
         {
             // The parent exited before the watcher attached.
         }
-        parentExited();
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+        if (!cancellationToken.IsCancellationRequested) parentExited();
     }
 }
 

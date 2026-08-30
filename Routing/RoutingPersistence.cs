@@ -121,7 +121,8 @@ internal sealed class RoutingOutboxStore
         RoutingOutboxDocument document,
         long expectedGeneration,
         IReadOnlyList<RoutingArchivedPlanDocument> archives,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? beforeCommit = null)
     {
         ArgumentNullException.ThrowIfNull(archives);
         if (archives.Count == 0)
@@ -143,6 +144,7 @@ internal sealed class RoutingOutboxStore
                         // Re-read while those leases are held to pin exact archive bytes too.
                         foreach (var archive in archives)
                             ArchiveStore.RequireExact(archive, CancellationToken.None);
+                        beforeCommit?.Invoke();
                     })
                 .ConfigureAwait(false);
         }
@@ -154,8 +156,12 @@ internal sealed class RoutingOutboxStore
 
     internal Task<RoutingOutboxAdmissionResult> PrepareForPlanningAsync(
         DateTimeOffset now,
-        CancellationToken cancellationToken = default) =>
-        new RoutingOutboxCompactor(this, ArchiveStore).PrepareForPlanningAsync(now, cancellationToken);
+        CancellationToken cancellationToken = default,
+        Action? beforeMutation = null) =>
+        new RoutingOutboxCompactor(this, ArchiveStore).PrepareForPlanningAsync(
+            now,
+            cancellationToken,
+            beforeMutation);
 
     internal Task<RoutingOutboxAdmissionResult> CompactTerminalPlansAsync(
         DateTimeOffset now,
@@ -164,10 +170,12 @@ internal sealed class RoutingOutboxStore
 
     internal Task<RoutingOutboxDocument> LoadOrCreateAsync(
         DateTimeOffset? now = null,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        Action? beforeCommit = null) =>
         _store.LoadOrCreateAsync(
             () => RoutingOutboxModel.CreateEmpty(now),
-            cancellationToken);
+            cancellationToken,
+            beforeCommit);
 
     /// <summary>
     /// Loads the outbox and persists conservative crash recovery before returning it. A network
@@ -176,12 +184,13 @@ internal sealed class RoutingOutboxStore
     /// </summary>
     internal async Task<RoutingOutboxDocument> LoadAndRecoverAsync(
         DateTimeOffset? now = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? beforeCommit = null)
     {
         for (var attempt = 0; attempt < 4; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var current = await LoadOrCreateAsync(now, cancellationToken);
+            var current = await LoadOrCreateAsync(now, cancellationToken, beforeCommit);
             var recovered = RoutingOutboxModel.RecoverInterruptedWork(
                 current,
                 now ?? DateTimeOffset.UtcNow);
@@ -191,7 +200,8 @@ internal sealed class RoutingOutboxStore
                 return await SaveAsync(
                     recovered,
                     current.Generation,
-                    cancellationToken);
+                    cancellationToken,
+                    beforeCommit);
             }
             catch (RoutingConcurrencyException) when (attempt < 3)
             {
@@ -315,7 +325,8 @@ internal sealed class RoutingAtomicJsonStore<TDocument>
 
     internal async Task<TDocument> LoadOrCreateAsync(
         Func<TDocument> createInitial,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? beforeCommit = null)
     {
         ArgumentNullException.ThrowIfNull(createInitial);
         for (var attempt = 0; attempt < 4; attempt++)
@@ -333,7 +344,8 @@ internal sealed class RoutingAtomicJsonStore<TDocument>
                 return await SaveAsync(
                     createInitial(),
                     expectedGeneration: 0,
-                    cancellationToken);
+                    cancellationToken,
+                    beforeCommit);
             }
             catch (RoutingConcurrencyException) when (attempt < 3)
             {
