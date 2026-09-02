@@ -7613,6 +7613,9 @@ static void AssertRoutingOwnedSettingsMinimumViewport(SettingsForm form)
                host.HasOverflow == (cards.Height > host.ClientSize.Height),
             $"Routing-owned Settings must use only its branded viewport at MinimumSize: " +
             $"host={host.ClientSize}, cards={cards.Size}, overflow={host.HasOverflow}.");
+        Assert(cards.Width <= host.ClientSize.Width,
+            $"Routing-owned Settings must stay within the branded viewport at the supported minimum width: " +
+            $"host={host.ClientSize}, cards={cards.Size}.");
 
         foreach (var targetName in new[]
                  {

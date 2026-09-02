@@ -781,11 +781,16 @@ internal static class RoutesFeatureTests
         form.Show();
         Application.DoEvents();
 
-        // Figma R30/R31 use a 1200x560 logical-pixel constrained window. Override
-        // the normal desktop minimum only inside this hidden geometry probe so the
-        // real shared shell and branded viewports are exercised at that contract.
+        // Figma R30/R31 use a 1200x560 logical-pixel constrained window. Scale that
+        // contract into physical pixels so this hidden probe exercises the same
+        // viewport at every runner DPI rather than shrinking below the supported
+        // logical minimum on a high-DPI desktop.
+        var dpi = Math.Max(96, form.DeviceDpi);
+        var constrainedClientSize = new Size(
+            SettingsForm.GetDesignedOpeningSize(SettingsPage.Settings, dpi).Width,
+            (int)Math.Round(560 * dpi / 96d));
         form.MinimumSize = Size.Empty;
-        form.ClientSize = new Size(1200, 560);
+        form.ClientSize = constrainedClientSize;
         form.PerformLayout();
         Application.DoEvents();
 
@@ -794,17 +799,17 @@ internal static class RoutesFeatureTests
         settingsHost.RefreshContentLayout(preservePosition: false);
         var settingsContent = settingsHost.Content ??
             throw new InvalidOperationException("Settings constrained-height content is missing.");
-        Assert(form.ClientSize == new Size(1200, 560) &&
+        Assert(form.ClientSize == constrainedClientSize &&
                settingsHost.HasOverflow &&
                settingsContent.Height > settingsHost.ClientSize.Height,
-            $"Settings must use its branded overflow viewport at the approved 1200x560 constrained height; " +
+            $"Settings must use its branded overflow viewport at the approved 1200x560 logical constrained height; " +
             $"form={form.ClientSize}, viewport={settingsHost.ClientSize}, content={settingsContent.Size}.");
         Assert(!Enumerate(settingsContent).OfType<ScrollableControl>().Any(control =>
                    control.AutoScroll || control.HorizontalScroll.Visible ||
                    control.VerticalScroll.Visible),
             "Settings constrained-height content must not introduce a native Windows scrollbar.");
-        AssertDescendantsContained(settingsContent, 96);
-        AssertSiblingGeometry(settingsContent, 96);
+        AssertDescendantsContained(settingsContent, dpi);
+        AssertSiblingGeometry(settingsContent, dpi);
         AssertReachableThroughBrandedScrollHost(
             settingsHost,
             Enumerate(settingsContent).Single(control => control.Name == "ManagedLocalOnlyModeRow"),
@@ -820,17 +825,17 @@ internal static class RoutesFeatureTests
         routesHost.RefreshContentLayout(preservePosition: false);
         var routesContent = routesHost.Content ??
             throw new InvalidOperationException("Routes constrained-height content is missing.");
-        Assert(form.ClientSize == new Size(1200, 560) &&
+        Assert(form.ClientSize == constrainedClientSize &&
                routesHost.HasOverflow &&
                routesContent.Height > routesHost.ClientSize.Height,
-            $"Routes must use its branded overflow viewport at the approved 1200x560 constrained height; " +
+            $"Routes must use its branded overflow viewport at the approved 1200x560 logical constrained height; " +
             $"form={form.ClientSize}, viewport={routesHost.ClientSize}, content={routesContent.Size}.");
         Assert(!Enumerate(routesContent).OfType<ScrollableControl>().Any(control =>
                    control.AutoScroll || control.HorizontalScroll.Visible ||
                    control.VerticalScroll.Visible),
             "Routes constrained-height content must not introduce a native Windows scrollbar.");
-        AssertDescendantsContained(routes, 96);
-        AssertSiblingGeometry(routes, 96);
+        AssertDescendantsContained(routes, dpi);
+        AssertSiblingGeometry(routes, dpi);
         AssertReachableThroughBrandedScrollHost(
             routesHost,
             Enumerate(routesContent).Last(control =>
@@ -3816,7 +3821,10 @@ internal static class RoutesFeatureTests
                 if (parent is BrandedScrollHost) continue;
                 var bounds = Rectangle.Inflate(parent.ClientRectangle, tolerance, tolerance);
                 Assert(bounds.Contains(child.Bounds),
-                    $"{child.Name} escapes {parent.Name} at {dpi} DPI: child={child.Bounds}, parent={parent.ClientRectangle}.");
+                    $"{child.GetType().Name} '{child.Name}' text='{child.Text}' escapes " +
+                    $"{parent.GetType().Name} '{parent.Name}' owned by " +
+                    $"{parent.Parent?.GetType().Name} '{parent.Parent?.Name}' at {dpi} DPI: " +
+                    $"child={child.Bounds}, parent={parent.ClientRectangle}.");
             }
         }
     }

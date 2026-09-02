@@ -1371,8 +1371,10 @@ internal sealed class SettingsForm : Form
         {
             Name = "SettingsCards",
             Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            // BrandedScrollHost owns this surface's width. Let GetPreferredSize
+            // report the vertical extent without allowing TableLayoutPanel's
+            // AutoSize pass to grow the cards back past a constrained viewport.
+            AutoSize = false,
             AutoScroll = false,
             ColumnCount = 1,
             RowCount = 4,
