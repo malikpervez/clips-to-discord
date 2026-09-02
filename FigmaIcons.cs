@@ -15,9 +15,11 @@ internal enum FigmaIconAsset
     Settings,
     Activity,
     Capture,
+    Routes,
     Gallery,
     About,
     Folder,
+    Connection,
     ArrowRight,
     Upload,
     Clock,
@@ -50,7 +52,9 @@ internal enum FigmaIconAsset
     SafeZone,
     ChevronLeft,
     Alert,
-    Discord
+    Discord,
+    YouTube,
+    TikTok
 }
 
 internal static class FigmaIconRenderer
@@ -67,6 +71,7 @@ internal static class FigmaIconRenderer
             BrandGlyph.Settings => FigmaIconAsset.Settings,
             BrandGlyph.Activity => FigmaIconAsset.Activity,
             BrandGlyph.Capture => FigmaIconAsset.Capture,
+            BrandGlyph.Routes => FigmaIconAsset.Routes,
             BrandGlyph.Gallery => FigmaIconAsset.Gallery,
             BrandGlyph.About => FigmaIconAsset.About,
             BrandGlyph.Folder or BrandGlyph.FolderOpen => FigmaIconAsset.Folder,
@@ -90,6 +95,7 @@ internal static class FigmaIconRenderer
             _ => default
         };
         return glyph is BrandGlyph.Home or BrandGlyph.Settings or BrandGlyph.Activity or BrandGlyph.Capture or
+            BrandGlyph.Routes or
             BrandGlyph.Gallery or BrandGlyph.About or BrandGlyph.Folder or BrandGlyph.FolderOpen or
             BrandGlyph.Shield or BrandGlyph.AppStatus or
             BrandGlyph.Diagnostics or BrandGlyph.Credits or BrandGlyph.FileText or

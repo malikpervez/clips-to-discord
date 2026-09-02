@@ -12,6 +12,7 @@ internal sealed class AboutView : UserControl
     private readonly Func<string>? _watcherStatusProvider;
     private readonly Func<bool> _discordRunningProvider;
     private readonly Func<string?> _ffmpegExecutableProvider;
+    private readonly Func<RoutingUiPresentationSnapshot?>? _routingPresentationProvider;
     private readonly Action<ProcessStartInfo> _processStarter;
     private readonly Action<string> _clipboardWriter;
     private readonly string _dataDirectory;
@@ -23,6 +24,8 @@ internal sealed class AboutView : UserControl
     private readonly Label _watcherDetailLabel;
     private readonly Label _routeLabel;
     private readonly Label _routeDetailLabel;
+    private readonly Label _localOnlyLabel;
+    private readonly Label _localOnlyDetailLabel;
     private readonly Label _startupLabel;
     private readonly Label _startupDetailLabel;
     private readonly Label _installationLabel;
@@ -40,13 +43,15 @@ internal sealed class AboutView : UserControl
         Func<string?>? ffmpegExecutableProvider = null,
         Action<ProcessStartInfo>? processStarter = null,
         Action<string>? clipboardWriter = null,
-        string? dataDirectory = null)
+        string? dataDirectory = null,
+        Func<RoutingUiPresentationSnapshot?>? routingPresentationProvider = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         _settings = settings;
         _watcherStatusProvider = watcherStatusProvider;
         _discordRunningProvider = discordRunningProvider ?? DiscordDetector.IsRunning;
         _ffmpegExecutableProvider = ffmpegExecutableProvider ?? FfmpegCompressor.FindExecutable;
+        _routingPresentationProvider = routingPresentationProvider;
         _processStarter = processStarter ?? (start => Process.Start(start));
         _clipboardWriter = clipboardWriter ?? Clipboard.SetText;
         _dataDirectory = dataDirectory ?? SettingsStore.DataDirectory;
@@ -65,6 +70,8 @@ internal sealed class AboutView : UserControl
         _watcherDetailLabel = CreateDetailLabel("AboutWatcherDetailLabel");
         _routeLabel = CreateValueLabel("AboutRoutingStatusLabel");
         _routeDetailLabel = CreateDetailLabel("AboutRoutingDetailLabel");
+        _localOnlyLabel = CreateValueLabel("AboutLocalOnlyStatusLabel");
+        _localOnlyDetailLabel = CreateDetailLabel("AboutLocalOnlyDetailLabel");
         _startupLabel = CreateValueLabel("AboutStartupStatusLabel");
         _startupDetailLabel = CreateDetailLabel("AboutStartupDetailLabel");
         _installationLabel = CreateValueLabel("AboutInstallationStatusLabel");
@@ -167,7 +174,8 @@ internal sealed class AboutView : UserControl
             _snapshot = AboutStatusSnapshot.Create(
                 _settings,
                 _watcherStatusProvider?.Invoke(),
-                facts);
+                facts,
+                CaptureRoutingPresentation());
             ApplyStatus(_snapshot);
         }
         catch (Exception exception)
@@ -185,7 +193,9 @@ internal sealed class AboutView : UserControl
             rawStatus,
             _snapshot.Discord.Equals("Open", StringComparison.OrdinalIgnoreCase));
         _watcherLabel.Text = watcher.Label;
-        _watcherDetailLabel.Text = watcher.Detail;
+        _watcherDetailLabel.Text = watcher.State == AboutWatcherState.Watching && _snapshot.WatchingSourceCount > 0
+            ? $"{AboutPageSupport.FormatCount(_snapshot.WatchingSourceCount, "source")} · Library always on"
+            : watcher.Detail;
     }
 
     internal void SetUpdateState(string state)
@@ -262,7 +272,7 @@ internal sealed class AboutView : UserControl
         copy.Controls.Add(new Label
         {
             Name = "AboutTaglineLabel",
-            Text = "Your clips. Your choice. Your Discord.",
+            Text = "Your clips. Your routes. Your PC.",
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoEllipsis = false,
@@ -275,8 +285,8 @@ internal sealed class AboutView : UserControl
         copy.Controls.Add(new Label
         {
             Name = "AboutDescriptionLabel",
-            Text = "ClipCord watches your recording folder, routes new clips where you choose, " +
-                   "and keeps your webhook, history and gallery on this PC.",
+            Text = "ClipCord watches the sources you choose, runs every new clip through your Routes, " +
+                   "and keeps your connections, history and gallery on this PC.",
             Dock = DockStyle.Fill,
             ForeColor = ClipCordTheme.TextSecondary,
             Font = ClipCordTheme.InterfaceFont(8f),
@@ -366,13 +376,19 @@ internal sealed class AboutView : UserControl
             BrandGlyph.AppStatus,
             out var body);
         body.ColumnCount = 1;
-        body.RowCount = 4;
+        body.RowCount = 5;
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var row = 0; row < 4; row++) body.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
+        var rowHeights = new[] { 26f, 26f, 26f, 26f, 28f };
+        for (var row = 0; row < rowHeights.Length; row++)
+        {
+            body.RowStyles.Add(new RowStyle(SizeType.Absolute, rowHeights[row]));
+            body.SetLogicalRowHeight(row, rowHeights[row]);
+        }
         body.Controls.Add(CreateStatusItem("AboutWatcherStatusItem", _watcherLabel, _watcherDetailLabel, StatusAccent.Green), 0, 0);
         body.Controls.Add(CreateStatusItem("AboutRoutingStatusItem", _routeLabel, _routeDetailLabel, StatusAccent.Violet), 0, 1);
-        body.Controls.Add(CreateStatusItem("AboutStartupStatusItem", _startupLabel, _startupDetailLabel, StatusAccent.Green), 0, 2);
-        body.Controls.Add(CreateStatusItem("AboutInstallationStatusItem", _installationLabel, _installationDetailLabel, StatusAccent.Blue, drawDivider: false), 0, 3);
+        body.Controls.Add(CreateStatusItem("AboutLocalOnlyStatusItem", _localOnlyLabel, _localOnlyDetailLabel, StatusAccent.Amber), 0, 2);
+        body.Controls.Add(CreateStatusItem("AboutStartupStatusItem", _startupLabel, _startupDetailLabel, StatusAccent.Green), 0, 3);
+        body.Controls.Add(CreateStatusItem("AboutInstallationStatusItem", _installationLabel, _installationDetailLabel, StatusAccent.Blue, drawDivider: false), 0, 4);
         return card;
     }
 
@@ -431,10 +447,10 @@ internal sealed class AboutView : UserControl
         }
         var statements = new[]
         {
-            "Activity, Gallery, and routing history stay on this PC.",
-            "Your Discord webhook is encrypted for your Windows account.",
-            "No ClipCord account, analytics, advertising, or behavioral tracking.",
-            "Network access is limited to Discord uploads and verified GitHub updates."
+            "Activity, Gallery and routing history stay on this PC.",
+            "Your connection secrets are encrypted for your Windows account.",
+            "No ClipCord account, analytics, advertising or behavioural tracking.",
+            "Network access is limited to the destinations you connect and verified GitHub updates."
         };
         for (var index = 0; index < statements.Length; index++)
         {
@@ -652,7 +668,8 @@ internal sealed class AboutView : UserControl
     {
         Green,
         Violet,
-        Blue
+        Blue,
+        Amber
     }
 
     private static Control CreateStatusItem(
@@ -669,7 +686,7 @@ internal sealed class AboutView : UserControl
             AccessibleRole = AccessibleRole.Grouping,
             Dock = DockStyle.Fill,
             BackColor = Color.Transparent,
-            Margin = new Padding(0, 6, 0, 6),
+            Margin = new Padding(0, 3, 0, 3),
             Padding = Padding.Empty
         };
         if (drawDivider)
@@ -692,13 +709,14 @@ internal sealed class AboutView : UserControl
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 18));
         layout.SetLogicalColumnWidth(0, 18);
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 148));
-        layout.SetLogicalColumnWidth(2, 148);
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
+        layout.SetLogicalColumnWidth(2, 220);
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var accentColor = accent switch
         {
             StatusAccent.Violet => ClipCordTheme.Violet,
             StatusAccent.Blue => Color.FromArgb(91, 148, 255),
+            StatusAccent.Amber => Color.FromArgb(224, 151, 54),
             _ => Color.FromArgb(55, 207, 133)
         };
         layout.Controls.Add(new Label
@@ -888,11 +906,33 @@ internal sealed class AboutView : UserControl
         _watcherDetailLabel.Text = snapshot.WatcherDetail;
         _routeLabel.Text = snapshot.Routing;
         _routeDetailLabel.Text = snapshot.RoutingDetail;
+        _localOnlyLabel.Text = snapshot.LocalOnlyMode;
+        _localOnlyDetailLabel.Text = snapshot.LocalOnlyModeDetail;
         _startupLabel.Text = snapshot.Startup;
         _startupDetailLabel.Text = snapshot.StartupDetail;
         _installationLabel.Text = snapshot.Installation;
         _installationDetailLabel.Text = snapshot.InstallationDetail;
     }
+
+    private RoutingUiPresentationSnapshot? CaptureRoutingPresentation()
+    {
+        if (_routingPresentationProvider is null) return null;
+        try
+        {
+            return _routingPresentationProvider()?.Normalize() ?? UnavailableRoutingPresentation();
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not inspect the privacy-safe routing presentation state.", exception);
+            return UnavailableRoutingPresentation();
+        }
+    }
+
+    private static RoutingUiPresentationSnapshot UnavailableRoutingPresentation() => new(
+        RoutingUiState.Unavailable,
+        ActiveRouteCount: 0,
+        WatchingSourceCount: 0,
+        LocalOnlyModeEnabled: true);
 
     private void OpenLogs()
     {

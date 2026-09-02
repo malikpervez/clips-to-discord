@@ -182,25 +182,109 @@ internal static class CapturePathPolicy
     }
 }
 
+internal enum CaptureSettingsDocumentStatus
+{
+    Loaded,
+    Missing,
+    Invalid,
+    Unavailable
+}
+
+internal sealed record CaptureSettingsDocumentInspection(
+    CaptureSettingsDocumentStatus Status,
+    CaptureSettings? Settings,
+    Exception? Error = null)
+{
+    internal bool Loaded => Status == CaptureSettingsDocumentStatus.Loaded && Settings is not null;
+}
+
+internal sealed record CaptureSettingsDocumentBackup(bool Existed, byte[]? Contents);
+
 internal static class CaptureSettingsStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    internal const int MaximumDocumentBytes = 256 * 1024;
     internal static string SettingsPath => Path.Combine(SettingsStore.DataDirectory, "capture-settings.json");
 
     internal static CaptureSettings Load()
     {
+        var inspection = Inspect();
+        if (inspection.Loaded) return inspection.Settings!;
+        if (inspection.Error is not null)
+        {
+            Log.Error("Could not load ClipCord Capture settings.", inspection.Error);
+        }
+        return CaptureSettings.Default;
+    }
+
+    /// <summary>
+    /// Strict status-bearing load for authority decisions. Unlike <see cref="Load"/>, this never
+    /// turns absent, malformed, unreadable, or path-less evidence into defaults.
+    /// </summary>
+    internal static CaptureSettingsDocumentInspection Inspect(string? path = null)
+    {
+        var candidate = path ?? SettingsPath;
         try
         {
-            if (!File.Exists(SettingsPath)) return CaptureSettings.Default;
-            return PrepareForPersistence(
-                JsonSerializer.Deserialize<CaptureSettings>(
-                    File.ReadAllText(SettingsPath),
-                    JsonOptions) ?? CaptureSettings.Default);
+            ArgumentException.ThrowIfNullOrWhiteSpace(candidate);
+            var canonical = Path.GetFullPath(candidate);
+            if (Directory.Exists(canonical))
+            {
+                return new CaptureSettingsDocumentInspection(
+                    CaptureSettingsDocumentStatus.Invalid,
+                    null,
+                    new InvalidDataException(
+                        "A directory occupies the Capture settings document path."));
+            }
+            if (!File.Exists(canonical))
+            {
+                return new CaptureSettingsDocumentInspection(
+                    CaptureSettingsDocumentStatus.Missing,
+                    null);
+            }
+            var length = new FileInfo(canonical).Length;
+            if (length <= 0 || length > MaximumDocumentBytes)
+            {
+                return new CaptureSettingsDocumentInspection(
+                    CaptureSettingsDocumentStatus.Invalid,
+                    null,
+                    new InvalidDataException(
+                        "The Capture settings document has an invalid size."));
+            }
+            var raw = JsonSerializer.Deserialize<CaptureSettings>(
+                File.ReadAllText(canonical),
+                JsonOptions);
+            if (raw is null || string.IsNullOrWhiteSpace(raw.LibraryRoot) ||
+                !Path.IsPathFullyQualified(raw.LibraryRoot))
+            {
+                return new CaptureSettingsDocumentInspection(
+                    CaptureSettingsDocumentStatus.Invalid,
+                    null,
+                    new InvalidDataException(
+                        "The Capture settings document has no canonical library root."));
+            }
+            _ = Path.GetFullPath(raw.LibraryRoot.Trim());
+            return new CaptureSettingsDocumentInspection(
+                CaptureSettingsDocumentStatus.Loaded,
+                PrepareForPersistence(raw));
         }
-        catch (Exception exception)
+        catch (Exception exception) when (
+            exception is JsonException or InvalidDataException or ArgumentException or
+                NotSupportedException or PathTooLongException)
         {
-            Log.Error("Could not load ClipCord Capture settings.", exception);
-            return CaptureSettings.Default;
+            return new CaptureSettingsDocumentInspection(
+                CaptureSettingsDocumentStatus.Invalid,
+                null,
+                exception);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+                System.Security.SecurityException)
+        {
+            return new CaptureSettingsDocumentInspection(
+                CaptureSettingsDocumentStatus.Unavailable,
+                null,
+                exception);
         }
     }
 
@@ -211,6 +295,43 @@ internal static class CaptureSettingsStore
         Directory.CreateDirectory(SettingsStore.DataDirectory);
         var temporaryPath = SettingsPath + ".tmp";
         File.WriteAllText(temporaryPath, JsonSerializer.Serialize(normalized, JsonOptions));
+        File.Move(temporaryPath, SettingsPath, overwrite: true);
+    }
+
+    /// <summary>
+    /// Captures the exact settings bytes so a failed authority repair can restore malformed or
+    /// otherwise legacy evidence byte-for-byte instead of silently replacing it with defaults.
+    /// </summary>
+    internal static CaptureSettingsDocumentBackup CreateBackup()
+    {
+        if (Directory.Exists(SettingsPath))
+        {
+            throw new InvalidDataException(
+                "A directory occupies the Capture settings document path.");
+        }
+        if (!File.Exists(SettingsPath)) return new(false, null);
+        var contents = File.ReadAllBytes(SettingsPath);
+        if (contents.Length > MaximumDocumentBytes)
+        {
+            throw new InvalidDataException(
+                "The Capture settings document is too large to repair transactionally.");
+        }
+        return new(true, contents);
+    }
+
+    internal static void RestoreBackup(CaptureSettingsDocumentBackup backup)
+    {
+        ArgumentNullException.ThrowIfNull(backup);
+        Directory.CreateDirectory(SettingsStore.DataDirectory);
+        if (!backup.Existed)
+        {
+            if (File.Exists(SettingsPath)) File.Delete(SettingsPath);
+            return;
+        }
+        var contents = backup.Contents ?? throw new InvalidDataException(
+            "The Capture settings backup is incomplete.");
+        var temporaryPath = SettingsPath + ".rollback.tmp";
+        File.WriteAllBytes(temporaryPath, contents);
         File.Move(temporaryPath, SettingsPath, overwrite: true);
     }
 

@@ -14,6 +14,142 @@ internal static class ReactionCameraStartupTests
         AssertFailedCameraLayerCannotCommit();
         AssertReplayCameraStartupJoinsItsFrameSource();
         AssertSilhouettePreferencesAreSnapshottedAtStart();
+        AssertCaptureLibraryAuthorityAbortDiscardsActiveWork();
+        AssertAuthorityAbortSurvivesThrowingSubscribers();
+    }
+
+    internal static void RunCaptureLibraryAuthorityAbortOnly()
+    {
+        AssertCaptureLibraryAuthorityAbortDiscardsActiveWork();
+        AssertAuthorityAbortSurvivesThrowingSubscribers();
+    }
+
+    private static void AssertAuthorityAbortSurvivesThrowingSubscribers()
+    {
+        var client = new DelayedCaptureHostClient();
+        var underlyingAbort = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.SetAuthorityAbortTask(underlyingAbort.Task);
+        var recorder = new CaptureHostManualRecorder(client);
+        var stateNotifications = 0;
+        var replayNotifications = 0;
+        var cameraNotifications = 0;
+        var everySubscriberObservedLatchedAbort = true;
+
+        recorder.StateChanged += ThrowingSubscriber(() => stateNotifications++);
+        recorder.ReplayStateChanged += ThrowingSubscriber(() => replayNotifications++);
+        recorder.ReactionCameraStateChanged += ThrowingSubscriber(() => cameraNotifications++);
+
+        var returnedAbort = ((ICaptureLibraryAuthorityAbort)recorder)
+            .AbortForCaptureLibraryAuthorityRevocationAsync();
+        Assert(ReferenceEquals(returnedAbort, underlyingAbort.Task) &&
+               !returnedAbort.IsCompleted &&
+               client.AbortCalls == 1 &&
+               stateNotifications == 1 &&
+               replayNotifications == 1 &&
+               cameraNotifications == 1 &&
+               everySubscriberObservedLatchedAbort,
+            "Throwing StateChanged, ReplayStateChanged, and ReactionCameraStateChanged " +
+            "subscribers must not prevent, replace, or run before the underlying authority-abort Task.");
+
+        underlyingAbort.SetResult(true);
+        returnedAbort.GetAwaiter().GetResult();
+        recorder.Dispose();
+        return;
+
+        EventHandler ThrowingSubscriber(Action recordNotification) => (_, _) =>
+        {
+            recordNotification();
+            everySubscriberObservedLatchedAbort &= client.AbortCalls == 1;
+            throw new InvalidOperationException("hostile Capture authority subscriber");
+        };
+    }
+
+    private static void AssertCaptureLibraryAuthorityAbortDiscardsActiveWork()
+    {
+        var manualClient = new DelayedCaptureHostClient();
+        var manualRecorder = new CaptureHostManualRecorder(manualClient);
+        var manualProjects = 0;
+        var manualJournals = 0;
+        manualRecorder.ProjectCommitted += (_, _) => manualProjects++;
+        manualRecorder.JournalChanged += (_, _) => manualJournals++;
+        manualRecorder.SelectTargetAsync(new FakeWindow()).GetAwaiter().GetResult();
+        var manualStart = manualRecorder.StartAsync(CameraSettings());
+        manualClient.CompleteManualStart(new CaptureHostRecorderSnapshot(
+            ManualCaptureState.Recording,
+            new ManualCaptureTarget("Game", 1920, 1080),
+            null,
+            ReactionCameraStatus: new ReactionCameraRuntimeStatus(true, false)));
+        manualStart.GetAwaiter().GetResult();
+
+        ((ICaptureLibraryAuthorityAbort)manualRecorder)
+            .AbortForCaptureLibraryAuthorityRevocationAsync()
+            .GetAwaiter()
+            .GetResult();
+        var manualStopRejected = false;
+        try { _ = manualRecorder.StopAsync().GetAwaiter().GetResult(); }
+        catch (InvalidOperationException) { manualStopRejected = true; }
+        manualRecorder.Dispose();
+        Assert(
+            manualClient.AbortCalls == 1 &&
+            manualClient.StopRecordingCalls == 0 &&
+            manualClient.StopReplayCalls == 0 &&
+            manualClient.SaveReplayCalls == 0 &&
+            manualRecorder.State == ManualCaptureState.Failed &&
+            manualRecorder.Target is null &&
+            manualRecorder.LastError?.Contains("No clip was saved", StringComparison.Ordinal) == true &&
+            !manualRecorder.ReactionCameraStatus.IsActive &&
+            manualStopRejected && manualProjects == 0 && manualJournals == 0,
+            "Revoking Capture-library authority during manual recording must abort the host, discard local capture state, suppress promotion notifications, and make later Stop/Dispose non-finalizing.");
+
+        var replayClient = new DelayedCaptureHostClient();
+        var replayRecorder = new CaptureHostManualRecorder(replayClient);
+        var replayProjects = 0;
+        var replayJournals = 0;
+        replayRecorder.ProjectCommitted += (_, _) => replayProjects++;
+        replayRecorder.JournalChanged += (_, _) => replayJournals++;
+        var replayStart = replayRecorder.StartReplayAsync(CameraSettings() with
+        {
+            InstantReplayEnabled = true
+        });
+        replayClient.CompleteReplayStart(new CaptureHostRecorderSnapshot(
+            ManualCaptureState.NoTarget,
+            null,
+            null,
+            ReplayStatus: new ReplayCaptureStatus(
+                ReplayCaptureState.Buffering,
+                new ManualCaptureTarget("Game", 1920, 1080),
+                null,
+                TimeSpan.FromSeconds(15),
+                4_096,
+                ReactionCameraActive: true),
+            ReactionCameraStatus: new ReactionCameraRuntimeStatus(false, true)));
+        replayStart.GetAwaiter().GetResult();
+
+        ((ICaptureLibraryAuthorityAbort)replayRecorder)
+            .AbortForCaptureLibraryAuthorityRevocationAsync()
+            .GetAwaiter()
+            .GetResult();
+        var replaySaveRejected = false;
+        try { _ = replayRecorder.SaveReplayAsync().GetAwaiter().GetResult(); }
+        catch (InvalidOperationException) { replaySaveRejected = true; }
+        replayRecorder.Dispose();
+        Assert(
+            replayClient.AbortCalls == 1 &&
+            replayClient.StopRecordingCalls == 0 &&
+            replayClient.StopReplayCalls == 0 &&
+            replayClient.SaveReplayCalls == 0 &&
+            replayRecorder.ReplayStatus is
+            {
+                State: ReplayCaptureState.Failed,
+                Target: null,
+                BufferedDuration: { Ticks: 0 },
+                ResidentBytes: 0,
+                LastResult: null
+            } &&
+            !replayRecorder.ReactionCameraStatus.IsActive &&
+            replaySaveRejected && replayProjects == 0 && replayJournals == 0,
+            "Revoking Capture-library authority during replay buffering must discard the ring and camera state without StopReplay, SaveReplay, Shutdown, or completion notification.");
     }
 
     private static void AssertSilhouettePreferencesAreSnapshottedAtStart()
@@ -509,15 +645,24 @@ internal static class ReactionCameraStartupTests
         public nint Handle => (nint)1;
     }
 
-    private sealed class DelayedCaptureHostClient : ICaptureHostRecorderClient
+    private sealed class DelayedCaptureHostClient : ICaptureHostRecorderClient,
+        ICaptureLibraryAuthorityAbort
     {
         private readonly TaskCompletionSource<CaptureHostRecorderSnapshot> _manualStart =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<CaptureHostRecorderSnapshot> _replayStart =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Task _authorityAbortTask = Task.CompletedTask;
 
         internal CaptureSettings? LastManualSettings { get; private set; }
         internal CaptureSettings? LastReplaySettings { get; private set; }
+        internal int StopRecordingCalls { get; private set; }
+        internal int StopReplayCalls { get; private set; }
+        internal int SaveReplayCalls { get; private set; }
+        internal int AbortCalls { get; private set; }
+
+        internal void SetAuthorityAbortTask(Task abortTask) =>
+            _authorityAbortTask = abortTask ?? throw new ArgumentNullException(nameof(abortTask));
 
         internal void CompleteManualStart(CaptureHostRecorderSnapshot snapshot) =>
             _manualStart.TrySetResult(snapshot);
@@ -550,8 +695,11 @@ internal static class ReactionCameraStartupTests
         }
 
         public Task<CaptureHostRecorderSnapshot> StopRecordingAsync(
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(ReadySnapshot());
+            CancellationToken cancellationToken = default)
+        {
+            StopRecordingCalls++;
+            return Task.FromResult(ReadySnapshot());
+        }
 
         public async Task<CaptureHostRecorderSnapshot> StartReplayAsync(
             CaptureSettings settings,
@@ -562,16 +710,28 @@ internal static class ReactionCameraStartupTests
         }
 
         public Task<CaptureHostRecorderSnapshot> StopReplayAsync(
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(ReadySnapshot());
+            CancellationToken cancellationToken = default)
+        {
+            StopReplayCalls++;
+            return Task.FromResult(ReadySnapshot());
+        }
 
         public Task<CaptureHostRecorderSnapshot> SaveReplayAsync(
-            CancellationToken cancellationToken = default) =>
-            Task.FromResult(ReadySnapshot());
+            CancellationToken cancellationToken = default)
+        {
+            SaveReplayCalls++;
+            return Task.FromResult(ReadySnapshot());
+        }
 
         public Task<CaptureHostRecorderSnapshot> DisableReactionCameraAsync(
             CancellationToken cancellationToken = default) =>
             Task.FromResult(ReadySnapshot());
+
+        public Task AbortForCaptureLibraryAuthorityRevocationAsync()
+        {
+            AbortCalls++;
+            return _authorityAbortTask;
+        }
 
         private static CaptureHostRecorderSnapshot ReadySnapshot() => new(
             ManualCaptureState.Ready,

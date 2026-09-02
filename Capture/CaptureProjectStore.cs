@@ -533,8 +533,11 @@ internal static class CaptureProjectStore
     internal static int RemoveOrphanedProjects(
         string libraryRoot,
         DateTimeOffset? now = null,
-        TimeSpan? minimumAge = null)
+        TimeSpan? minimumAge = null,
+        CancellationToken cancellationToken = default,
+        Action? beforeDelete = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(libraryRoot)) return 0;
         string normalizedRoot;
         DirectoryInfo projectsRoot;
@@ -574,6 +577,7 @@ internal static class CaptureProjectStore
         var removed = 0;
         foreach (var candidate in candidates)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 if (!IsProjectId(candidate.Name) ||
@@ -614,7 +618,14 @@ internal static class CaptureProjectStore
                 EnsurePathIsInside(normalizedRoot, gameplayPath, "project gameplay recording");
                 if (File.Exists(gameplayPath)) continue;
 
-                foreach (var file in entries.Cast<FileInfo>()) file.Delete();
+                foreach (var file in entries.Cast<FileInfo>())
+                {
+                    beforeDelete?.Invoke();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    file.Delete();
+                }
+                beforeDelete?.Invoke();
+                cancellationToken.ThrowIfCancellationRequested();
                 candidate.Delete(recursive: false);
                 removed++;
             }

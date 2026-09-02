@@ -273,6 +273,16 @@ internal interface ICaptureHostRecorderClient
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Emergency, non-finalizing teardown used only when Capture-library authority is revoked. This
+/// must never send Stop, Save, or Shutdown because each can promote media into an unauthorized
+/// library. Implementations permanently reject new capture work until the app is restarted.
+/// </summary>
+internal interface ICaptureLibraryAuthorityAbort
+{
+    Task AbortForCaptureLibraryAuthorityRevocationAsync();
+}
+
 internal sealed class CaptureHostCommandException : InvalidOperationException
 {
     internal CaptureHostCommandException(string message, CaptureHostMessage response)
@@ -284,7 +294,9 @@ internal sealed class CaptureHostCommandException : InvalidOperationException
     internal CaptureHostRecorderSnapshot Snapshot { get; }
 }
 
-internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposable
+internal sealed class CaptureHostClient : ICaptureHostRecorderClient,
+    ICaptureLibraryAuthorityAbort,
+    IDisposable
 {
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(8);
@@ -294,6 +306,11 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
     private CaptureHostCommandChannel? _mainChannel;
     private CaptureHostCommandChannel? _urgentChannel;
     private long _commandSequence;
+    private readonly object _authorityAbortSync = new();
+    private readonly object _authorityAdmissionSync = new();
+    private readonly object _cleanupSync = new();
+    private Task? _authorityAbortTask;
+    private int _captureLibraryAuthorityRevoked;
     private bool _disposed;
 
     internal CaptureHostClient(string? executablePath = null)
@@ -302,7 +319,9 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
             throw new InvalidOperationException("ClipCord could not locate its executable."));
     }
 
-    private bool IsHostProcessRunning => !_disposed && IsProcessRunning(_process);
+    private bool IsHostProcessRunning => !_disposed &&
+        Volatile.Read(ref _captureLibraryAuthorityRevoked) == 0 &&
+        IsProcessRunning(_process);
 
     private bool IsMainChannelRunning => IsHostProcessRunning &&
         _mainChannel is { IsConnected: true };
@@ -312,10 +331,11 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
 
     internal async Task<CaptureHostStatus> EnsureReadyAsync(CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfUnavailable();
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfUnavailable();
             if (IsRunning)
             {
                 try
@@ -430,7 +450,7 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
         CaptureHostMessage request,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfUnavailable();
         var action = CaptureHostUrgentChannelPolicy.GetAction(
             IsHostProcessRunning,
             _mainChannel is { IsConnected: true },
@@ -452,17 +472,23 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
 
         try
         {
-            var urgentChannel = _urgentChannel ??
-                throw new InvalidOperationException(
-                    "The ClipCord capture host urgent control channel is not connected.");
-            // Once the privacy command enters its dedicated channel, finish the bounded exchange
-            // even if the caller cancels. This prevents an unread stale response from poisoning a
-            // later off request and keeps the device-release result truthful.
-            var response = await urgentChannel.SendAsync(
-                request,
-                TimeSpan.FromSeconds(15),
-                cancellationToken,
-                honorCallerCancellationAfterAdmission: false).ConfigureAwait(false);
+            Task<CaptureHostMessage> exchange;
+            lock (_authorityAdmissionSync)
+            {
+                ThrowIfUnavailable();
+                var urgentChannel = _urgentChannel ??
+                    throw new InvalidOperationException(
+                        "The ClipCord capture host urgent control channel is not connected.");
+                // Once the privacy command enters its dedicated channel, finish the bounded
+                // exchange even if the caller cancels. The admission lock makes the authority
+                // latch and the first write mutually exclusive.
+                exchange = urgentChannel.SendAsync(
+                    request,
+                    TimeSpan.FromSeconds(15),
+                    cancellationToken,
+                    honorCallerCancellationAfterAdmission: false);
+            }
+            var response = await exchange.ConfigureAwait(false);
             if (response.AppliedReactionCameraOffSequence < request.CommandSequence)
             {
                 throw new InvalidDataException(
@@ -486,9 +512,19 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
 
     internal async Task StopAsync(CancellationToken cancellationToken = default)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0)
+        {
+            await AbortForCaptureLibraryAuthorityRevocationAsync().ConfigureAwait(false);
+            return;
+        }
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0)
+            {
+                await AbortForCaptureLibraryAuthorityRevocationAsync().ConfigureAwait(false);
+                return;
+            }
             if (_process is null)
             {
                 CleanupCore(terminateProcess: false);
@@ -529,6 +565,7 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
 
     private async Task<CaptureHostStatus> StartCoreAsync(CancellationToken cancellationToken)
     {
+        ThrowIfUnavailable();
         if (!File.Exists(_executablePath))
         {
             throw new FileNotFoundException("The ClipCord capture-host executable was not found.", _executablePath);
@@ -575,24 +612,40 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
         CaptureHostCommandChannel? urgentChannel = null;
         try
         {
-            process = Process.Start(startInfo) ??
-                throw new InvalidOperationException("Windows did not start the ClipCord capture host.");
+            lock (_authorityAdmissionSync)
+            {
+                ThrowIfUnavailable();
+                process = Process.Start(startInfo) ??
+                    throw new InvalidOperationException("Windows did not start the ClipCord capture host.");
+                // Publish ownership in the same admission boundary as Process.Start. A completed
+                // authority abort must never miss a child that is still connecting its pipes.
+                _process = process;
+            }
             using var startupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startupCancellation.CancelAfter(StartupTimeout);
             await Task.WhenAll(
                     pipe.WaitForConnectionAsync(startupCancellation.Token),
                     urgentPipe.WaitForConnectionAsync(startupCancellation.Token))
                 .ConfigureAwait(false);
-            mainChannel = new CaptureHostCommandChannel(pipe, process.Id);
-            pipe = null;
-            urgentChannel = new CaptureHostCommandChannel(urgentPipe, process.Id);
-            urgentPipe = null;
-            _mainChannel = mainChannel;
-            _urgentChannel = urgentChannel;
-            _process = process;
-            mainChannel = null;
-            urgentChannel = null;
-            process = null;
+            lock (_authorityAdmissionSync)
+            {
+                ThrowIfUnavailable();
+                if (!ReferenceEquals(_process, process))
+                {
+                    throw new InvalidOperationException(
+                        "The ClipCord capture host changed while it was starting.");
+                }
+                mainChannel = new CaptureHostCommandChannel(pipe, process.Id);
+                pipe = null;
+                urgentChannel = new CaptureHostCommandChannel(urgentPipe, process.Id);
+                urgentPipe = null;
+                _mainChannel = mainChannel;
+                _urgentChannel = urgentChannel;
+                mainChannel = null;
+                urgentChannel = null;
+                process = null;
+            }
+            ThrowIfUnavailable();
             return ToStatus(await SendCoreAsync(
                 NewRequest(CaptureHostProtocol.Hello), startupCancellation.Token).ConfigureAwait(false));
         }
@@ -629,25 +682,30 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
         CaptureHostMessage request,
         CancellationToken cancellationToken)
     {
-        if (!IsHostProcessRunning ||
-            _mainChannel is not { IsConnected: true } mainChannel)
+        Task<CaptureHostMessage> exchange;
+        lock (_authorityAdmissionSync)
         {
-            throw new InvalidOperationException("The ClipCord capture host is not connected.");
-        }
+            ThrowIfUnavailable();
+            if (!IsHostProcessRunning ||
+                _mainChannel is not { IsConnected: true } mainChannel)
+            {
+                throw new InvalidOperationException("The ClipCord capture host is not connected.");
+            }
 
-        var timeout = request.Type switch
-        {
-            CaptureHostProtocol.SelectTarget => TimeSpan.FromMinutes(5),
-            CaptureHostProtocol.StartRecording => TimeSpan.FromMinutes(2),
-            CaptureHostProtocol.StopRecording => TimeSpan.FromMinutes(2),
-            CaptureHostProtocol.StartReplay => TimeSpan.FromMinutes(2),
-            CaptureHostProtocol.StopReplay => TimeSpan.FromMinutes(2),
-            CaptureHostProtocol.SaveReplay => TimeSpan.FromMinutes(2),
-            CaptureHostProtocol.Shutdown => TimeSpan.FromSeconds(10),
-            _ => TimeSpan.FromSeconds(3)
-        };
-        return await mainChannel.SendAsync(request, timeout, cancellationToken)
-            .ConfigureAwait(false);
+            var timeout = request.Type switch
+            {
+                CaptureHostProtocol.SelectTarget => TimeSpan.FromMinutes(5),
+                CaptureHostProtocol.StartRecording => TimeSpan.FromMinutes(2),
+                CaptureHostProtocol.StopRecording => TimeSpan.FromMinutes(2),
+                CaptureHostProtocol.StartReplay => TimeSpan.FromMinutes(2),
+                CaptureHostProtocol.StopReplay => TimeSpan.FromMinutes(2),
+                CaptureHostProtocol.SaveReplay => TimeSpan.FromMinutes(2),
+                CaptureHostProtocol.Shutdown => TimeSpan.FromSeconds(10),
+                _ => TimeSpan.FromSeconds(3)
+            };
+            exchange = mainChannel.SendAsync(request, timeout, cancellationToken);
+        }
+        return await exchange.ConfigureAwait(false);
     }
 
     private static CaptureHostMessage NewRequest(string type) =>
@@ -667,27 +725,133 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
         catch (InvalidOperationException) { return false; }
     }
 
+    public Task AbortForCaptureLibraryAuthorityRevocationAsync()
+    {
+        lock (_authorityAbortSync)
+        {
+            if (_authorityAbortTask is null ||
+                _authorityAbortTask.IsFaulted ||
+                _authorityAbortTask.IsCanceled)
+            {
+                try
+                {
+                    lock (_authorityAdmissionSync)
+                    {
+                        // The authority latch and process-tree termination request are
+                        // synchronous with command admission. No Stop/Save/Shutdown write can
+                        // enter a pipe after this latch and before a deferred worker gets CPU.
+                        Interlocked.Exchange(ref _captureLibraryAuthorityRevoked, 1);
+                        CleanupCore(terminateProcess: true);
+                    }
+                    _authorityAbortTask = Task.CompletedTask;
+                }
+                catch (Exception exception)
+                {
+                    _authorityAbortTask = Task.FromException(exception);
+                }
+            }
+            return _authorityAbortTask;
+        }
+    }
+
+    private void ThrowIfUnavailable()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0)
+        {
+            throw new InvalidOperationException(
+                "Capture-library authority was revoked. Restart ClipCord after restoring the authorized library.");
+        }
+    }
+
     private void CleanupCore(bool terminateProcess)
     {
-        var urgentChannel = Interlocked.Exchange(ref _urgentChannel, null);
-        var mainChannel = Interlocked.Exchange(ref _mainChannel, null);
-        var process = Interlocked.Exchange(ref _process, null);
-        urgentChannel?.Dispose();
-        mainChannel?.Dispose();
-        if (process is null) return;
-        if (terminateProcess && IsProcessRunning(process))
+        lock (_cleanupSync)
         {
-            try { process.Kill(entireProcessTree: false); }
-            catch (InvalidOperationException) { }
+            var process = Volatile.Read(ref _process);
+            if (terminateProcess && IsProcessRunning(process) &&
+                !TryTerminateAndJoin(process!))
+            {
+                // Retain both channels and the Process object so a subsequent authority-abort or
+                // shutdown attempt can retry. Closing the main pipe while the child is alive is
+                // forbidden: EOF asks the child to exit normally, and normal disposal finalizes an
+                // active manual recording.
+                throw new InvalidOperationException(
+                    "ClipCord could not terminate its isolated capture worker without finalizing media.");
+            }
+
+            var urgentChannel = Interlocked.Exchange(ref _urgentChannel, null);
+            var mainChannel = Interlocked.Exchange(ref _mainChannel, null);
+            process = Interlocked.Exchange(ref _process, null);
+            urgentChannel?.Dispose();
+            mainChannel?.Dispose();
+            process?.Dispose();
+        }
+    }
+
+    private static bool TryTerminateAndJoin(Process process)
+    {
+        if (!IsProcessRunning(process)) return true;
+        var terminationRequested = false;
+        try
+        {
+            process.Kill(entireProcessTree: true);
+            terminationRequested = true;
+        }
+        catch (InvalidOperationException) when (!IsProcessRunning(process))
+        {
+            return true;
+        }
+        catch (System.ComponentModel.Win32Exception) { }
+
+        if (!terminationRequested && IsProcessRunning(process))
+        {
+            try
+            {
+                process.Kill(entireProcessTree: false);
+                terminationRequested = true;
+            }
+            catch (InvalidOperationException) when (!IsProcessRunning(process))
+            {
+                return true;
+            }
             catch (System.ComponentModel.Win32Exception) { }
         }
-        process.Dispose();
+        if (!terminationRequested) return !IsProcessRunning(process);
+
+        try
+        {
+            if (process.WaitForExit((int)ShutdownTimeout.TotalMilliseconds)) return true;
+        }
+        catch (ObjectDisposedException) { return true; }
+        catch (InvalidOperationException) { return true; }
+
+        if (!IsProcessRunning(process)) return true;
+        try
+        {
+            process.Kill(entireProcessTree: false);
+            return process.WaitForExit((int)ShutdownTimeout.TotalMilliseconds) ||
+                !IsProcessRunning(process);
+        }
+        catch (ObjectDisposedException) { return true; }
+        catch (InvalidOperationException) { return true; }
+        catch (System.ComponentModel.Win32Exception) { return !IsProcessRunning(process); }
     }
 
     public void Dispose()
     {
         if (_disposed) return;
-        try { StopAsync().GetAwaiter().GetResult(); }
+        try
+        {
+            if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0)
+            {
+                AbortForCaptureLibraryAuthorityRevocationAsync().GetAwaiter().GetResult();
+            }
+            else
+            {
+                StopAsync().GetAwaiter().GetResult();
+            }
+        }
         catch (Exception exception)
         {
             Log.Error("ClipCord could not stop its isolated capture worker cleanly.", exception);
@@ -695,8 +859,25 @@ internal sealed class CaptureHostClient : ICaptureHostRecorderClient, IDisposabl
         finally
         {
             _disposed = true;
-            CleanupCore(terminateProcess: true);
-            _gate.Dispose();
+            try
+            {
+                CleanupCore(terminateProcess: true);
+            }
+            catch (Exception exception)
+            {
+                // An authority abort already reported a failure to its caller. Dispose must not
+                // replace that result while still preserving the live Process/channels for any
+                // final retry made by the application shutdown boundary.
+                Log.Error("ClipCord could not finish terminating its isolated capture worker.", exception);
+            }
+            // A hard authority abort deliberately bypasses this gate so an admitted command can
+            // unwind after the child has exited and its pipes close. Leave the semaphore for GC
+            // in that case rather
+            // than disposing it underneath the command's finally/release path.
+            if (Volatile.Read(ref _captureLibraryAuthorityRevoked) == 0)
+            {
+                _gate.Dispose();
+            }
         }
     }
 }

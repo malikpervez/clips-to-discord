@@ -57,14 +57,14 @@ internal sealed class ClipPlayerView : UserControl
         }
         _clip = clip;
         _favoriteOwnerFileName = string.IsNullOrWhiteSpace(favoriteOwnerFileName)
-            ? clip.FileName
+            ? clip.Title
             : favoriteOwnerFileName;
         _effectiveDpiForTests = effectiveDpiForTests;
         _preparer = preparer ?? new ClipPlaybackPreparer();
         _isFavorite = isFavorite;
         _setFavorite = setFavorite;
         Name = "ClipPlayerView";
-        AccessibleName = $"Play {clip.FileName}";
+        AccessibleName = $"Play {clip.Title}";
         Dock = DockStyle.Fill;
         BackColor = ClipCordTheme.Shell;
         Font = ClipCordTheme.InterfaceFont(9.5f);
@@ -219,7 +219,7 @@ internal sealed class ClipPlayerView : UserControl
         var title = new Label
         {
             Name = "ClipPlayerTitle",
-            Text = _clip.FileName,
+            Text = _clip.Title,
             AutoSize = false,
             AutoEllipsis = true,
             Dock = DockStyle.Fill,

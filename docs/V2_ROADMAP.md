@@ -148,6 +148,74 @@ soak tests remain phase gates before release.
 - Transforms: trim, reframe, silhouette, audio mix, captions, and compression.
 - Actions: save locally, Discord, YouTube, and TikTok draft/direct post.
 - Begin with guided recipes; add a visual Zapier-style builder only after common recipes are known.
+- The Discord-first foundation now includes crash-safe plans, encrypted named Discord connections,
+  operator retry/approval controls, the Figma-aligned Routes editor, and an active production
+  runtime shared by ClipCord Capture and the exact SteelSeries/NVIDIA watched-folder adapters.
+- The first activation quiesces the 1.x watcher, converts its initial ignored-file baseline to
+  content-hash exclusions, commits the equivalent Discord or File into Library route, and verifies
+  that snapshot before writing durable Routing execution authority. The prepared migration and
+  authority also carry privacy-safe hashes for the exact Capture library path and native Windows
+  directory identity. Cold startup verifies strict Capture settings and both hashes before orphan
+  cleanup, journal recovery, capture-host startup, Gallery access, outbox reconciliation, or active
+  Routing work. The live process retains a no-delete handle for that directory and shares one
+  renewable permit across capture, silhouette, Gallery, planning, delivery, and filing boundaries.
+  A lifetime monitor rechecks that permit while Capture is available. Losing settings, migration,
+  authority, or native-identity evidence revokes the hotkey, aborts the isolated recorder without
+  finalizing its active clip, and pauses every downstream path before another file or outbox
+  mutation. Bound repair accepts only the exact previously authorized directory. Before any
+  binding exists, reversible Legacy mode may validate and pin a user-selected ordinary directory
+  as fresh strict settings. Both repair paths require a restart before Capture components return.
+  A Legacy library switch is rejected while recording, replay, camera, or rendition work is active;
+  the candidate is pinned and recovered before its settings and live permit replace the old root.
+  A stale reversible preparation
+  passes through an `Aborting` marker, removes only its exact migration-owned route, and can then
+  re-plan from the latest drained Legacy state. Once the marker itself is committed, it becomes a
+  no-Legacy recovery fence even if a crash happens before the separate authority write; the next
+  launch resumes Routing under that fence. Unreadable or inconsistent migration/authority evidence
+  pauses processing instead of ever falling back to the legacy watcher.
+- One process-local ownership lease and one serialized outbox executor fence both source families.
+  Startup reconciles the Capture journal before admitting new watched-folder occurrences. Watched
+  clips are committed to an immutable, source-bound journal after containment, native-file identity,
+  stability, media, and post-probe identity checks; Capture clips enter through their existing
+  atomic project journal. Both paths resolve artifacts, persist planned deliveries before sends,
+  guard physical Discord deliveries with durable receipts, and file completed work through the same
+  route lifecycle.
+- Xbox Game DVR clips synced through OneDrive are an additive named Routing source, not a replacement
+  for the SteelSeries/NVIDIA watched folder. Route setup offers From now, Last 24 hours, or Last 7
+  days, optionally narrowed to one game, and freezes the exact approved historical occurrence and
+  revision identities so a cloud folder cannot produce an accidental backlog blast. Setup enumerates
+  top-level MP4 metadata without hydrating content. Only an admitted clip is opened, copied into
+  `Library\Game\<Game>`, verified, promoted atomically, and passed through the existing route plan;
+  the OneDrive original is never moved, renamed, written, or deleted. Each named source persists its
+  native root authority before a route can bind it. Health recovery is compare-and-swap and
+  fail-closed: an unchanged authority can be rechecked, while a replaced folder retires the old
+  source and receives a new opaque source id that requires fresh route and history confirmation.
+  A supported corrupt or conflicting clip pauses only that Xbox source; the user can explicitly skip
+  the durable occurrence without changing the OneDrive original, after which later clips resume.
+- SteelSeries GG and NVIDIA can now be added as additional named Routing sources at arbitrary local
+  folder locations without changing the frozen 1.x migrated source. Registration preserves an
+  immutable metadata-only **from now on** baseline, routes bind to the exact opaque source id, and a
+  single optional supervisor scans every enabled named source through the established recorder
+  layout adapter. One unavailable or conflicting source is isolated from the others. Completed clips
+  retain the established watched-folder behavior and move into that source root's `uploaded` or
+  `local-only` archive; Activity and Gallery resolve the same durable source authority. These recorder
+  sources are bound to their saved canonical paths: reconnecting the original path can restore an
+  existing source, but choosing a different path registers a disabled replacement with a new source id
+  and baseline. It does not inherit routes or pending work from the retired source.
+- A first watched-folder comparison seam is now available but remains disabled by default. When a
+  developer explicitly selects Shadow mode, the existing legacy watcher stays the sole scanner and
+  owner: after it has accepted a stable, hashed SteelSeries or NVIDIA clip, a fail-open observer runs
+  the pure route evaluator and appends a bounded, path-free per-occurrence summary to a separate
+  shadow document. Equal content at a second path is marked as duplicate evidence without discarding
+  that occurrence's route and filing projection. Observation itself has a bounded timeout; a slow or
+  failed comparison yields to the unchanged legacy path.
+  Shadow mode cannot create production outbox work, call a provider, move or claim a file, alter the
+  legacy decision, or advertise routing source coverage. It remains a separate developer comparison
+  aid and is not part of the active runtime.
+- Active authority deliberately freezes the legacy watched root, capture-source kind, Capture
+  library path/native directory identity, upload-mode switch, and legacy webhook identity. Those
+  fields require a future explicit source/destination switch transaction; unrelated preferences
+  remain editable while Routing continues processing.
 
 ## Invariants
 

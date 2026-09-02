@@ -34,9 +34,11 @@ internal static class CaptureFoundationTests
         SilhouetteRenditionTests.Run(testRoot);
         GalleryRenditionTests.Run(testRoot);
         AssertOutputPolicy(testRoot);
+        AssertCaptureJournalPipeline(testRoot);
         AssertReplaySaveFailureCleanup(testRoot);
         AssertReplayCameraPersistenceCannotBlockGameplay(testRoot);
         AssertGallerySourceProvenance(testRoot);
+        AssertCaptureLibraryUiContainment(testRoot);
     }
 
     private static void AssertCapabilityProbeShape()
@@ -147,6 +149,230 @@ internal static class CaptureFoundationTests
             missingRootRejected = true;
         }
         Assert(missingRootRejected, "Capture must not silently redirect a missing output folder.");
+    }
+
+    private static void AssertCaptureJournalPipeline(string testRoot)
+    {
+        var root = Path.Combine(testRoot, "capture-journal-pipeline");
+        var staging = CaptureLibraryLayout.GetStagingDirectory(root);
+        var game = CaptureLibraryLayout.GetRecordingDirectory(root, "Journal Game");
+        Directory.CreateDirectory(staging);
+        Directory.CreateDirectory(game);
+        var staged = Path.Combine(staging, "journal-source.mp4");
+        var final = Path.Combine(game, "Journal Game__2026-08-27__12-00-00.mp4");
+        File.WriteAllBytes(staged, [1, 3, 5, 7, 9]);
+        var now = new DateTimeOffset(2026, 8, 27, 16, 0, 0, TimeSpan.Zero);
+        var intent = CaptureJournalPromotionIntentStore.PrepareOriginalAsync(
+                root,
+                staged,
+                final,
+                CaptureJournalSourceKind.InstantReplay,
+                "Journal Game",
+                now,
+                TimeSpan.FromSeconds(20),
+                1920,
+                1080,
+                reactionCameraRequested: false,
+                requestedRenditions: [])
+            .GetAwaiter().GetResult();
+        var promoted = CaptureJournalPromotionIntentStore.PromoteOriginalAsync(
+                root,
+                intent.ClipId)
+            .GetAwaiter().GetResult();
+        Assert(
+            promoted.Status == CaptureJournalPromotionStatus.DestinationReady &&
+            File.Exists(final) && !File.Exists(staged) &&
+            CaptureJournalStore.Load(root, intent.ClipId).Status == CaptureJournalLoadStatus.Missing,
+            "Original promotion must persist its intent before moving bytes and must not imply a journal commit.");
+
+        CaptureJournalStartupRecovery.RecoverAsync(root, now).GetAwaiter().GetResult();
+        var recovered = CaptureJournalStore.Load(root, intent.ClipId);
+        var originalValidation = recovered.Document is null
+            ? null
+            : CaptureJournalStore.ValidateArtifactAsync(root, recovered.Document.Clip.Original)
+                .GetAwaiter().GetResult();
+        Assert(
+            recovered.LoadedFromDisk &&
+            recovered.Document?.State == CaptureJournalState.OriginalCommitted &&
+            originalValidation?.Status == CaptureJournalArtifactValidationStatus.Valid &&
+            (CaptureJournalPromotionIntentStore.InspectOriginalAsync(root, intent.ClipId)
+                .GetAwaiter().GetResult()).Status == CaptureJournalPromotionStatus.Missing,
+            "Startup recovery must finish move-before-journal crash state and clean only the proven intent.");
+
+        var secondStage = Path.Combine(staging, "normal-source.mp4");
+        var secondFinal = Path.Combine(game, "Journal Game__2026-08-27__12-00-01.mp4");
+        File.WriteAllBytes(secondStage, [2, 4, 6, 8]);
+        var settings = CaptureSettings.Default with
+        {
+            LibraryRoot = root,
+            RecordGameAudio = false,
+            IncludeMicrophone = false,
+            IncludeVoiceChat = false
+        };
+        var committed = CaptureJournalCaptureCommit.PromoteOriginalAsync(
+                root,
+                secondStage,
+                secondFinal,
+                CaptureJournalSourceKind.ManualCapture,
+                "Journal Game",
+                now.AddSeconds(1),
+                TimeSpan.FromSeconds(5),
+                1280,
+                720,
+                settings)
+            .GetAwaiter().GetResult();
+        Assert(
+            committed.State == CaptureJournalState.OriginalCommitted &&
+            committed.Clip.SourceKind == CaptureJournalSourceKind.ManualCapture &&
+            !committed.Clip.ReactionCameraRequested &&
+            File.Exists(secondFinal) && !File.Exists(secondStage),
+            "The live capture commit helper must atomically promote and journal original-only captures.");
+
+        var protectedToken = Guid.NewGuid().ToString("N");
+        var protectedStage = Path.Combine(staging, $"replay-save-{protectedToken}.mp4");
+        var protectedFinal = Path.Combine(
+            game,
+            "Journal Game__2026-08-27__12-00-02.mp4");
+        File.WriteAllBytes(protectedStage, [11, 12, 13, 14]);
+        File.SetLastWriteTimeUtc(protectedStage, now.AddDays(-2).UtcDateTime);
+        var protectedIntent = CaptureJournalPromotionIntentStore.PrepareOriginalAsync(
+                root,
+                protectedStage,
+                protectedFinal,
+                CaptureJournalSourceKind.InstantReplay,
+                "Journal Game",
+                now.AddDays(-2),
+                TimeSpan.FromSeconds(8),
+                1280,
+                720,
+                reactionCameraRequested: false,
+                requestedRenditions: [],
+                now: now.AddDays(-2))
+            .GetAwaiter().GetResult();
+        var orphanCleanupCount = CaptureStagingRecovery.RemoveOrphanedManualCaptures(
+            root,
+            now,
+            TimeSpan.FromHours(24));
+        Assert(
+            orphanCleanupCount == 0 && File.Exists(protectedStage) &&
+            CaptureJournalPromotionIntentStore.IsOriginalStageProtected(root, protectedStage),
+            "Staging cleanup must preserve the only MP4 owned by a durable original-promotion intent.");
+        CaptureJournalStartupRecovery.RecoverAsync(root, now).GetAwaiter().GetResult();
+        Assert(
+            File.Exists(protectedFinal) && !File.Exists(protectedStage) &&
+            CaptureJournalStore.Load(root, protectedIntent.ClipId).LoadedFromDisk &&
+            (CaptureJournalPromotionIntentStore.InspectOriginalAsync(root, protectedIntent.ClipId)
+                .GetAwaiter().GetResult()).Status == CaptureJournalPromotionStatus.Missing,
+            "A stage protected from orphan cleanup must remain recoverable into its exact final journal.");
+
+        var freshCreatedUtc = now.AddMinutes(1);
+        var freshStage = Path.Combine(staging, "fresh-camera-source.mp4");
+        var freshFinal = Path.Combine(game, "Journal Game__2026-08-27__12-00-03.mp4");
+        File.WriteAllBytes(freshStage, [21, 22, 23, 24]);
+        var freshIntent = CaptureJournalPromotionIntentStore.PrepareOriginalAsync(
+                root,
+                freshStage,
+                freshFinal,
+                CaptureJournalSourceKind.ManualCapture,
+                "Journal Game",
+                freshCreatedUtc,
+                TimeSpan.FromSeconds(9),
+                1920,
+                1080,
+                reactionCameraRequested: true,
+                requestedRenditions: [CaptureJournalArtifactKinds.Landscape],
+                now: freshCreatedUtc)
+            .GetAwaiter().GetResult();
+        _ = CaptureJournalPromotionIntentStore.PromoteOriginalAsync(root, freshIntent.ClipId)
+            .GetAwaiter().GetResult();
+        _ = CaptureJournalPromotionIntentStore.CommitOriginalAsync(
+                root,
+                freshIntent.ClipId,
+                now: freshCreatedUtc)
+            .GetAwaiter().GetResult();
+        CaptureJournalPromotionIntentStore.CompleteOriginalAsync(root, freshIntent.ClipId)
+            .GetAwaiter().GetResult();
+
+        var abandonedCreatedUtc = now.AddMinutes(-1);
+        var abandonedStage = Path.Combine(staging, "abandoned-camera-source.mp4");
+        var abandonedFinal = Path.Combine(game, "Journal Game__2026-08-27__12-00-04.mp4");
+        File.WriteAllBytes(abandonedStage, [31, 32, 33, 34]);
+        var abandonedIntent = CaptureJournalPromotionIntentStore.PrepareOriginalAsync(
+                root,
+                abandonedStage,
+                abandonedFinal,
+                CaptureJournalSourceKind.ManualCapture,
+                "Journal Game",
+                abandonedCreatedUtc,
+                TimeSpan.FromSeconds(10),
+                1920,
+                1080,
+                reactionCameraRequested: true,
+                requestedRenditions: [CaptureJournalArtifactKinds.Landscape],
+                now: abandonedCreatedUtc)
+            .GetAwaiter().GetResult();
+        _ = CaptureJournalPromotionIntentStore.PromoteOriginalAsync(root, abandonedIntent.ClipId)
+            .GetAwaiter().GetResult();
+        _ = CaptureJournalPromotionIntentStore.CommitOriginalAsync(
+                root,
+                abandonedIntent.ClipId,
+                now: abandonedCreatedUtc)
+            .GetAwaiter().GetResult();
+        CaptureJournalPromotionIntentStore.CompleteOriginalAsync(root, abandonedIntent.ClipId)
+            .GetAwaiter().GetResult();
+
+        CaptureJournalStartupRecovery.RecoverAsync(root, now).GetAwaiter().GetResult();
+        var freshAfterRecovery = CaptureJournalStore.Load(root, freshIntent.ClipId).Document;
+        var abandonedAfterRecovery = CaptureJournalStore.Load(root, abandonedIntent.ClipId).Document;
+        Assert(
+            freshAfterRecovery?.State == CaptureJournalState.OriginalCommitted &&
+            abandonedAfterRecovery?.State == CaptureJournalState.RenditionsFailed &&
+            abandonedAfterRecovery.FailureCode == "camera-layer-unavailable",
+            "Recovery must leave current-process camera commits nonterminal while failing a genuinely abandoned pre-process record.");
+
+        var cameraStage = Path.Combine(staging, "fresh-camera-layer.mp4");
+        File.WriteAllBytes(cameraStage, [41, 42, 43, 44]);
+        var composition = CaptureCompositionSnapshotFactory.Create(
+            CaptureSettings.Default with { LibraryRoot = root },
+            freshFinal,
+            mirrorCamera: true,
+            freshCreatedUtc);
+        var cameraProject = CaptureProjectStore.SaveReactionCameraLayerAsync(
+                root,
+                freshFinal,
+                cameraStage,
+                TimeSpan.FromSeconds(100),
+                TimeSpan.FromSeconds(100.1),
+                TimeSpan.FromSeconds(9),
+                mirrorCamera: true,
+                composition,
+                freshCreatedUtc)
+            .GetAwaiter().GetResult();
+        var cameraFinalized = CaptureJournalCaptureCommit.FinalizeCameraAsync(
+                root,
+                freshIntent.ClipId,
+                cameraProject)
+            .GetAwaiter().GetResult();
+        Assert(
+            cameraFinalized.State == CaptureJournalState.CameraPending &&
+            cameraFinalized.CameraPresent,
+            "A camera project committed after concurrent recovery must still attach to its fresh journal.");
+
+        var settledWithoutState = CaptureJournalCaptureCommit.ReconcileRenditionsAsync(
+                root,
+                freshIntent.ClipId,
+                processingSettled: true)
+            .GetAwaiter().GetResult();
+        var settledReplay = CaptureJournalCaptureCommit.ReconcileRenditionsAsync(
+                root,
+                freshIntent.ClipId,
+                processingSettled: true)
+            .GetAwaiter().GetResult();
+        Assert(
+            settledWithoutState?.State == CaptureJournalState.RenditionsFailed &&
+            settledWithoutState.FailureCode == "rendition-processing-failed" &&
+            settledReplay?.Generation == settledWithoutState.Generation,
+            "An explicitly settled worker without usable rendition state must fail once instead of leaving CameraPending forever.");
     }
 
     private static void AssertCaptureProfiles()
@@ -4563,6 +4789,144 @@ internal static class CaptureFoundationTests
             Console.WriteLine(
                 "  (skipped the ClipCord Gallery symlink check: this Windows environment cannot create a test link)");
         }
+    }
+
+    private static void AssertCaptureLibraryUiContainment(string testRoot)
+    {
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var externalRoot = Directory.CreateDirectory(
+                    Path.Combine(testRoot, "capture-library-ui-external")).FullName;
+                var externalGame = Directory.CreateDirectory(
+                    Path.Combine(externalRoot, "local-only", "Valorant")).FullName;
+                File.WriteAllBytes(Path.Combine(externalGame, "external.mp4"), [1, 2, 3]);
+                var missingCaptureRoot = Path.Combine(testRoot, "capture-library-ui-missing");
+                var externalSettings = AppSettings.Empty with
+                {
+                    ClipsFolder = externalRoot,
+                    StartWithWindows = false
+                };
+                var captureSettings = CaptureSettings.Default with
+                {
+                    LibraryRoot = missingCaptureRoot
+                };
+
+                using (var capture = new CaptureView(
+                           externalSettings,
+                           captureSettings,
+                           engineAvailable: true,
+                           captureLibraryAccessAllowed: () => false))
+                {
+                    var open = FindControl(capture, "OpenCaptureFolderButton");
+                    var change = FindControl(capture, "ChangeCaptureFolderButton");
+                    var replay = FindControl(capture, "InstantReplayToggle");
+                    Assert(
+                        open is { Enabled: false } &&
+                        change is { Enabled: false } &&
+                        replay is { Enabled: false },
+                        "Denied Capture-library access must disable Capture and root actions when no repair callback exists.");
+
+                    var openMethod = typeof(CaptureView).GetMethod(
+                        "OpenLibraryRoot",
+                        System.Reflection.BindingFlags.Instance |
+                        System.Reflection.BindingFlags.NonPublic) ??
+                        throw new InvalidOperationException(
+                            "CaptureView.OpenLibraryRoot was not found for the containment probe.");
+                    openMethod.Invoke(capture, [null, EventArgs.Empty]);
+                    Assert(
+                        !Directory.Exists(missingCaptureRoot),
+                        "Denied Open folder must not create or otherwise touch a missing Capture library root.");
+                }
+
+                using (var repairableCapture = new CaptureView(
+                           externalSettings,
+                           captureSettings,
+                           engineAvailable: true,
+                           captureLibraryAccessAllowed: () => false,
+                           repairCaptureLibraryRoot: _ => false))
+                {
+                    var change = FindControl(repairableCapture, "ChangeCaptureFolderButton");
+                    Assert(
+                        change is { Enabled: true, Text: "Restore folder", AccessibleName: "Restore folder" },
+                        "A denied Capture view may expose only the explicitly supplied Restore folder repair action.");
+                }
+
+                using (var form = new SettingsForm(
+                           externalSettings,
+                           initialPage: SettingsPage.Capture,
+                           captureSettings: captureSettings,
+                           captureEngineAvailable: true,
+                           captureLibraryAccessAllowed: () => false))
+                {
+                    Assert(
+                        FindControl(form, "OpenCaptureFolderButton") is { Enabled: false } &&
+                        FindControl(form, "InstantReplayToggle") is { Enabled: false },
+                        "SettingsForm must thread denied Capture-library access into its Capture page.");
+                }
+
+                string? scannedExternalRoot = null;
+                string? scannedCaptureRoot = "not-called";
+                var externalClipsSeen = 0;
+                using var scanObserved = new ManualResetEventSlim();
+                using var gallery = new GalleryView(
+                    externalRoot,
+                    captureLibraryRoot: missingCaptureRoot,
+                    captureLibraryAccessAllowed: () => false,
+                    scanCatalog: (folder, cancellationToken, captureRoot, source) =>
+                    {
+                        scannedExternalRoot = folder;
+                        scannedCaptureRoot = captureRoot;
+                        var snapshot = GalleryCatalog.Scan(
+                            folder,
+                            cancellationToken,
+                            captureLibraryRoot: captureRoot,
+                            externalSource: source);
+                        externalClipsSeen = snapshot.Games
+                            .SelectMany(game => game.Clips)
+                            .Count(clip => clip.Source != GalleryClipSource.ClipCord);
+                        scanObserved.Set();
+                        return snapshot;
+                    });
+                gallery.Activate(externalRoot);
+                Assert(
+                    scanObserved.Wait(TimeSpan.FromSeconds(5)),
+                    "The denied Gallery scan containment probe did not complete.");
+                Assert(
+                    scannedExternalRoot == externalRoot &&
+                    scannedCaptureRoot is null &&
+                    externalClipsSeen == 1,
+                    "Denied Gallery access must omit the Capture root while retaining external uploaded/local-only discovery.");
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        Assert(
+            thread.Join(TimeSpan.FromSeconds(15)),
+            "Capture-library UI containment tests must complete without hanging the STA thread.");
+        if (failure is not null)
+        {
+            throw new InvalidOperationException(
+                "Capture-library UI containment failed.",
+                failure);
+        }
+    }
+
+    private static Control? FindControl(Control root, string name)
+    {
+        if (root.Name.Equals(name, StringComparison.Ordinal)) return root;
+        foreach (Control child in root.Controls)
+        {
+            var found = FindControl(child, name);
+            if (found is not null) return found;
+        }
+        return null;
     }
 
     private static void Assert(bool condition, string message)

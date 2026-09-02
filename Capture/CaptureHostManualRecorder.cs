@@ -19,11 +19,42 @@ internal interface ICaptureProjectCompletionSource
     event EventHandler<CaptureProjectCommittedEventArgs>? ProjectCommitted;
 }
 
+internal sealed class CaptureJournalChangedEventArgs : EventArgs
+{
+    internal CaptureJournalChangedEventArgs(
+        string libraryRoot,
+        string clipId,
+        long generation,
+        CaptureJournalState state)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(libraryRoot);
+        if (!CaptureJournalModel.IsClipId(clipId))
+            throw new ArgumentException("The capture journal clip id is invalid.", nameof(clipId));
+        if (generation <= 0) throw new ArgumentOutOfRangeException(nameof(generation));
+        LibraryRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(libraryRoot));
+        ClipId = clipId;
+        Generation = generation;
+        State = state;
+    }
+
+    internal string LibraryRoot { get; }
+    internal string ClipId { get; }
+    internal long Generation { get; }
+    internal CaptureJournalState State { get; }
+}
+
+internal interface ICaptureJournalChangeSource
+{
+    event EventHandler<CaptureJournalChangedEventArgs>? JournalChanged;
+}
+
 internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutomaticCaptureTargetRecorder,
-    IReplayCaptureController, IReactionCameraController, ICaptureProjectCompletionSource
+    IReplayCaptureController, IReactionCameraController, ICaptureProjectCompletionSource,
+    ICaptureJournalChangeSource, ICaptureLibraryAuthorityAbort
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
     private readonly ICaptureHostRecorderClient _client;
+    private readonly ICaptureLibraryAuthorityAbort _authorityAbort;
     private readonly string _silhouetteSettingsDirectory;
     private readonly object _gate = new();
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -37,13 +68,18 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
     private string? _manualCaptureLibraryRoot;
     private string? _replayCaptureLibraryRoot;
     private int _polling;
-    private bool _disposed;
+    private int _captureLibraryAuthorityRevoked;
+    private volatile bool _disposed;
 
     internal CaptureHostManualRecorder(
         ICaptureHostRecorderClient client,
         string? silhouetteSettingsDirectory = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        _authorityAbort = client as ICaptureLibraryAuthorityAbort ??
+            throw new ArgumentException(
+                "The isolated capture client must support fail-closed authority revocation.",
+                nameof(client));
         var settingsDirectory = silhouetteSettingsDirectory ?? SettingsStore.DataDirectory;
         ArgumentException.ThrowIfNullOrWhiteSpace(settingsDirectory);
         _silhouetteSettingsDirectory = Path.GetFullPath(settingsDirectory);
@@ -61,6 +97,7 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
     public event EventHandler? ReplayStateChanged;
     public event EventHandler? ReactionCameraStateChanged;
     public event EventHandler<CaptureProjectCommittedEventArgs>? ProjectCommitted;
+    public event EventHandler<CaptureJournalChangedEventArgs>? JournalChanged;
     public ReplayCaptureStatus ReplayStatus { get { lock (_gate) return _replayStatus; } }
     public ReactionCameraRuntimeStatus ReactionCameraStatus
     {
@@ -81,7 +118,9 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
             var snapshot = await _client.SelectTargetAsync(
                 owner.Handle,
                 _lifetimeCancellation.Token).ConfigureAwait(false);
+            RequireAuthorityAfterHostResponse();
             Apply(snapshot);
+            RequireAuthorityAfterHostResponse();
             return snapshot.Target;
         }
         catch (CaptureHostCommandException exception)
@@ -114,7 +153,9 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
         {
             var snapshot = await _client.DetectTargetAsync(operationCancellation.Token)
                 .ConfigureAwait(false);
+            RequireAuthorityAfterHostResponse();
             Apply(snapshot);
+            RequireAuthorityAfterHostResponse();
             return snapshot.Target;
         }
         catch (CaptureHostCommandException exception)
@@ -157,8 +198,13 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
             var snapshot = await _client.StartRecordingAsync(
                 normalized,
                 operationCancellation.Token).ConfigureAwait(false);
-            lock (_gate) _manualCaptureLibraryRoot = normalized.LibraryRoot;
+            lock (_gate)
+            {
+                RequireAuthorityAfterHostResponse();
+                _manualCaptureLibraryRoot = normalized.LibraryRoot;
+            }
             Apply(snapshot);
+            RequireAuthorityAfterHostResponse();
             appliedHostSnapshot = true;
         }
         catch (CaptureHostCommandException exception)
@@ -205,8 +251,13 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
             var snapshot = await _client.StartReplayAsync(
                 normalized,
                 operationCancellation.Token).ConfigureAwait(false);
-            lock (_gate) _replayCaptureLibraryRoot = normalized.LibraryRoot;
+            lock (_gate)
+            {
+                RequireAuthorityAfterHostResponse();
+                _replayCaptureLibraryRoot = normalized.LibraryRoot;
+            }
             Apply(snapshot);
+            RequireAuthorityAfterHostResponse();
             appliedHostSnapshot = true;
         }
         catch (CaptureHostCommandException exception)
@@ -244,8 +295,13 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
         {
             var snapshot = await _client.StopReplayAsync(operationCancellation.Token)
                 .ConfigureAwait(false);
-            lock (_gate) _replayCaptureLibraryRoot = null;
+            lock (_gate)
+            {
+                RequireAuthorityAfterHostResponse();
+                _replayCaptureLibraryRoot = null;
+            }
             Apply(snapshot);
+            RequireAuthorityAfterHostResponse();
         }
         catch (CaptureHostCommandException exception)
         {
@@ -274,9 +330,15 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
         {
             var snapshot = await _client.SaveReplayAsync(operationCancellation.Token).ConfigureAwait(false);
             string? libraryRoot;
-            lock (_gate) libraryRoot = _replayCaptureLibraryRoot;
+            lock (_gate)
+            {
+                RequireAuthorityAfterHostResponse();
+                libraryRoot = _replayCaptureLibraryRoot;
+            }
             Apply(snapshot);
+            RaiseJournalChanged(libraryRoot, snapshot.Result);
             RaiseProjectCommitted(libraryRoot, snapshot.Result);
+            RequireAuthorityAfterHostResponse();
             return snapshot.Result;
         }
         catch (CaptureHostCommandException exception)
@@ -303,8 +365,11 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
             _lifetimeCancellation.Token);
         try
         {
-            Apply(await _client.DisableReactionCameraAsync(operationCancellation.Token)
-                .ConfigureAwait(false));
+            var snapshot = await _client.DisableReactionCameraAsync(operationCancellation.Token)
+                .ConfigureAwait(false);
+            RequireAuthorityAfterHostResponse();
+            Apply(snapshot);
+            RequireAuthorityAfterHostResponse();
         }
         catch (CaptureHostCommandException exception)
         {
@@ -333,11 +398,14 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
             string? libraryRoot;
             lock (_gate)
             {
+                RequireAuthorityAfterHostResponse();
                 libraryRoot = _manualCaptureLibraryRoot;
                 _manualCaptureLibraryRoot = null;
             }
             Apply(snapshot);
+            RaiseJournalChanged(libraryRoot, snapshot.Result);
             RaiseProjectCommitted(libraryRoot, snapshot.Result);
+            RequireAuthorityAfterHostResponse();
             return snapshot.Result;
         }
         catch (CaptureHostCommandException exception)
@@ -358,7 +426,8 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
     private async Task PollStatusAsync()
     {
         var cameraStatus = ReactionCameraStatus;
-        if (_disposed || (State == ManualCaptureState.NoTarget &&
+        if (_disposed || Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0 ||
+            (State == ManualCaptureState.NoTarget &&
             ReplayStatus.State == ReplayCaptureState.Off &&
             !cameraStatus.IsActive &&
             !cameraStatus.IsStarting &&
@@ -371,6 +440,7 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
         {
             var snapshot = await _client.GetRecorderStatusAsync(_lifetimeCancellation.Token)
                 .ConfigureAwait(false);
+            RequireAuthorityAfterHostResponse();
             Apply(snapshot);
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested) { }
@@ -398,11 +468,13 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
 
     private void Apply(CaptureHostRecorderSnapshot snapshot)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
         var changed = false;
         var replayChanged = false;
         var cameraChanged = false;
         lock (_gate)
         {
+            if (_disposed || Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
             changed = _state != snapshot.State ||
                 !Equals(_target, snapshot.Target) ||
                 !string.Equals(_lastError, snapshot.LastError, StringComparison.Ordinal);
@@ -427,8 +499,10 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
 
     private void SetLocalReplayState(ReplayCaptureState state, string? error)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
         lock (_gate)
         {
+            if (_disposed || Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
             _replayStatus = _replayStatus with { State = state, LastError = error };
         }
         ReplayStateChanged?.Invoke(this, EventArgs.Empty);
@@ -441,6 +515,7 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
 
     private void RaiseProjectCommitted(string? libraryRoot, ManualCaptureResult? result)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
         var project = result?.ReactionCameraLayer;
         if (string.IsNullOrWhiteSpace(libraryRoot) || project is null) return;
 
@@ -474,6 +549,48 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
         }
     }
 
+    private void RaiseJournalChanged(string? libraryRoot, ManualCaptureResult? result)
+    {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
+        if (string.IsNullOrWhiteSpace(libraryRoot) || result is null) return;
+        try
+        {
+            var clipId = CaptureProjectStore.CreateProjectId(libraryRoot, result.FilePath);
+            var load = CaptureJournalStore.Load(libraryRoot, clipId);
+            if (!load.LoadedFromDisk || load.Document is null)
+            {
+                Log.Error("ClipCord could not load the journal for a completed capture notification.");
+                return;
+            }
+            var eventArgs = new CaptureJournalChangedEventArgs(
+                libraryRoot,
+                clipId,
+                load.Document.Generation,
+                load.Document.State);
+            var handlers = JournalChanged;
+            if (handlers is null) return;
+            foreach (EventHandler<CaptureJournalChangedEventArgs> handler in
+                     handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(this, eventArgs);
+                }
+                catch (Exception exception)
+                {
+                    // Capture is already committed. Durable startup scanning remains the fallback.
+                    Log.Error("ClipCord could not notify a capture-journal subscriber.", exception);
+                }
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or ArgumentException or InvalidDataException or
+                NotSupportedException or PathTooLongException)
+        {
+            Log.Error("ClipCord could not prepare a capture-journal notification.", exception);
+        }
+    }
+
     private CaptureSettings SnapshotSilhouettePreferencesForStart(
         CaptureSettings settings)
     {
@@ -497,10 +614,12 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
 
     private void SetLocalReactionCameraStarting(bool manualCapture, bool requested)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
         if (!requested) return;
         bool changed;
         lock (_gate)
         {
+            if (_disposed || Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
             var updated = manualCapture
                 ? _reactionCameraStatus with
                 {
@@ -520,9 +639,11 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
 
     private void ClearLocalReactionCameraStarting(bool manualCapture)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
         bool changed;
         lock (_gate)
         {
+            if (_disposed || Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
             var updated = manualCapture
                 ? _reactionCameraStatus with { ManualCaptureStarting = false }
                 : _reactionCameraStatus with { InstantReplayStarting = false };
@@ -537,10 +658,12 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
         bool requested,
         string error)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
         if (!requested) return;
         bool changed;
         lock (_gate)
         {
+            if (_disposed || Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
             var updated = manualCapture
                 ? _reactionCameraStatus with
                 {
@@ -560,28 +683,159 @@ internal sealed class CaptureHostManualRecorder : IManualCaptureRecorder, IAutom
 
     private void SetLocalState(ManualCaptureState state, string? error)
     {
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
         lock (_gate)
         {
+            if (_disposed || Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0) return;
             _state = state;
             _lastError = error;
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+    public Task AbortForCaptureLibraryAuthorityRevocationAsync()
+    {
+        var firstRevocation = Interlocked.Exchange(
+            ref _captureLibraryAuthorityRevoked,
+            1) == 0;
+        Task abortTask;
+        try
+        {
+            // Latch the child hard-abort before notifying UI subscribers. A subscriber failure
+            // must never leave the isolated host alive long enough to interpret pipe EOF as a
+            // normal shutdown and finalize an unauthorized recording.
+            abortTask = _authorityAbort.AbortForCaptureLibraryAuthorityRevocationAsync();
+        }
+        catch (Exception exception)
+        {
+            abortTask = Task.FromException(exception);
+        }
+        if (firstRevocation)
+        {
+            const string error =
+                "Capture stopped because its library authority was revoked. No clip was saved.";
+            try
+            {
+                _lifetimeCancellation.Cancel();
+            }
+            catch (Exception exception)
+            {
+                Log.Error(
+                    "ClipCord could not cancel local capture operations after authority revocation.",
+                    exception);
+            }
+            try
+            {
+                _statusTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            }
+            catch (Exception exception)
+            {
+                Log.Error(
+                    "ClipCord could not stop local capture polling after authority revocation.",
+                    exception);
+            }
+            var stateChanged = false;
+            var replayChanged = false;
+            var cameraChanged = false;
+            try
+            {
+                lock (_gate)
+                {
+                    stateChanged = _state != ManualCaptureState.Failed ||
+                        _target is not null ||
+                        !string.Equals(_lastError, error, StringComparison.Ordinal);
+                    replayChanged = _replayStatus.State != ReplayCaptureState.Failed ||
+                        _replayStatus.Target is not null ||
+                        !string.Equals(_replayStatus.LastError, error, StringComparison.Ordinal) ||
+                        _replayStatus.BufferedDuration != TimeSpan.Zero ||
+                        _replayStatus.ResidentBytes != 0 ||
+                        _replayStatus.LastResult is not null;
+                    cameraChanged = _reactionCameraStatus !=
+                        new ReactionCameraRuntimeStatus(false, false, error);
+                    _state = ManualCaptureState.Failed;
+                    _target = null;
+                    _lastError = error;
+                    _replayStatus = new ReplayCaptureStatus(
+                        ReplayCaptureState.Failed,
+                        null,
+                        error,
+                        TimeSpan.Zero,
+                        0);
+                    _reactionCameraStatus = new ReactionCameraRuntimeStatus(
+                        false,
+                        false,
+                        error);
+                    _manualCaptureLibraryRoot = null;
+                    _replayCaptureLibraryRoot = null;
+                }
+                if (stateChanged) NotifyAuthorityRevocation(StateChanged);
+                if (replayChanged) NotifyAuthorityRevocation(ReplayStateChanged);
+                if (cameraChanged) NotifyAuthorityRevocation(ReactionCameraStateChanged);
+            }
+            catch (Exception exception)
+            {
+                Log.Error(
+                    "ClipCord could not clear local capture state after authority revocation.",
+                    exception);
+            }
+        }
+        return abortTask;
+    }
+
+    private void NotifyAuthorityRevocation(EventHandler? handlers)
+    {
+        if (handlers is null) return;
+        foreach (EventHandler handler in handlers.GetInvocationList())
+        {
+            try { handler(this, EventArgs.Empty); }
+            catch (Exception exception)
+            {
+                Log.Error(
+                    "ClipCord could not notify a Capture-library authority subscriber.",
+                    exception);
+            }
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0)
+        {
+            throw new InvalidOperationException(
+                "Capture-library authority was revoked. Restart ClipCord after restoring the authorized library.");
+        }
+    }
+
+    private void RequireAuthorityAfterHostResponse()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Volatile.Read(ref _captureLibraryAuthorityRevoked) != 0)
+        {
+            throw new InvalidOperationException(
+                "Capture-library authority was revoked before the host response could be applied.");
+        }
+    }
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _lifetimeCancellation.Cancel();
-        _statusTimer.Dispose();
         lock (_gate)
         {
+            if (_disposed) return;
+            _disposed = true;
             _manualCaptureLibraryRoot = null;
             _replayCaptureLibraryRoot = null;
         }
+        try { _lifetimeCancellation.Cancel(); }
+        catch (ObjectDisposedException) { }
+        try
+        {
+            _statusTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _statusTimer.Dispose();
+        }
+        catch (ObjectDisposedException) { }
         ProjectCommitted = null;
+        JournalChanged = null;
         ReplayStateChanged = null;
         ReactionCameraStateChanged = null;
         StateChanged = null;

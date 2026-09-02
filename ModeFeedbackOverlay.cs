@@ -30,6 +30,17 @@ internal readonly record struct ModeFeedbackPresentation(
                 "New clips stay on this PC.",
                 ModeFeedbackTone.LocalOnlyEnabled);
 
+    internal static ModeFeedbackPresentation ForRoutingLocalOnlyMode(bool enabled) =>
+        enabled
+            ? new(
+                "Local-only mode on",
+                "Future clips will stay on this PC. Existing deliveries are unchanged.",
+                ModeFeedbackTone.LocalOnlyEnabled)
+            : new(
+                "Normal routing restored",
+                "Future clips will follow your active Routes.",
+                ModeFeedbackTone.UploadsEnabled);
+
     internal static ModeFeedbackPresentation DialogOpen => new(
         "Mode unchanged",
         "Close the open ClipCord dialog before using the mode shortcut.",

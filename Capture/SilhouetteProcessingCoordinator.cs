@@ -3,6 +3,20 @@ using System.Threading.Channels;
 
 namespace ClipsToDiscord;
 
+internal sealed class SilhouetteProjectSettledEventArgs : EventArgs
+{
+    internal SilhouetteProjectSettledEventArgs(string libraryRoot, string projectId, int exitCode)
+    {
+        LibraryRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(libraryRoot));
+        ProjectId = projectId;
+        ExitCode = exitCode;
+    }
+
+    internal string LibraryRoot { get; }
+    internal string ProjectId { get; }
+    internal int ExitCode { get; }
+}
+
 /// <summary>
 /// Bridges committed capture projects to the isolated silhouette worker. The committed
 /// project directory is the durable queue; the in-memory channel is only a low-latency,
@@ -26,6 +40,8 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
     private readonly object _queueGate = new();
     private readonly object _scanGate = new();
     private readonly object _processGate = new();
+    private readonly object _retryGate = new();
+    private readonly HashSet<Task> _activeRetries = [];
     private readonly CancellationTokenSource _shutdown = new();
     private readonly SemaphoreSlim _reconciliationRequested = new(0, 1);
     private readonly Task _processingLoop;
@@ -36,6 +52,21 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
     private Process? _activeWorker;
     private int _disposeStarted;
     private int _cleanupStarted;
+
+    internal event EventHandler<SilhouetteProjectSettledEventArgs>? ProjectSettled;
+
+    internal bool IsIdle
+    {
+        get
+        {
+            if (Volatile.Read(ref _disposeStarted) != 0) return true;
+            lock (_queueGate)
+            {
+                if (_queuedOrActiveProjects.Count != 0) return false;
+            }
+            lock (_retryGate) return _activeRetries.Count == 0;
+        }
+    }
 
     internal SilhouetteProcessingCoordinator(string libraryRoot)
     {
@@ -94,7 +125,51 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
         string orientationId) =>
         RetryAsync(libraryRoot, projectId, orientationId, CancellationToken.None);
 
-    internal async Task<bool> RetryAsync(
+    internal Task<bool> RetryAsync(
+        string libraryRoot,
+        string projectId,
+        string orientationId,
+        CancellationToken cancellationToken)
+    {
+        var completion = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_retryGate)
+        {
+            if (Volatile.Read(ref _disposeStarted) != 0) return Task.FromResult(false);
+            _activeRetries.Add(completion.Task);
+        }
+        return RunTrackedRetryAsync(
+            libraryRoot,
+            projectId,
+            orientationId,
+            cancellationToken,
+            completion);
+    }
+
+    private async Task<bool> RunTrackedRetryAsync(
+        string libraryRoot,
+        string projectId,
+        string orientationId,
+        CancellationToken cancellationToken,
+        TaskCompletionSource<bool> completion)
+    {
+        try
+        {
+            return await RetryCoreAsync(
+                    libraryRoot,
+                    projectId,
+                    orientationId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            completion.TrySetResult(true);
+            lock (_retryGate) _activeRetries.Remove(completion.Task);
+        }
+    }
+
+    private async Task<bool> RetryCoreAsync(
         string libraryRoot,
         string projectId,
         string orientationId,
@@ -298,6 +373,10 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
                     Log.Error(
                         $"The isolated silhouette worker could not process project {workItem.ProjectId}.",
                         exception);
+                    // A launch failure is just as terminal for this attempt as a non-zero worker
+                    // exit. ProjectSettled lets the journal record a stable failure instead of
+                    // leaving routing work in CameraPending forever.
+                    RaiseProjectSettled(workItem, exitCode: -1);
                 }
                 finally
                 {
@@ -319,20 +398,48 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
         var startInfo = SilhouetteWorkerLaunch.CreateStartInfo(
             workItem.LibraryRoot,
             workItem.ProjectId);
-        using var process = new Process { StartInfo = startInfo };
-        if (!process.Start())
+        var process = new Process { StartInfo = startInfo };
+        try
         {
-            throw new InvalidOperationException("Windows did not start the isolated silhouette worker.");
-        }
-
-        lock (_processGate)
-        {
-            if (_disposeStarted != 0)
+            lock (_processGate)
             {
-                TryTerminate(process);
-                cancellationToken.ThrowIfCancellationRequested();
+                if (_disposeStarted != 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new ObjectDisposedException(nameof(SilhouetteProcessingCoordinator));
+                }
+                if (!process.Start())
+                {
+                    throw new InvalidOperationException(
+                        "Windows did not start the isolated silhouette worker.");
+                }
+                _activeWorker = process;
             }
-            _activeWorker = process;
+        }
+        catch
+        {
+            if (!HasExited(process))
+            {
+                // Process.Start and publication share _processGate, so this is reachable only
+                // for a failed/partial launch that never became an admitted worker.
+                _ = TryTerminateAndJoin(process);
+            }
+            if (HasExited(process)) process.Dispose();
+            throw;
+        }
+        if (Volatile.Read(ref _disposeStarted) != 0)
+        {
+            if (!TryTerminateAndJoin(process))
+            {
+                throw new InvalidOperationException(
+                    "The isolated silhouette worker did not exit during disposal.");
+            }
+            lock (_processGate)
+            {
+                if (ReferenceEquals(_activeWorker, process)) _activeWorker = null;
+            }
+            process.Dispose();
+            throw new ObjectDisposedException(nameof(SilhouetteProcessingCoordinator));
         }
         TryApplyLowPriority(process);
 
@@ -344,17 +451,26 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
                 Log.Error(
                     $"The isolated silhouette worker exited with code {process.ExitCode} for project {workItem.ProjectId}.");
             }
+            RaiseProjectSettled(workItem, process.ExitCode);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            TryTerminate(process);
+            if (!TryTerminateAndJoin(process))
+            {
+                throw new InvalidOperationException(
+                    "The isolated silhouette worker did not exit after cancellation.");
+            }
             throw;
         }
         finally
         {
-            lock (_processGate)
+            if (HasExited(process))
             {
-                if (ReferenceEquals(_activeWorker, process)) _activeWorker = null;
+                lock (_processGate)
+                {
+                    if (ReferenceEquals(_activeWorker, process)) _activeWorker = null;
+                }
+                process.Dispose();
             }
         }
     }
@@ -630,36 +746,79 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
         }
     }
 
-    private static void TryTerminate(Process process)
+    private static bool TryTerminateAndJoin(Process process)
     {
         try
         {
             if (!process.HasExited) process.Kill(entireProcessTree: true);
+            return process.WaitForExit((int)DisposeWaitTimeout.TotalMilliseconds) ||
+                HasExited(process);
         }
         catch (Exception exception) when (
-            exception is InvalidOperationException or System.ComponentModel.Win32Exception or
-                NotSupportedException)
+            exception is ObjectDisposedException or InvalidOperationException or
+                System.ComponentModel.Win32Exception or NotSupportedException)
         {
             // The worker may have exited between the state check and termination request.
+            return HasExited(process);
         }
     }
 
-    private void TryTerminateActiveWorker()
+    private static bool HasExited(Process process)
+    {
+        try { return process.HasExited; }
+        catch (ObjectDisposedException) { return true; }
+        catch (InvalidOperationException) { return true; }
+    }
+
+    private bool TryTerminateActiveWorkerAndJoin()
     {
         Process? process;
         lock (_processGate) process = _activeWorker;
-        if (process is not null) TryTerminate(process);
+        return process is null || TryTerminateAndJoin(process);
+    }
+
+    private void RaiseProjectSettled(SilhouetteProjectWorkItem workItem, int exitCode)
+    {
+        var handlers = ProjectSettled;
+        if (handlers is null) return;
+        var eventArgs = new SilhouetteProjectSettledEventArgs(
+            workItem.LibraryRoot,
+            workItem.ProjectId,
+            exitCode);
+        foreach (EventHandler<SilhouetteProjectSettledEventArgs> handler in
+                 handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, eventArgs);
+            }
+            catch (Exception exception)
+            {
+                // Worker state and output fingerprints are already durable. Subscribers are
+                // latency accelerators only; startup reconciliation remains authoritative.
+                Log.Error("ClipCord could not notify a settled silhouette subscriber.", exception);
+            }
+        }
     }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposeStarted, 1) != 0) return;
+        lock (_retryGate)
+        {
+            lock (_processGate)
+            {
+                // Disposal/revocation linearizes against both retry admission and Process.Start.
+                // A worker is therefore either published before this boundary or never launched.
+                if (Interlocked.Exchange(ref _disposeStarted, 1) != 0) return;
+            }
+        }
+        ProjectSettled = null;
         _queue.Writer.TryComplete();
         _shutdown.Cancel();
         RequestReconciliation();
-        TryTerminateActiveWorker();
+        _ = TryTerminateActiveWorkerAndJoin();
 
-        var completion = Task.WhenAll(_processingLoop, _reconciliationLoop);
+        var completion = CreateStopCompletion();
         var completed = false;
         try
         {
@@ -676,13 +835,40 @@ internal sealed class SilhouetteProcessingCoordinator : IDisposable
             return;
         }
 
-        TryTerminateActiveWorker();
+        _ = TryTerminateActiveWorkerAndJoin();
         Log.Error("The silhouette coordinator did not stop promptly; cleanup will continue in the background.");
         _ = completion.ContinueWith(
             Cleanup,
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    internal void DisposeAndRequireStopped()
+    {
+        Dispose();
+        var workerStopped = TryTerminateActiveWorkerAndJoin();
+        var completion = CreateStopCompletion();
+        var loopsStopped = completion.IsCompleted;
+        if (!loopsStopped)
+        {
+            try { loopsStopped = completion.Wait(DisposeWaitTimeout); }
+            catch (AggregateException) { loopsStopped = true; }
+        }
+        workerStopped = TryTerminateActiveWorkerAndJoin();
+        if (!loopsStopped || !workerStopped)
+        {
+            throw new InvalidOperationException(
+                "The isolated silhouette worker did not stop before Capture-library authority changed.");
+        }
+        Cleanup(completion);
+    }
+
+    private Task CreateStopCompletion()
+    {
+        Task[] retries;
+        lock (_retryGate) retries = _activeRetries.ToArray();
+        return Task.WhenAll(_processingLoop, _reconciliationLoop, Task.WhenAll(retries));
     }
 
     private void Cleanup(Task completion)

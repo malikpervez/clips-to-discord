@@ -36,6 +36,11 @@ internal sealed class GalleryView : UserControl
     private readonly IClipPlaybackPreparer _playbackPreparer;
     private readonly IGalleryThumbnailProvider _thumbnailProvider;
     private readonly IFavoritesService _favorites;
+    private readonly Func<bool> _captureLibraryAccessAllowed;
+    private readonly Func<IReadOnlyList<GalleryExternalSourceRoot>>
+        _additionalExternalRootsProvider;
+    private readonly Func<string, CancellationToken, string?, GalleryClipSource, GallerySnapshot>
+        _scanCatalog;
     private int? _effectiveDpiForTests;
     private string? _captureLibraryRoot;
     private readonly GalleryClipSource _externalClipSource;
@@ -92,7 +97,12 @@ internal sealed class GalleryView : UserControl
         IGalleryThumbnailProvider? thumbnailProvider = null,
         IFavoritesService? favorites = null,
         string? captureLibraryRoot = null,
-        ClipCaptureSource externalCaptureSource = ClipCaptureSource.SteelSeriesGg)
+        ClipCaptureSource externalCaptureSource = ClipCaptureSource.SteelSeriesGg,
+        Func<bool>? captureLibraryAccessAllowed = null,
+        Func<string, CancellationToken, string?, GalleryClipSource, GallerySnapshot>? scanCatalog = null,
+        Func<IReadOnlyList<GalleryExternalSourceRoot>>? additionalExternalRootsProvider = null,
+        Func<CancellationToken, IReadOnlyList<RoutingDeliveryHistoryItem>>?
+            captureRoutingHistory = null)
     {
         _clipsFolder = clipsFolder;
         _manualClipEditService = manualClipEditService;
@@ -101,6 +111,16 @@ internal sealed class GalleryView : UserControl
         _thumbnailProvider = thumbnailProvider ?? new GalleryThumbnailProvider();
         _favorites = favorites ?? new FavoritesService();
         _captureLibraryRoot = captureLibraryRoot;
+        _captureLibraryAccessAllowed = captureLibraryAccessAllowed ?? (() => true);
+        _additionalExternalRootsProvider = additionalExternalRootsProvider ?? (() => []);
+        _scanCatalog = scanCatalog ?? ((folder, cancellationToken, captureRoot, source) =>
+            GalleryCatalog.Scan(
+                folder,
+                cancellationToken,
+                captureLibraryRoot: captureRoot,
+                externalSource: source,
+                additionalExternalRoots: _additionalExternalRootsProvider(),
+                captureRoutingHistory: captureRoutingHistory));
         _externalClipSource = externalCaptureSource == ClipCaptureSource.Nvidia
             ? GalleryClipSource.Nvidia
             : GalleryClipSource.SteelSeriesGg;
@@ -506,14 +526,17 @@ internal sealed class GalleryView : UserControl
         SetHeader(_headingLabel.Text, "Scanning uploaded and local-only clips…");
         GallerySnapshot? snapshot = null;
         Exception? failure = null;
+        var captureLibraryRoot = HasCaptureLibraryAccess()
+            ? _captureLibraryRoot
+            : null;
         try
         {
             snapshot = await Task.Run(
-                () => GalleryCatalog.Scan(
+                () => _scanCatalog(
                     clipsFolder,
                     cancellation.Token,
-                    captureLibraryRoot: _captureLibraryRoot,
-                    externalSource: _externalClipSource),
+                    captureLibraryRoot,
+                    _externalClipSource),
                 cancellation.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -541,7 +564,9 @@ internal sealed class GalleryView : UserControl
             Log.Error("Could not refresh the clip Gallery.", failure);
             snapshot = new GallerySnapshot([], ["ClipCord could not read the clip archive."]);
         }
-        _snapshot = snapshot ?? new GallerySnapshot([], []);
+        _snapshot = HasCaptureLibraryAccess()
+            ? snapshot ?? new GallerySnapshot([], [])
+            : WithoutCaptureLibraryEntries(snapshot);
         ObserveRenditionPollResult();
         if (_screen is GalleryScreen.Editor or GalleryScreen.Player)
         {
@@ -854,7 +879,8 @@ internal sealed class GalleryView : UserControl
         foreach (var pair in _thumbnailClips.ToArray())
         {
             var tile = pair.Key;
-            if (tile.IsDisposed || tile.Disposing || tile.Width <= 0 || tile.Height <= 0 ||
+            if (!CanAccessClip(pair.Value) ||
+                tile.IsDisposed || tile.Disposing || tile.Width <= 0 || tile.Height <= 0 ||
                 _requestedThumbnailTiles.Contains(tile))
             {
                 continue;
@@ -873,6 +899,7 @@ internal sealed class GalleryView : UserControl
         CancellationTokenSource cancellation,
         int generation)
     {
+        if (!CanAccessClip(clip)) return;
         Bitmap? bitmap = null;
         try
         {
@@ -961,6 +988,7 @@ internal sealed class GalleryView : UserControl
         {
             clips = clips.Where(clip =>
                 clip.FileName.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+                clip.Title.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                 clip.GameName.Contains(search, StringComparison.OrdinalIgnoreCase));
         }
         return _sortNewestFirst
@@ -1128,14 +1156,17 @@ internal sealed class GalleryView : UserControl
 
     private void ShowEditor(GalleryClipEntry clip)
     {
-        if (_manualClipEditService is null || clip.Route != GalleryClipRoute.LocalOnly || !File.Exists(clip.Path)) return;
+        if (_manualClipEditService is null ||
+            clip.Route != GalleryClipRoute.LocalOnly ||
+            !CanAccessClip(clip) ||
+            !File.Exists(clip.Path)) return;
         _scanCancellation?.Cancel();
         CancelThumbnailRequests();
         CancelPlaybackPrewarm();
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Editor;
-        SetHeader("Edit & upload", $"{clip.GameName} · Local only · {clip.FileName}");
+        SetHeader("Edit & upload", $"{clip.GameName} · Local only · {clip.Title}");
         _backButton.Visible = true;
         _backButton.Text = "Back to clips";
         SetLibraryLayoutVisible(false);
@@ -1211,7 +1242,9 @@ internal sealed class GalleryView : UserControl
         GalleryClipEntry playbackClip,
         GalleryClipEntry favoriteOwner)
     {
-        if (!File.Exists(playbackClip.Path)) return;
+        if (!CanAccessClip(playbackClip) ||
+            !CanAccessClip(favoriteOwner) ||
+            !File.Exists(playbackClip.Path)) return;
         _scanCancellation?.Cancel();
         CancelThumbnailRequests();
         if (!string.Equals(_playbackPrewarmPath, playbackClip.Path, StringComparison.OrdinalIgnoreCase))
@@ -1225,7 +1258,7 @@ internal sealed class GalleryView : UserControl
         var rendition = favoriteOwner.Renditions?.Outputs.FirstOrDefault(output =>
             output.ArtifactPath.Equals(playbackClip.Path, StringComparison.OrdinalIgnoreCase));
         var playbackKind = rendition is null ? route : $"{rendition.DisplayName} rendition";
-        SetHeader("Play clip", $"{playbackClip.GameName} · {playbackKind} · {playbackClip.FileName}");
+        SetHeader("Play clip", $"{playbackClip.GameName} · {playbackKind} · {playbackClip.Title}");
         _backButton.Visible = true;
         _backButton.Text = "Back to clips";
         SetLibraryLayoutVisible(false);
@@ -1235,7 +1268,7 @@ internal sealed class GalleryView : UserControl
             _playbackPreparer,
             _favorites.IsFavorite(favoriteOwner),
             favorite => _favorites.SetFavorite(favoriteOwner, favorite),
-            favoriteOwner.FileName,
+            favoriteOwner.Title,
             _effectiveDpiForTests);
         _playerClip = favoriteOwner;
         _playerContent = favoriteOwner.HasRenditions
@@ -1427,9 +1460,11 @@ internal sealed class GalleryView : UserControl
     {
         var token = GetOrientationControlToken(output.OrientationId);
         var failed = output.Status == GalleryRenditionOutputStatus.Failed;
-        var playing = output.CanPlay &&
+        var canUseRendition = HasCaptureLibraryAccess();
+        var canPlay = canUseRendition && output.CanPlay;
+        var playing = canPlay &&
             output.ArtifactPath.Equals(playbackPath, StringComparison.OrdinalIgnoreCase);
-        var stackActions = ShouldStackRenditionActions(EffectiveDpi) && output.CanPlay;
+        var stackActions = ShouldStackRenditionActions(EffectiveDpi) && canPlay;
         var row = new RoundedPanel
         {
             Name = $"Gallery{token}RenditionRow",
@@ -1535,14 +1570,14 @@ internal sealed class GalleryView : UserControl
             Padding = Padding.Empty,
             BackColor = row.BackColor
         };
-        if (output.CanPlay)
+        if (canPlay)
         {
             var play = CreateCardButton("Play", 72);
             play.Name = $"Gallery{token}RenditionPlayButton";
             play.Size = new Size(ScaleUi(72), ScaleUi(34));
             play.LeadingIcon = FigmaIconAsset.Play;
             play.AccessibleName = $"Play {output.DisplayName} rendition";
-            play.Enabled = output.CanPlay;
+            play.Enabled = true;
             play.Click += (_, _) => PlayRendition(favoriteOwner, output);
             actions.Controls.Add(play);
 
@@ -1554,7 +1589,7 @@ internal sealed class GalleryView : UserControl
                 ? ScalePadding(0, 8, 0, 0)
                 : ScalePadding(8, 0, 0, 0);
             folder.AccessibleName = $"Open the {output.DisplayName} rendition folder";
-            folder.Enabled = output.CanPlay;
+            folder.Enabled = true;
             folder.Click += (_, _) => ShowRenditionInFolder(output);
             actions.Controls.Add(folder);
         }
@@ -1568,7 +1603,7 @@ internal sealed class GalleryView : UserControl
             retry.HoverColor = Color.FromArgb(69, 53, 105);
             retry.OutlineColor = ClipCordTheme.Violet;
             retry.AccessibleName = $"Retry {output.DisplayName} rendition";
-            retry.Enabled = RenditionRetryRequested is not null;
+            retry.Enabled = canUseRendition && RenditionRetryRequested is not null;
             retry.Click += (_, _) => RequestRenditionRetry(retry, presentation, output);
             actions.Controls.Add(retry);
         }
@@ -1702,19 +1737,20 @@ internal sealed class GalleryView : UserControl
         GalleryClipEntry favoriteOwner,
         GalleryRenditionOutputPresentation output)
     {
-        if (!output.CanPlay) return;
+        if (!HasCaptureLibraryAccess() || !output.CanPlay) return;
         var renditionClip = favoriteOwner with
         {
             Path = output.ArtifactPath,
             FileName = Path.GetFileName(output.ArtifactPath),
-            Length = output.Length
+            Length = output.Length,
+            DisplayFileName = null
         };
         ShowPlayer(renditionClip, favoriteOwner);
     }
 
     private void ShowRenditionInFolder(GalleryRenditionOutputPresentation output)
     {
-        if (!output.CanPlay) return;
+        if (!HasCaptureLibraryAccess() || !output.CanPlay) return;
         try
         {
             Process.Start(ActivityView.CreateSelectFileStartInfo(output.ArtifactPath));
@@ -1737,7 +1773,7 @@ internal sealed class GalleryView : UserControl
         GalleryRenditionOutputPresentation output)
     {
         var handler = RenditionRetryRequested;
-        if (handler is null || !output.CanRetry) return;
+        if (!HasCaptureLibraryAccess() || handler is null || !output.CanRetry) return;
         button.Enabled = false;
         button.Text = "Retry requested";
         _renditionRetrySawActiveWork = false;
@@ -1753,7 +1789,8 @@ internal sealed class GalleryView : UserControl
 
     private void RenditionRefreshTimerTick(object? sender, EventArgs eventArgs)
     {
-        if (!_active || _disposed || IsDisposed || Disposing ||
+        if (!HasCaptureLibraryAccess() ||
+            !_active || _disposed || IsDisposed || Disposing ||
             _screen is not (GalleryScreen.Library or GalleryScreen.Game))
         {
             _renditionRefreshTimer.Stop();
@@ -1806,7 +1843,8 @@ internal sealed class GalleryView : UserControl
 
     private void UpdateRenditionRefreshTimer()
     {
-        var shouldRun = _active && !_disposed && !IsDisposed && !Disposing &&
+        var shouldRun = HasCaptureLibraryAccess() &&
+            _active && !_disposed && !IsDisposed && !Disposing &&
             (_screen is GalleryScreen.Library or GalleryScreen.Game) &&
             (HasActiveRenditionWork() || _renditionRetryGracePolls > 0);
         if (shouldRun)
@@ -1861,6 +1899,7 @@ internal sealed class GalleryView : UserControl
 
     private Control BuildClipCard(GalleryClipEntry clip)
     {
+        var canAccessClip = CanAccessClip(clip);
         var gradient = GalleryCatalog.GetGradient(clip.GameName);
         var card = new RoundedPanel
         {
@@ -1872,8 +1911,8 @@ internal sealed class GalleryView : UserControl
             Padding = Padding.Empty,
             Margin = Padding.Empty,
             AccessibleName = clip.Renditions is null
-                ? $"{clip.FileName}, {GetRouteLabel(clip.Route)}"
-                : $"{clip.FileName}, {GetRouteLabel(clip.Route)}, {clip.Renditions.FormatsLabel}, {clip.Renditions.StatusLabel}",
+                ? $"{clip.Title}, {GetRouteLabel(clip.Route)}"
+                : $"{clip.Title}, {GetRouteLabel(clip.Route)}, {clip.Renditions.FormatsLabel}, {clip.Renditions.StatusLabel}",
             AccessibleRole = AccessibleRole.Grouping
         };
         var layout = new BufferedTableLayoutPanel
@@ -1912,7 +1951,7 @@ internal sealed class GalleryView : UserControl
             revealWhenOff: true)
         {
             Name = "GalleryClipFavoriteButton",
-            AccessibleName = $"Toggle Favorites for {clip.FileName}"
+            AccessibleName = $"Toggle Favorites for {clip.Title}"
         };
         var favoriteSide = GetFavoriteButtonSide(DeviceDpi);
         favorite.Size = new Size(favoriteSide, favoriteSide);
@@ -1924,9 +1963,9 @@ internal sealed class GalleryView : UserControl
         var play = CreateCardButton("Play", 62);
         play.Size = new Size(ScaleUi(62), ScaleUi(36));
         play.Name = "PlayGalleryClipButton";
-        play.AccessibleName = $"Play {clip.FileName}";
+        play.AccessibleName = $"Play {clip.Title}";
         play.LeadingGlyph = BrandGlyph.Play;
-        play.Enabled = File.Exists(clip.Path);
+        play.Enabled = canAccessClip && File.Exists(clip.Path);
         play.Click += (_, _) => PlayClip(clip);
         play.MouseEnter += (_, _) => BeginPlaybackPrewarm(clip);
         play.GotFocus += (_, _) => BeginPlaybackPrewarm(clip);
@@ -1983,7 +2022,7 @@ internal sealed class GalleryView : UserControl
         details.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var fileName = new Label
         {
-            Text = clip.FileName,
+            Text = clip.Title,
             Dock = DockStyle.Fill,
             AutoEllipsis = true,
             ForeColor = ClipCordTheme.TextPrimary,
@@ -2023,14 +2062,14 @@ internal sealed class GalleryView : UserControl
             var edit = CreateCardButton("Edit & upload", 112);
             edit.Size = new Size(ScaleUi(112), ScaleUi(36));
             edit.Name = "EditGalleryClipButton";
-            edit.AccessibleName = $"Edit and upload {clip.FileName}";
+            edit.AccessibleName = $"Edit and upload {clip.Title}";
             edit.LeadingGlyph = BrandGlyph.Trim;
             edit.Dock = DockStyle.Fill;
             edit.SurfaceColor = ClipCordTheme.VioletMuted;
             edit.HoverColor = Color.FromArgb(69, 53, 105);
             edit.OutlineColor = ClipCordTheme.Violet;
             edit.ForeColor = ClipCordTheme.TextPrimary;
-            edit.Enabled = File.Exists(clip.Path);
+            edit.Enabled = canAccessClip && File.Exists(clip.Path);
             edit.Click += (_, _) => ShowEditor(clip);
             actions.Controls.Add(edit, 0, 0);
         }
@@ -2047,10 +2086,10 @@ internal sealed class GalleryView : UserControl
         var show = CreateCardButton("Folder", 76);
         show.Size = new Size(ScaleUi(76), ScaleUi(36));
         show.Name = "ShowGalleryClipButton";
-        show.AccessibleName = $"Show {clip.FileName} in its folder";
+        show.AccessibleName = $"Show {clip.Title} in its folder";
         show.LeadingGlyph = BrandGlyph.Folder;
         show.Margin = ScalePadding(8, 0, 0, 0);
-        show.Enabled = File.Exists(clip.Path);
+        show.Enabled = canAccessClip && File.Exists(clip.Path);
         show.Click += (_, _) => ShowClipInFolder(clip);
         actions.Controls.Add(show, 1, 0);
         layout.Controls.Add(actions, 0, 2);
@@ -2128,7 +2167,7 @@ internal sealed class GalleryView : UserControl
 
     private void PlayClip(GalleryClipEntry clip)
     {
-        if (!File.Exists(clip.Path)) return;
+        if (!CanAccessClip(clip) || !File.Exists(clip.Path)) return;
         var preferredRendition = SelectPreferredReadyRendition(clip);
         if (preferredRendition is not null)
         {
@@ -2160,7 +2199,8 @@ internal sealed class GalleryView : UserControl
 
     private void BeginPlaybackPrewarm(GalleryClipEntry clip)
     {
-        if (!_active || _disposed || IsDisposed || Disposing || !File.Exists(clip.Path)) return;
+        if (!CanAccessClip(clip) ||
+            !_active || _disposed || IsDisposed || Disposing || !File.Exists(clip.Path)) return;
         if (string.Equals(_playbackPrewarmPath, clip.Path, StringComparison.OrdinalIgnoreCase) &&
             _playbackPrewarmCancellation is { IsCancellationRequested: false })
         {
@@ -2214,7 +2254,7 @@ internal sealed class GalleryView : UserControl
 
     private void ShowClipInFolder(GalleryClipEntry clip)
     {
-        if (!File.Exists(clip.Path)) return;
+        if (!CanAccessClip(clip) || !File.Exists(clip.Path)) return;
         try
         {
             Process.Start(ActivityView.CreateSelectFileStartInfo(clip.Path));
@@ -2407,6 +2447,39 @@ internal sealed class GalleryView : UserControl
         Game,
         Editor,
         Player
+    }
+
+    private bool CanAccessClip(GalleryClipEntry clip) =>
+        !IsCaptureLibrarySource(clip.Source) || HasCaptureLibraryAccess();
+
+    private static bool IsCaptureLibrarySource(GalleryClipSource source) =>
+        source is GalleryClipSource.ClipCord or GalleryClipSource.Xbox;
+
+    private bool HasCaptureLibraryAccess()
+    {
+        try
+        {
+            return _captureLibraryAccessAllowed();
+        }
+        catch (Exception exception)
+        {
+            Log.Error("ClipCord could not validate Capture library access for Gallery.", exception);
+            return false;
+        }
+    }
+
+    private static GallerySnapshot WithoutCaptureLibraryEntries(GallerySnapshot? snapshot)
+    {
+        if (snapshot is null) return new GallerySnapshot([], []);
+        var games = snapshot.Games
+            .Select(game => new GalleryGameEntry(
+                game.Name,
+                game.Clips
+                    .Where(clip => !IsCaptureLibrarySource(clip.Source))
+                    .ToArray()))
+            .Where(game => game.Clips.Count > 0)
+            .ToArray();
+        return new GallerySnapshot(games, snapshot.Warnings);
     }
 
     /// <summary>
