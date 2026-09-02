@@ -1794,6 +1794,27 @@ internal static class RoutesFeatureTests
                 "Activating the Discord selector must apply popup metrics before presenting the menu.");
         }
 
+        var expectedPopupMinimumWidth =
+            RouteConnectionSelector.ScalePopupMetric(180, dpi);
+        var expectedPopupOwnerWidth =
+            RouteConnectionSelector.ScalePopupMetric(220, dpi);
+        using (var popupWidthProbe = new RouteConnectionSelector(
+                   [new RoutingConnectionDisplay(
+                       connectionId, "Friends server", "Encrypted test connection", true)]))
+        {
+            popupWidthProbe.Width = RouteConnectionSelector.ScalePopupMetric(120, dpi);
+            popupWidthProbe.ApplyPopupMetrics(dpi);
+            Assert(popupWidthProbe.PopupWidth == expectedPopupMinimumWidth,
+                $"The Discord connection menu must honor its scaled logical minimum width at {dpi} DPI; " +
+                $"actual={popupWidthProbe.PopupWidth}, expected={expectedPopupMinimumWidth}.");
+
+            popupWidthProbe.Width = expectedPopupOwnerWidth;
+            popupWidthProbe.ApplyPopupMetrics(dpi);
+            Assert(popupWidthProbe.PopupWidth == expectedPopupOwnerWidth,
+                $"The Discord connection menu must follow a wider logical owner width at {dpi} DPI; " +
+                $"actual={popupWidthProbe.PopupWidth}, expected={expectedPopupOwnerWidth}.");
+        }
+
         connection.ApplyPopupMetrics(dpi);
         var popupItems = connection.PopupItemMetrics;
         var expectedPopupPadding = new Padding(
@@ -1810,9 +1831,10 @@ internal static class RoutesFeatureTests
         var expectedPopupHeight = popupItems.Count *
                                   (expectedItemHeight + expectedItemMargin.Vertical) +
                                   RouteConnectionSelector.ScalePopupMetric(10, dpi);
+        var requestedPopupWidth = Math.Max(connection.Width, expectedPopupMinimumWidth);
         Assert(connection.PopupPadding == expectedPopupPadding &&
-               connection.PopupWidth == Math.Max(
-                   connection.Width, RouteConnectionSelector.ScalePopupMetric(180, dpi)) &&
+               connection.PopupWidth > 0 &&
+               connection.PopupWidth <= requestedPopupWidth &&
                connection.PopupHeight == expectedPopupHeight &&
                popupItems.Count == connection.ItemCount &&
                popupItems.All(item => item.Width == expectedItemWidth &&
@@ -1821,7 +1843,7 @@ internal static class RoutesFeatureTests
                                       item.Padding == expectedItemPadding),
             $"The rendered Discord connection menu must apply scaled dimensions and padding at {dpi} DPI; " +
             $"padding={connection.PopupPadding}/{expectedPopupPadding}, width={connection.PopupWidth}/" +
-            $"{Math.Max(connection.Width, RouteConnectionSelector.ScalePopupMetric(180, dpi))}, " +
+            $"{requestedPopupWidth} requested (native screen clamp allowed), " +
             $"height={connection.PopupHeight}/{expectedPopupHeight}, clientWidth={connection.PopupClientWidth}, " +
             $"items={string.Join(", ", popupItems.Select(item => $"{item.Width}x{item.Height} margin={item.Margin} padding={item.Padding}"))}, " +
             $"expectedItem={expectedItemWidth}x{expectedItemHeight} margin={expectedItemMargin} padding={expectedItemPadding}.");
