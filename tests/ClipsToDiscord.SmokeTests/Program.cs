@@ -3748,6 +3748,7 @@ static void AssertRoutingRailOwnershipPresentation(AppSettings settings)
         routingRouteManager: manager,
         routesRuntimeStateProvider: () => state,
         routingPresentationProvider: () => routingPresentation);
+    var designedOpeningSize = form.Size;
     form.Opacity = 0;
     form.ShowInTaskbar = false;
     form.Show();
@@ -3926,7 +3927,7 @@ static void AssertRoutingRailOwnershipPresentation(AppSettings settings)
     update.Invoke(form, null);
     Application.DoEvents();
     AssertManagedSettingsControls(RoutesRuntimeViewState.Activating);
-    AssertSettingsCardsOpenWithoutScrolling(form);
+    AssertSettingsCardsScrollOnlyWhenScreenConstrained(form, designedOpeningSize);
     AssertCriticalTextFits(form);
     AssertRoutingOwnedSettingsMinimumViewport(form);
     Assert(folder.Text == settings.ClipsFolder && webhook.Text == settings.WebhookUrl &&
@@ -7557,11 +7558,21 @@ static void AssertSettingsCardsOpenWithoutScrolling(SettingsForm form)
 
 static void AssertSettingsCardsScrollOnlyWhenScreenConstrained(SettingsForm form, Size designedOpeningSize)
 {
+    var cards = EnumerateControls(form)
+        .OfType<ScrollableControl>()
+        .Single(control => control.Name == "SettingsCards");
     var host = GetSettingsScrollHost(form);
     host.RefreshContentLayout();
-    if (!host.HasOverflow) return;
-    Assert(form.Height < designedOpeningSize.Height,
-        $"Settings may use its branded scrollbar only when the screen reduced its designed opening height; designed={designedOpeningSize}, actual={form.Size}.");
+    Assert(!cards.AutoScroll && !cards.VerticalScroll.Visible,
+        "Settings must never replace its branded viewport with a native Windows scrollbar.");
+    if (!host.HasOverflow)
+    {
+        Assert(host.ScrollOffset == 0,
+            "Settings must return its branded viewport to the top when all cards fit.");
+        return;
+    }
+    Assert(form.Width < designedOpeningSize.Width || form.Height < designedOpeningSize.Height,
+        $"Settings may use its branded scrollbar only when the screen reduced its designed opening size; designed={designedOpeningSize}, actual={form.Size}.");
 }
 
 static void AssertSettingsMinimumViewport(SettingsForm form)
