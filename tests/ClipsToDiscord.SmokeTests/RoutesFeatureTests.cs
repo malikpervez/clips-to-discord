@@ -460,15 +460,21 @@ internal static class RoutesFeatureTests
         var requestedClientSize = new Size(
             (int)Math.Round(984 * scale),
             (int)Math.Round(696 * scale));
-        using var form = new Form
-        {
-            ClientSize = requestedClientSize,
-            BackColor = ClipCordTheme.SurfaceBase,
-            StartPosition = FormStartPosition.Manual,
-            Location = new Point(-32000, -32000),
-            ShowInTaskbar = false,
-            Opacity = 0
-        };
+        using Control viewport = dpi == 96
+            ? new Form
+            {
+                ClientSize = requestedClientSize,
+                BackColor = ClipCordTheme.SurfaceBase,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(-32000, -32000),
+                ShowInTaskbar = false,
+                Opacity = 0
+            }
+            : new Panel
+            {
+                ClientSize = requestedClientSize,
+                BackColor = ClipCordTheme.SurfaceBase
+            };
         using var view = new RoutesView(
             manager,
             new FixedConnections(connectionId),
@@ -477,25 +483,25 @@ internal static class RoutesFeatureTests
             localOnlyMode: localOnly);
         var changedEvents = 0;
         view.LocalOnlyModeChanged += (_, _) => changedEvents++;
-        form.Controls.Add(view);
-        if (dpi == 96)
+        viewport.Controls.Add(view);
+        if (viewport is Form shownForm)
         {
-            form.Show();
+            shownForm.Show();
             Application.DoEvents();
         }
         else
         {
-            // A shown top-level window is hard-clamped to the CI desktop. Keep the
-            // interaction probe real at 96 DPI and lay out synthetic DPI geometry
-            // headlessly at its exact requested viewport.
-            LayoutHeadlessly(form);
+            // Form bounds are capped by MaxWindowTrackSize even before Show. Keep
+            // the interaction probe real at 96 DPI and lay out synthetic DPI
+            // geometry in a screen-independent panel at its exact viewport.
+            LayoutHeadlessly(viewport);
         }
-        Assert(form.ClientSize == requestedClientSize,
+        Assert(viewport.ClientSize == requestedClientSize,
             $"The Local-only DPI fixture must preserve its requested {dpi}-DPI viewport; " +
-            $"requested={requestedClientSize}, actual={form.ClientSize}.");
+            $"requested={requestedClientSize}, actual={viewport.ClientSize}.");
         view.ActivateView();
         if (dpi == 96) Application.DoEvents();
-        else LayoutHeadlessly(form);
+        else LayoutHeadlessly(viewport);
 
         AssertLocalOnlyModeLayout(view, dpi, expectEnabled: !verifyActions);
         var initial = Enumerate(view).ToArray();
@@ -643,7 +649,7 @@ internal static class RoutesFeatureTests
                 "Only successful Local-only enable and shortcut changes may raise shell refresh events.");
         }
 
-        form.Close();
+        if (viewport is Form form) form.Close();
     }
 
     private static void AssertDisabledLocalOnlyShortcutNotice(
@@ -1694,6 +1700,7 @@ internal static class RoutesFeatureTests
             Location = new Point(-32000, -32000),
             Opacity = 0
         };
+        Panel? syntheticViewport = null;
         if (dpi == 96)
         {
             dialog.Show();
@@ -1701,11 +1708,13 @@ internal static class RoutesFeatureTests
         }
         else
         {
+            syntheticViewport = AttachSyntheticDialogViewport(dialog, expectedClient);
             LayoutHeadlessly(dialog);
         }
 
-        Assert(dialog.ClientSize == expectedClient,
-            $"The route editor viewport must scale as one coherent surface at {dpi} DPI; expected={expectedClient}, actual={dialog.ClientSize}.");
+        var actualClient = syntheticViewport?.ClientSize ?? dialog.ClientSize;
+        Assert(actualClient == expectedClient,
+            $"The route editor viewport must scale as one coherent surface at {dpi} DPI; expected={expectedClient}, actual={actualClient}.");
         Assert(RouteEditorDialog.ScaleLogicalMetric(78, dpi) ==
                (int)Math.Round(78 * Math.Max(96, dpi) / 96d),
             $"Route editor logical metrics must remain deterministic at {dpi} DPI.");
@@ -1835,6 +1844,12 @@ internal static class RoutesFeatureTests
             chooseFolder: (_, _) => recorderRoot,
             showValidation: (message, caption) =>
                 validationMessages.Add((message, caption)));
+        if (dpi > 96)
+        {
+            _ = AttachSyntheticDialogViewport(dialog, new Size(
+                RoutesView.ScaleLogicalMetric(680, dpi),
+                RoutesView.ScaleLogicalMetric(474, dpi)));
+        }
         LayoutHeadlessly(dialog);
         var controls = Enumerate(dialog).ToArray();
         var dialogRoot = controls.Single(control =>
@@ -2022,6 +2037,12 @@ internal static class RoutesFeatureTests
                 "Existing 1.x folder · locked to migration",
                 ClipCaptureSource.Nvidia),
             saveGuardMessage: (_, _, _) => DialogResult.OK);
+        if (dpi > 96)
+        {
+            _ = AttachSyntheticDialogViewport(editor, new Size(
+                RouteEditorDialog.ScaleLogicalMetric(984, dpi),
+                RouteEditorDialog.ScaleLogicalMetric(700, dpi)));
+        }
         LayoutHeadlessly(editor);
         var editorControls = Enumerate(editor).ToArray();
         var watchedFolder = editorControls.OfType<RadioButton>().Single(control =>
@@ -2906,6 +2927,12 @@ internal static class RoutesFeatureTests
                 return DialogResult.Yes;
             },
             saveGuardMessage: FailUnexpectedSaveGuard);
+        if (dpi > 96)
+        {
+            _ = AttachSyntheticDialogViewport(dialog, new Size(
+                RouteEditorDialog.ScaleLogicalMetric(984, dpi),
+                RouteEditorDialog.ScaleLogicalMetric(700, dpi)));
+        }
 
         // Create and lay out handles without ever showing a top-level window.
         LayoutHeadlessly(dialog);
@@ -3250,6 +3277,12 @@ internal static class RoutesFeatureTests
             },
             clock: () => activationUtc,
             saveGuardMessage: FailUnexpectedSaveGuard);
+        if (dpi > 96)
+        {
+            _ = AttachSyntheticDialogViewport(dialog, new Size(
+                RouteEditorDialog.ScaleLogicalMetric(984, dpi),
+                RouteEditorDialog.ScaleLogicalMetric(700, dpi)));
+        }
         LayoutHeadlessly(dialog);
         var controls = Enumerate(dialog).ToArray();
         controls.OfType<RadioButton>().Single(control =>
@@ -3667,7 +3700,7 @@ internal static class RoutesFeatureTests
             $"Xbox route content must stay inside the branded scroll model at {dpi} DPI without compression or a native scrollbar.");
         AssertLocallyVisibleDescendantsContained(dialog, dpi);
         AssertLocallyVisibleSiblingGeometry(dialog, dpi);
-        AssertRouteEditorText(controls, dpi);
+        AssertRouteEditorText(controls, dpi, localVisibilityRoot: dialog);
 
         var historyTitleNames = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -3740,8 +3773,42 @@ internal static class RoutesFeatureTests
             $"The Xbox source name and safety detail must fit its selector at {dpi} DPI; available={availableWidth}, title={titleWidth}, detail={detailWidth}.");
     }
 
+    private const string SyntheticDialogViewportName =
+        "RoutesTestSyntheticDialogViewport";
+
+    private static Panel AttachSyntheticDialogViewport(
+        Form dialog,
+        Size expectedClientSize)
+    {
+        var content = dialog.Controls.Cast<Control>().ToArray();
+        Assert(content.Length == 1,
+            $"{dialog.GetType().Name} must expose one root before its synthetic DPI viewport is attached; actual={content.Length}.");
+        var viewport = new Panel
+        {
+            Name = SyntheticDialogViewportName,
+            ClientSize = expectedClientSize,
+            Location = Point.Empty,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            Padding = dialog.Padding,
+            BackColor = dialog.BackColor,
+            ForeColor = dialog.ForeColor,
+            Font = dialog.Font,
+            Tag = expectedClientSize
+        };
+        foreach (var control in content) viewport.Controls.Add(control);
+        dialog.Controls.Add(viewport);
+        return viewport;
+    }
+
+    private static Control ResolveHeadlessLayoutRoot(Control root) =>
+        root is Form
+            ? root.Controls.Cast<Control>().FirstOrDefault(control =>
+                  control.Name == SyntheticDialogViewportName) ?? root
+            : root;
+
     private static void LayoutHeadlessly(Control root)
     {
+        root = ResolveHeadlessLayoutRoot(root);
         root.CreateControl();
         for (var pass = 0; pass < 3; pass++)
         {
@@ -3755,6 +3822,18 @@ internal static class RoutesFeatureTests
                 scrollHost.RefreshContentLayout(preservePosition: true);
         }
         Application.DoEvents();
+        if (root is Panel
+            {
+                Name: SyntheticDialogViewportName,
+                Tag: Size expectedClientSize
+            } viewport)
+        {
+            Assert(viewport.ClientSize == expectedClientSize &&
+                   viewport.Location == Point.Empty &&
+                   viewport.Dock == DockStyle.None,
+                $"The synthetic {viewport.Parent?.GetType().Name} viewport must remain screen-independent after layout; " +
+                $"expected={expectedClientSize}, actual={viewport.ClientSize}, location={viewport.Location}, dock={viewport.Dock}.");
+        }
     }
 
     private static void InvokeControlClick(Control control)
@@ -3770,6 +3849,7 @@ internal static class RoutesFeatureTests
 
     private static void AssertLocallyVisibleDescendantsContained(Control root, int dpi)
     {
+        root = ResolveHeadlessLayoutRoot(root);
         var tolerance = Math.Max(1, RouteEditorDialog.ScaleLogicalMetric(2, dpi));
         foreach (var parent in Enumerate(root).Prepend(root).Where(parent =>
                      IsLocallyVisibleWithin(parent, root)))
@@ -3788,6 +3868,7 @@ internal static class RoutesFeatureTests
 
     private static void AssertLocallyVisibleSiblingGeometry(Control root, int dpi)
     {
+        root = ResolveHeadlessLayoutRoot(root);
         foreach (var parent in Enumerate(root).Prepend(root).Where(parent =>
                      IsLocallyVisibleWithin(parent, root)))
         {
@@ -3992,10 +4073,8 @@ internal static class RoutesFeatureTests
         var requestedClientSize = new Size(
             (int)Math.Round(984 * scale),
             (int)Math.Round(696 * scale));
-        using var form = new Form
+        using var viewport = new Panel
         {
-            StartPosition = FormStartPosition.Manual,
-            Location = new Point(-32000, -32000),
             ClientSize = requestedClientSize,
             BackColor = ClipCordTheme.SurfaceBase
         };
@@ -4004,13 +4083,13 @@ internal static class RoutesFeatureTests
             new FixedConnections(connectionId),
             isCutoverCommitted: () => true,
             layoutDpi: dpi);
-        form.Controls.Add(view);
-        LayoutHeadlessly(form);
+        viewport.Controls.Add(view);
+        LayoutHeadlessly(viewport);
         view.ActivateView();
-        LayoutHeadlessly(form);
-        Assert(form.ClientSize == requestedClientSize,
+        LayoutHeadlessly(viewport);
+        Assert(viewport.ClientSize == requestedClientSize,
             $"The Routes DPI fixture must preserve its requested {dpi}-DPI viewport; " +
-            $"requested={requestedClientSize}, actual={form.ClientSize}.");
+            $"requested={requestedClientSize}, actual={viewport.ClientSize}.");
         var controls = Enumerate(view).ToArray();
         AssertButtonSize("ReorderRoutesButton", 96);
         AssertButtonSize("DeliveryHistoryButton", 132);
@@ -4025,8 +4104,6 @@ internal static class RoutesFeatureTests
         Assert(RoutesView.ScaleLogicalMetric(96, dpi) == (int)Math.Round(96 * scale) &&
                RoutesView.ScaleLogicalMetric(30, dpi) == (int)Math.Round(30 * scale),
             $"Routes must retain deterministic logical metrics at {dpi} DPI.");
-        form.Close();
-
         var outboxRoot = Path.Combine(root, $"history-{dpi}");
         Directory.CreateDirectory(outboxRoot);
         var outbox = new RoutingOutboxStore(
@@ -4081,8 +4158,10 @@ internal static class RoutesFeatureTests
         using var history = new RoutingDeliveryHistoryDialog(
             outbox,
             layoutDpi: dpi);
-        history.CreateControl();
-        history.PerformLayout();
+        var historyViewport = AttachSyntheticDialogViewport(history, new Size(
+            RoutingDeliveryHistoryDialog.ScaleLogicalMetric(820, dpi),
+            RoutingDeliveryHistoryDialog.ScaleLogicalMetric(620, dpi)));
+        LayoutHeadlessly(history);
         var close = Enumerate(history).OfType<Button>().Single(button => button.Text == "Close");
         var retry = Enumerate(history).OfType<Button>().Single(button => button.Text == "Retry");
         var historyRow = retry.Parent?.Parent as TableLayoutPanel;
@@ -4094,7 +4173,7 @@ internal static class RoutesFeatureTests
                    RoutingDeliveryHistoryDialog.ScaleLogicalMetric(30, dpi)) &&
                historyRow?.ColumnStyles[2].Width ==
                    RoutingDeliveryHistoryDialog.ScaleLogicalMetric(312, dpi) &&
-               history.ClientSize == new Size(
+               historyViewport.ClientSize == new Size(
                    RoutingDeliveryHistoryDialog.ScaleLogicalMetric(820, dpi),
                    RoutingDeliveryHistoryDialog.ScaleLogicalMetric(620, dpi)),
             $"Delivery history actions and viewport must scale together at {dpi} DPI.");
