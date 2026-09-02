@@ -1663,6 +1663,9 @@ internal static class RoutesFeatureTests
 
     private static void AssertRouteEditorDialogLayout(string connectionId, int dpi)
     {
+        var expectedClient = new Size(
+            RouteEditorDialog.ScaleLogicalMetric(984, dpi),
+            RouteEditorDialog.ScaleLogicalMetric(700, dpi));
         using var dialog = new RouteEditorDialog(
         [
             new RoutingConnectionDisplay(
@@ -1674,11 +1677,10 @@ internal static class RoutesFeatureTests
             Opacity = 0
         };
         dialog.Show();
+        dialog.ClientSize = expectedClient;
+        dialog.PerformLayout();
         Application.DoEvents();
 
-        var expectedClient = new Size(
-            RouteEditorDialog.ScaleLogicalMetric(984, dpi),
-            RouteEditorDialog.ScaleLogicalMetric(700, dpi));
         Assert(dialog.ClientSize == expectedClient,
             $"The route editor viewport must scale as one coherent surface at {dpi} DPI; expected={expectedClient}, actual={dialog.ClientSize}.");
         Assert(RouteEditorDialog.ScaleLogicalMetric(78, dpi) ==
@@ -3930,13 +3932,14 @@ internal static class RoutesFeatureTests
         int dpi)
     {
         var scale = dpi / 96d;
+        var requestedClientSize = new Size(
+            (int)Math.Round(984 * scale),
+            (int)Math.Round(696 * scale));
         using var form = new Form
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(-32000, -32000),
-            ClientSize = new Size(
-                (int)Math.Round(984 * scale),
-                (int)Math.Round(696 * scale)),
+            ClientSize = requestedClientSize,
             BackColor = ClipCordTheme.SurfaceBase
         };
         using var view = new RoutesView(
@@ -3946,8 +3949,13 @@ internal static class RoutesFeatureTests
             layoutDpi: dpi);
         form.Controls.Add(view);
         form.Show();
+        form.ClientSize = requestedClientSize;
+        form.PerformLayout();
         view.ActivateView();
         Application.DoEvents();
+        Assert(form.ClientSize == requestedClientSize,
+            $"The Routes DPI fixture must preserve its requested {dpi}-DPI viewport; " +
+            $"requested={requestedClientSize}, actual={form.ClientSize}.");
         var controls = Enumerate(view).ToArray();
         AssertButtonSize("ReorderRoutesButton", 96);
         AssertButtonSize("DeliveryHistoryButton", 132);
