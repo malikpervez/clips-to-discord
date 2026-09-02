@@ -10,6 +10,8 @@ internal static class RoutingCaptureJournalPumpTests
             ClipCaptureSource.SteelSeriesGg,
             ClipCaptureSource.Nvidia
         };
+    private static readonly RoutingLocalOnlyAdmissionSnapshot ExternalDeliveryAdmission =
+        new(Enabled: false, StateRevision: 1, FailSafe: false);
 
     internal static async Task RunAsync(string testRoot)
     {
@@ -55,7 +57,10 @@ internal static class RoutingCaptureJournalPumpTests
             Assert(startup.Plans.Select(plan => plan.SourceClipId).ToHashSet().SetEquals([
                        preexisting.Clip.ClipId,
                        pending.Clip.ClipId
-                   ]) && planner.Calls == 2 && executorCalls >= 3,
+                   ]) &&
+                   startup.Plans.All(plan =>
+                       plan.LocalOnlyOverride == ExternalDeliveryAdmission) &&
+                   planner.Calls == 2 && executorCalls >= 3,
                 "Start must synchronously traverse every bounded page, isolate a corrupt item, plan all readable preexisting journals, and run the executor callback.");
             Assert(File.Exists(CaptureJournalStore.GetCanonicalArtifactPath(
                        fixture.LibraryRoot, preexisting.Clip, "original")) &&
@@ -487,7 +492,8 @@ internal static class RoutingCaptureJournalPumpTests
                 1080,
                 reactionCamera,
                 reactionCamera ? [CaptureJournalArtifactKinds.Landscape] : [],
-                now: Now.AddMinutes(ordinal));
+                now: Now.AddMinutes(ordinal),
+                localOnlyOverride: ExternalDeliveryAdmission);
             if (reactionCamera)
             {
                 journal = await CaptureJournalStore.BeginCameraAsync(

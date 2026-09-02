@@ -19,6 +19,7 @@ internal enum FigmaIconAsset
     Gallery,
     About,
     Folder,
+    Connection,
     ArrowRight,
     Upload,
     Clock,
@@ -51,7 +52,9 @@ internal enum FigmaIconAsset
     SafeZone,
     ChevronLeft,
     Alert,
-    Discord
+    Discord,
+    YouTube,
+    TikTok
 }
 
 internal static class FigmaIconRenderer

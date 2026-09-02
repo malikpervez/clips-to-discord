@@ -13,7 +13,8 @@ internal enum GalleryClipSource
 {
     SteelSeriesGg,
     Nvidia,
-    ClipCord
+    ClipCord,
+    Xbox
 }
 
 internal enum GalleryRenditionOutputStatus
@@ -127,15 +128,20 @@ internal sealed record GalleryClipEntry(
     DateTime LastWriteTimeUtc,
     GalleryClipSource Source = GalleryClipSource.SteelSeriesGg,
     CaptureProjectSummary? CaptureProject = null,
-    GalleryRenditionPresentation? Renditions = null)
+    GalleryRenditionPresentation? Renditions = null,
+    string? DisplayFileName = null)
 {
     internal bool HasReactionCameraProject => CaptureProject is not null;
     internal bool HasRenditions => Renditions is { FormatCount: > 0 };
+    internal string Title => string.IsNullOrWhiteSpace(DisplayFileName)
+        ? FileName
+        : DisplayFileName;
 
     internal string SourceLabel => Source switch
     {
         GalleryClipSource.Nvidia => "NVIDIA",
         GalleryClipSource.ClipCord => "ClipCord",
+        GalleryClipSource.Xbox => "Xbox",
         _ => "SteelSeries GG"
     };
 }
@@ -159,6 +165,10 @@ internal sealed record GallerySnapshot(
 }
 
 internal readonly record struct GalleryGradient(Color Start, Color End);
+
+internal sealed record GalleryExternalSourceRoot(
+    string CanonicalRoot,
+    GalleryClipSource Source);
 
 internal static class GalleryCatalog
 {
@@ -184,7 +194,10 @@ internal static class GalleryCatalog
         CancellationToken cancellationToken,
         Action<string>? beforeGameDirectoryScan = null,
         string? captureLibraryRoot = null,
-        GalleryClipSource externalSource = GalleryClipSource.SteelSeriesGg)
+        GalleryClipSource externalSource = GalleryClipSource.SteelSeriesGg,
+        IReadOnlyList<GalleryExternalSourceRoot>? additionalExternalRoots = null,
+        Func<CancellationToken, IReadOnlyList<RoutingDeliveryHistoryItem>>?
+            captureRoutingHistory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clipsFolder);
         cancellationToken.ThrowIfCancellationRequested();
@@ -214,7 +227,48 @@ internal static class GalleryCatalog
         {
             warnings.Add("The external clips folder is not available.");
         }
-        ScanClipCordLibrary(captureLibraryRoot, clips, warnings, cancellationToken);
+        var primaryRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(clipsFolder));
+        foreach (var sourceRoot in (additionalExternalRoots ?? [])
+                     .Where(item => item is not null)
+                     .GroupBy(item => Path.TrimEndingDirectorySeparator(
+                             Path.GetFullPath(item.CanonicalRoot)),
+                         StringComparer.OrdinalIgnoreCase)
+                     .Select(group => group.First())
+                     .Where(item => !Path.TrimEndingDirectorySeparator(
+                             Path.GetFullPath(item.CanonicalRoot))
+                         .Equals(primaryRoot, StringComparison.OrdinalIgnoreCase)))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var root = Path.TrimEndingDirectorySeparator(
+                Path.GetFullPath(sourceRoot.CanonicalRoot));
+            if (!Directory.Exists(root))
+            {
+                warnings.Add("An additional external clips folder is not available.");
+                continue;
+            }
+            ScanArchive(
+                ResolveArchive(root, GalleryClipRoute.Uploaded, warnings),
+                GalleryClipRoute.Uploaded,
+                sourceRoot.Source,
+                clips,
+                warnings,
+                cancellationToken,
+                beforeGameDirectoryScan);
+            ScanArchive(
+                ResolveArchive(root, GalleryClipRoute.LocalOnly, warnings),
+                GalleryClipRoute.LocalOnly,
+                sourceRoot.Source,
+                clips,
+                warnings,
+                cancellationToken,
+                beforeGameDirectoryScan);
+        }
+        ScanClipCordLibrary(
+            captureLibraryRoot,
+            clips,
+            warnings,
+            cancellationToken,
+            captureRoutingHistory);
 
         var games = clips
             .GroupBy(clip => clip.GameName.Normalize(NormalizationForm.FormC), StringComparer.OrdinalIgnoreCase)
@@ -362,7 +416,8 @@ internal static class GalleryCatalog
         GalleryClipSource source,
         ICollection<GalleryClipEntry> clips,
         CaptureProjectSummary? captureProject = null,
-        GalleryRenditionPresentation? renditions = null)
+        GalleryRenditionPresentation? renditions = null,
+        string? displayFileName = null)
     {
         if (!Path.GetExtension(path).Equals(".mp4", StringComparison.OrdinalIgnoreCase)) return;
         try
@@ -383,7 +438,8 @@ internal static class GalleryCatalog
                 file.LastWriteTimeUtc,
                 source,
                 captureProject,
-                renditions));
+                renditions,
+                displayFileName));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -395,7 +451,9 @@ internal static class GalleryCatalog
         string? captureLibraryRoot,
         ICollection<GalleryClipEntry> clips,
         ICollection<string> warnings,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<CancellationToken, IReadOnlyList<RoutingDeliveryHistoryItem>>?
+            captureRoutingHistory)
     {
         if (string.IsNullOrWhiteSpace(captureLibraryRoot)) return;
         string library;
@@ -421,6 +479,10 @@ internal static class GalleryCatalog
                 warnings.Add("The ClipCord Capture library cannot be read through a symbolic link or junction.");
                 return;
             }
+            var routedCaptures = LoadCaptureRoutes(
+                captureRoutingHistory,
+                warnings,
+                cancellationToken);
             var projectIndex = CaptureProjectStore.LoadProjectIndex(
                 captureLibraryRoot,
                 cancellationToken);
@@ -483,14 +545,21 @@ internal static class GalleryCatalog
                     {
                         projectPresentations.TryGetValue(project.ProjectId, out renditions);
                     }
+                    var capturePresentation = TryLoadCapturePresentation(
+                        captureRoot,
+                        normalizedPath,
+                        routedCaptures,
+                        warnings,
+                        cancellationToken);
                     AddClip(
                         path,
                         gameName,
-                        GalleryClipRoute.LocalOnly,
-                        GalleryClipSource.ClipCord,
+                        capturePresentation?.Route ?? GalleryClipRoute.LocalOnly,
+                        capturePresentation?.Source ?? GalleryClipSource.ClipCord,
                         clips,
                         project,
-                        renditions);
+                        renditions,
+                        capturePresentation?.DisplayFileName);
                 }
             }
         }
@@ -503,6 +572,123 @@ internal static class GalleryCatalog
             Log.Error("Could not scan the ClipCord Capture library.", exception);
         }
     }
+
+    private static IReadOnlyDictionary<string, GalleryClipRoute> LoadCaptureRoutes(
+            Func<CancellationToken, IReadOnlyList<RoutingDeliveryHistoryItem>>? historyProvider,
+            ICollection<string> warnings,
+            CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, GalleryClipRoute>(StringComparer.Ordinal);
+        if (historyProvider is null) return result;
+
+        IReadOnlyList<RoutingDeliveryHistoryItem> history;
+        try
+        {
+            history = historyProvider(cancellationToken) ?? [];
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            AddCaptureRoutingWarning(warnings);
+            Log.Error(
+                "Could not read Routing history while classifying Capture Library clips.",
+                exception);
+            return result;
+        }
+
+        foreach (var item in history)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (item?.Plan is null || !CaptureJournalModel.IsClipId(item.Plan.SourceClipId))
+            {
+                continue;
+            }
+            var route = IsUploaded(item)
+                ? GalleryClipRoute.Uploaded
+                : GalleryClipRoute.LocalOnly;
+            if (result.TryGetValue(item.Plan.SourceClipId, out var existing) &&
+                existing == GalleryClipRoute.Uploaded)
+            {
+                continue;
+            }
+            result[item.Plan.SourceClipId] = route;
+        }
+        return result;
+    }
+
+    private static bool IsUploaded(RoutingDeliveryHistoryItem item) =>
+        item.FileDispositions.Any(disposition =>
+            disposition.State == PlannedFileDispositionState.Completed &&
+            disposition.LibraryArea == RoutingLibraryArea.Uploaded);
+
+    private static GalleryCapturePresentation? TryLoadCapturePresentation(
+        string captureRoot,
+        string path,
+        IReadOnlyDictionary<string, GalleryClipRoute> routes,
+        ICollection<string> warnings,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var clipId = CaptureProjectStore.CreateProjectId(captureRoot, path);
+            var loaded = CaptureJournalStore.Load(captureRoot, clipId, cancellationToken);
+            if (loaded.Status == CaptureJournalLoadStatus.Missing) return null;
+            if (!loaded.LoadedFromDisk || loaded.Document is null)
+            {
+                AddCaptureRoutingWarning(warnings);
+                return null;
+            }
+            var journal = loaded.Document;
+            var canonicalPath = CaptureJournalStore.GetCanonicalArtifactPath(
+                captureRoot,
+                journal.Clip,
+                "original");
+            if (!canonicalPath.Equals(path, StringComparison.OrdinalIgnoreCase))
+            {
+                AddCaptureRoutingWarning(warnings);
+                return null;
+            }
+            var xbox = journal.Clip.SourceKind == CaptureJournalSourceKind.XboxGameDvr;
+            return new GalleryCapturePresentation(
+                routes.GetValueOrDefault(clipId, GalleryClipRoute.LocalOnly),
+                xbox ? GalleryClipSource.Xbox : GalleryClipSource.ClipCord,
+                xbox ? BuildXboxDisplayFileName(path, journal.Clip.GameName) : null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            AddCaptureRoutingWarning(warnings);
+            Log.Error("Could not read Capture Journal metadata for one Gallery clip.", exception);
+            return null;
+        }
+    }
+
+    private static string BuildXboxDisplayFileName(string path, string gameName)
+    {
+        var fileName = Path.GetFileName(path);
+        const string xboxPrefix = "Xbox__";
+        return fileName.StartsWith(xboxPrefix, StringComparison.OrdinalIgnoreCase)
+            ? UploadedFolder.SanitizeGameFolderName(gameName) +
+              fileName["Xbox".Length..]
+            : fileName;
+    }
+
+    private static void AddCaptureRoutingWarning(ICollection<string> warnings)
+    {
+        const string warning = "Some ClipCord upload labels could not be read.";
+        if (!warnings.Contains(warning)) warnings.Add(warning);
+    }
+
+    private sealed record GalleryCapturePresentation(
+        GalleryClipRoute Route,
+        GalleryClipSource Source,
+        string? DisplayFileName);
 
     internal static GalleryRenditionPresentation LoadRenditionPresentation(
         string libraryRoot,

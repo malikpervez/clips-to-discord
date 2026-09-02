@@ -91,6 +91,12 @@ internal interface IRoutingWatchedSourceAdapter
     Task<RoutingWatchedSourceFile> RevalidateAsync(
         RoutingWatchedSourceFile prior,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Captures the same path- and native-directory-bound authority used by admitted clips,
+    /// without requiring the source to contain a clip yet.
+    /// </summary>
+    string InspectRootIdentity(string clipsRoot);
 }
 
 internal static class RoutingWatchedSourceAdapters
@@ -242,6 +248,19 @@ internal abstract class RoutingWatchedSourceAdapter : IRoutingWatchedSourceAdapt
 
     public ClipCaptureSource Source { get; }
 
+    public string InspectRootIdentity(string clipsRoot)
+    {
+        var root = RoutingWatchedFileSystem.OpenOrdinaryRoot(clipsRoot);
+        using (root.Handle)
+        {
+            RoutingWatchedFileSystem.RequireExactFinalPath(
+                root.Handle,
+                root.CanonicalPath,
+                "watched source root");
+            return CreateRootIdentity(Source, root.CanonicalPath, root.Identity);
+        }
+    }
+
     public IReadOnlyList<string> EnumerateCandidates(
         string clipsRoot,
         CancellationToken cancellationToken = default)
@@ -318,7 +337,7 @@ internal abstract class RoutingWatchedSourceAdapter : IRoutingWatchedSourceAdapt
                 pathFacts.PortableRelativePath,
                 pathFacts.GameName,
                 pathFacts.DisplayFileName,
-                CreateRootIdentity(root.CanonicalPath, root.Identity),
+                CreateRootIdentity(Source, root.CanonicalPath, root.Identity),
                 before,
                 hash);
         }
@@ -379,7 +398,7 @@ internal abstract class RoutingWatchedSourceAdapter : IRoutingWatchedSourceAdapt
                 pathFacts.PortableRelativePath,
                 pathFacts.GameName,
                 pathFacts.DisplayFileName,
-                CreateRootIdentity(root.CanonicalPath, root.Identity),
+                CreateRootIdentity(Source, root.CanonicalPath, root.Identity),
                 identity));
         }
     }
@@ -449,13 +468,16 @@ internal abstract class RoutingWatchedSourceAdapter : IRoutingWatchedSourceAdapt
     protected static string ToPortablePath(IReadOnlyList<string> components) =>
         string.Join('/', components);
 
-    private string CreateRootIdentity(
+    internal static string CreateRootIdentity(
+        ClipCaptureSource source,
         string canonicalRoot,
         RoutingWatchedNativeFileIdentity identity)
     {
+        if (!Enum.IsDefined(source))
+            throw new ArgumentOutOfRangeException(nameof(source));
         var material = string.Create(
             CultureInfo.InvariantCulture,
-            $"clipcord-watched-root-v1\n{Source}\n" +
+            $"clipcord-watched-root-v1\n{source}\n" +
             $"{canonicalRoot.Normalize(NormalizationForm.FormC).ToUpperInvariant()}\n" +
             $"{identity.VolumeSerialNumber:x8}\n{identity.FileIdHex}");
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)))

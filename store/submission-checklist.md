@@ -34,9 +34,21 @@ ClipCord keeps completed gaming clips organized and ready to share.
 
 ClipCord has no analytics, advertising, account system, telemetry service, or project-operated server. Discord uploads occur only through the webhook configured by the user. ClipCord is not affiliated with Discord or any recording-software vendor.
 
-## Restricted capability explanation
+## Capability explanations
+
+### `runFullTrust`
 
 ClipCord is a traditional WinForms/WPF notification-area desktop application and declares `runFullTrust` so it can monitor a user-selected folder for completed MP4 files, launch its bundled FFmpeg process for local thumbnails/playback/editing/compression, register an optional global hotkey, integrate with the Windows notification area, and organize files into user-visible local archive folders. It runs at medium integrity as the current user, does not request elevation, and installs no service, driver, browser extension, or shell extension.
+
+### `graphicsCaptureWithoutBorder`
+
+ClipCord declares `graphicsCaptureWithoutBorder` for its optional ClipCord Capture feature. After the user chooses a game window, or after ClipCord locally recognizes the foreground game for Instant Replay, ClipCord uses Windows Graphics Capture to record that fixed game window. The capability lets ClipCord request that Windows omit the system capture border while recording, so the indicator does not cover or distract from live gameplay. ClipCord requests borderless access through the Windows app-capability API; if Windows does not grant it, capture remains available with the normal Windows capture indicator. Manual selection continues to use the Windows capture picker, automatic capture rejects non-game windows, and a recording never follows focus to another window or monitor. The capability does not elevate the app. Gameplay frames remain on the PC unless the user later sends a completed clip through an enabled route. See [Privacy and security — File handling](../docs/PRIVACY.md#file-handling).
+
+### `webcam`
+
+ClipCord declares `webcam` only for its optional Reaction Camera feature. Reaction Camera is off by default, requires the user's explicit in-app consent, and remains subject to Windows camera privacy controls. ClipCord opens only the camera selected by the user, and only for a requested consent preview or while a manual recording or recognized-game Instant Replay buffer is actively capturing. Unsaved replay camera frames remain in bounded memory; saved camera media is processed locally as a separate reaction layer and is not uploaded by itself. If camera access is denied or unavailable, gameplay capture continues without the camera. See [Privacy and security — File handling](../docs/PRIVACY.md#file-handling).
+
+These explanations are the capability-purpose text to provide with a Store submission. They do not state or imply that Microsoft has approved any capability for a particular submission.
 
 ## Certification notes
 

@@ -159,6 +159,79 @@ internal static class RoutingSnapshotModel
             RoutingValidation.Require(conditionIds.Add(condition.ConditionId),
                 "Condition ids must be unique within a route.");
         }
+        var sourceConnectionConditions = conditions
+            .Where(condition => condition.Field == RoutingConditionField.SourceConnection)
+            .ToArray();
+        var capturedAtConditions = conditions
+            .Where(condition => condition.Field == RoutingConditionField.CapturedAt)
+            .ToArray();
+        RoutingValidation.Require(sourceConnectionConditions.Length <= 1 &&
+                                  capturedAtConditions.Length <= 1,
+            "A route can bind only one source connection and one capture cutoff.");
+        var hasNamedSourceBinding = sourceConnectionConditions.Length > 0;
+        var hasXboxHistoryContract = capturedAtConditions.Length > 0 ||
+                                     route.XboxHistorySelection is not null;
+        if (hasNamedSourceBinding || hasXboxHistoryContract)
+        {
+            RoutingValidation.Require(route.Kind == RoutingRouteKind.Specific &&
+                                      route.Trigger == RoutingTriggerKind.WatchedFolder,
+                "Source-bound conditions require a specific watched-folder route.");
+            RoutingValidation.Require(sourceConnectionConditions is
+                [{ Operator: RoutingConditionOperator.Equals }],
+                "A named watched source requires one exact source connection.");
+        }
+
+        if (hasXboxHistoryContract)
+        {
+            RoutingValidation.Require(capturedAtConditions is
+                    [{ Operator: RoutingConditionOperator.GreaterThanOrEqual }] &&
+                route.XboxHistorySelection is not null,
+                "An Xbox route requires one exact source, lower cutoff, and frozen history selection.");
+
+            var selection = route.XboxHistorySelection;
+            RoutingValidation.RequireUtc(
+                selection!.ActivationUtc, "Xbox history activation timestamp");
+            var occurrences = selection.HistoricalOccurrences ??
+                throw new InvalidDataException(
+                    "The Xbox historical occurrence selection is missing.");
+            RoutingValidation.Require(
+                occurrences.Count <= XboxDvrHistoryPolicy.MaximumAllowedHistoricalClips,
+                "The Xbox historical occurrence selection is too large.");
+            var uniqueOccurrenceIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var occurrence in occurrences)
+            {
+                if (occurrence is null)
+                    throw new InvalidDataException(
+                        "An Xbox historical occurrence selection entry is missing.");
+                RoutingValidation.RequireSha256(
+                    occurrence.OccurrenceId, "Xbox historical occurrence identity");
+                RoutingValidation.RequireSha256(
+                    occurrence.RevisionId, "Xbox historical revision identity");
+                RoutingValidation.Require(
+                    occurrence.OccurrenceId.All(character =>
+                        character is >= '0' and <= '9' or >= 'a' and <= 'f') &&
+                    occurrence.RevisionId.All(character =>
+                        character is >= '0' and <= '9' or >= 'a' and <= 'f'),
+                    "Xbox historical identities must use canonical lowercase SHA-256 text.");
+                RoutingValidation.Require(uniqueOccurrenceIds.Add(occurrence.OccurrenceId),
+                    "Xbox historical occurrence identities must be unique.");
+            }
+            RoutingValidation.Require(occurrences.SequenceEqual(
+                    occurrences.OrderBy(item => item.OccurrenceId, StringComparer.Ordinal)),
+                "Xbox historical occurrence identities must use canonical order.");
+            var cutoff = DateTimeOffset.ParseExact(
+                capturedAtConditions[0].Value,
+                "O",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None);
+            RoutingValidation.Require(cutoff <= selection.ActivationUtc,
+                "The Xbox history cutoff cannot be after route activation.");
+        }
+        else
+        {
+            RoutingValidation.Require(route.XboxHistorySelection is null,
+                "Only an Xbox route can carry a history selection.");
+        }
 
         var actionIds = new HashSet<Guid>();
         var terminalCount = 0;
@@ -228,6 +301,28 @@ internal static class RoutingSnapshotModel
                         RoutingConditionOperator.DoesNotEqual) &&
                     bool.TryParse(condition.Value, out _),
                     "A reaction-camera condition is invalid.");
+                break;
+            case RoutingConditionField.SourceConnection:
+                RoutingValidation.Require(
+                    condition.Operator is RoutingConditionOperator.Equals or
+                        RoutingConditionOperator.DoesNotEqual,
+                    "A source-connection condition uses an unsupported operator.");
+                RoutingInputSourceCatalogModel.ValidateSourceId(condition.Value);
+                break;
+            case RoutingConditionField.CapturedAt:
+                RoutingValidation.Require(
+                    (condition.Operator is RoutingConditionOperator.GreaterThanOrEqual or
+                        RoutingConditionOperator.LessThanOrEqual) &&
+                    DateTimeOffset.TryParseExact(
+                        condition.Value,
+                        "O",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.None,
+                        out var capturedUtc) &&
+                    capturedUtc.Offset == TimeSpan.Zero &&
+                    capturedUtc.ToString("O", CultureInfo.InvariantCulture)
+                        .Equals(condition.Value, StringComparison.Ordinal),
+                    "A captured-at condition is invalid.");
                 break;
             default:
                 throw new InvalidDataException("A route condition kind is unsupported.");
@@ -523,6 +618,8 @@ internal static class RoutingOutboxModel
             throw new InvalidDataException("Evaluated matched-route evidence is missing.");
         var latentAuthorizations = proposal.LatentDuplicateAuthorizations ??
             throw new InvalidDataException("Evaluated duplicate authorization evidence is missing.");
+        if (proposal.LocalOnlyOverride is not null)
+            RoutingLocalOnlyAdmissionSnapshot.Validate(proposal.LocalOnlyOverride);
         RoutingValidation.Require(matchedRouteIds.All(id => id != Guid.Empty) &&
                                   matchedRouteIds.Distinct().Count() == matchedRouteIds.Count,
             "Evaluated matched-route evidence is invalid.");
@@ -585,9 +682,20 @@ internal static class RoutingOutboxModel
                                           proposal.SourceClipId, StringComparison.Ordinal) &&
                                       disposition.Route.RoutingGeneration ==
                                           proposal.RoutingGeneration &&
-                                      matchedRouteIds.Contains(disposition.Route.RouteId),
+                                      (matchedRouteIds.Contains(disposition.Route.RouteId) ||
+                                       proposal.LocalOnlyOverride is { Enabled: true } &&
+                                       RoutingLocalOnlyPlanPolicy.IsSyntheticDisposition(
+                                           disposition)),
                 "An evaluated file disposition does not belong to its frozen plan.");
             ValidateInitialDisposition(disposition);
+        }
+        if (proposal.LocalOnlyOverride is { Enabled: true })
+        {
+            RoutingValidation.Require(
+                deliveries.Count == 0 && dispositions is [{ LibraryArea: RoutingLibraryArea.LocalOnly }] &&
+                RoutingLocalOnlyPlanPolicy.IsSyntheticDisposition(dispositions[0]) &&
+                resolutions.Count == 0 && latentAuthorizations.Count == 0,
+                "A local-only override plan must suppress every external delivery and freeze one local filing action.");
         }
         ValidateAppendEnvelope(
             current,
@@ -604,7 +712,8 @@ internal static class RoutingOutboxModel
             matchedRouteIds.ToArray(),
             resolutions.ToArray(),
             latentAuthorizations.ToArray(),
-            immutablePlanUtc);
+            immutablePlanUtc,
+            proposal.LocalOnlyOverride);
         var candidate = current with
         {
             Generation = RoutingValidation.NextGeneration(current.Generation),
@@ -1326,13 +1435,25 @@ internal static class RoutingOutboxModel
                 .ToArray();
             RoutingValidation.Require(routeReferences.All(item =>
                                           item.RoutingGeneration == plan.RoutingGeneration &&
-                                          plan.MatchedRouteIds.Contains(item.RouteId)),
+                                          (plan.MatchedRouteIds.Contains(item.RouteId) ||
+                                           plan.LocalOnlyOverride is { Enabled: true } &&
+                                           item.RouteId == RoutingLocalOnlyPlanPolicy.SyntheticRouteId &&
+                                           item.ActionId == RoutingLocalOnlyPlanPolicy.SyntheticActionId)),
                 "Every persisted plan member must share one frozen routing generation.");
             RoutingValidation.Require(routeReferences.Select(item => (item.RouteId, item.ActionId))
                                           .Distinct().Count() == routeReferences.Length,
                 "A persisted plan cannot repeat the same route action.");
             RoutingValidation.Require(planDispositions.Length <= 1,
                 "Each outbox plan/source can have only one terminal disposition.");
+            if (plan.LocalOnlyOverride is { Enabled: true })
+            {
+                RoutingValidation.Require(
+                    planDeliveries.Length == 0 && planDispositions.Length == 1 &&
+                    RoutingLocalOnlyPlanPolicy.IsSyntheticDisposition(planDispositions[0]) &&
+                    plan.InitialMissingResolutions.Count == 0 &&
+                    plan.LatentDuplicateAuthorizations.Count == 0,
+                    "A persisted local-only override plan contains external or non-local work.");
+            }
             if (planDispositions.Length == 0) continue;
 
             var disposition = planDispositions[0];
@@ -2025,6 +2146,8 @@ internal static class RoutingOutboxModel
             "A routing plan decision identity is invalid.");
         RoutingValidation.RequireOpaqueId(plan.SourceClipId, 256, "plan source clip id");
         RoutingValidation.RequireUtc(plan.CreatedUtc, "plan decision timestamp");
+        if (plan.LocalOnlyOverride is not null)
+            RoutingLocalOnlyAdmissionSnapshot.Validate(plan.LocalOnlyOverride);
         var routeIds = plan.MatchedRouteIds ??
             throw new InvalidDataException("Plan matched-route evidence is missing.");
         var resolutions = plan.InitialMissingResolutions ??

@@ -166,6 +166,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
     private readonly RoutingCaptureLibraryPermit? _captureLibraryPermit;
     private readonly Func<Guid> _createAttemptId;
     private readonly Func<DateTimeOffset> _utcNow;
+    private readonly Action? _durableStateChanged;
     private readonly int _maximumSideEffectsPerRun;
     private readonly int _maximumRecoveryInspectionsPerRun;
     private readonly SemaphoreSlim _runGate = new(1, 1);
@@ -183,7 +184,8 @@ internal sealed class RoutingOutboxExecutor : IDisposable
         Func<Guid>? createAttemptId = null,
         Func<DateTimeOffset>? utcNow = null,
         int? maximumRecoveryInspectionsPerRun = null,
-        RoutingCaptureLibraryPermit? captureLibraryPermit = null)
+        RoutingCaptureLibraryPermit? captureLibraryPermit = null,
+        Action? durableStateChanged = null)
     {
         if (maximumSideEffectsPerRun is < 1 or > 256)
             throw new ArgumentOutOfRangeException(nameof(maximumSideEffectsPerRun));
@@ -201,6 +203,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
         _maximumRecoveryInspectionsPerRun = recoveryBudget;
         _createAttemptId = createAttemptId ?? Guid.NewGuid;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        _durableStateChanged = durableStateChanged;
     }
 
     internal async Task<RoutingExecutorRunResult> RunOnceAsync(
@@ -229,6 +232,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                     .ConfigureAwait(false);
                 if (recovered.Generation != before.Generation) transitions++;
                 _startupRecoveryApplied = true;
+                NotifyDurableStateChanged();
             }
 
             var providerAttempts = 0;
@@ -529,6 +533,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                         cancellationToken,
                         () => RequireMutationPermit("Routing delivery attempt commit"))
                     .ConfigureAwait(false);
+                NotifyDurableStateChanged();
                 return saved.Deliveries.Single(item => item.DeliveryId == deliveryId);
             }
             catch (RoutingConcurrencyException) when (attempt < MaximumSaveAttempts - 1)
@@ -566,6 +571,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                         cancellationToken,
                         () => RequireMutationPermit("Routing file attempt commit"))
                     .ConfigureAwait(false);
+                NotifyDurableStateChanged();
                 return saved.FileDispositions.Single(item => item.DispositionId == dispositionId);
             }
             catch (RoutingConcurrencyException) when (attempt < MaximumSaveAttempts - 1)
@@ -708,6 +714,7 @@ internal sealed class RoutingOutboxExecutor : IDisposable
                         cancellationToken,
                         () => RequireMutationPermit("Routing outbox transition commit"))
                     .ConfigureAwait(false);
+                NotifyDurableStateChanged();
                 return true;
             }
             catch (RoutingConcurrencyException) when (attempt < MaximumSaveAttempts - 1)
@@ -720,6 +727,20 @@ internal sealed class RoutingOutboxExecutor : IDisposable
 
     private bool CanExecute() =>
         _canExecute() && _captureLibraryPermit?.Inspect().Allowed == true;
+
+    private void NotifyDurableStateChanged()
+    {
+        try
+        {
+            _durableStateChanged?.Invoke();
+        }
+        catch (Exception exception)
+        {
+            Log.Error(
+                "Could not notify Activity about durable Routing state; routing will continue.",
+                exception);
+        }
+    }
 
     private void RequireMutationPermit(string operation)
     {

@@ -12,6 +12,8 @@ internal static class RoutingExecutorTests
     {
         Directory.CreateDirectory(testRoot);
         await AssertConfirmedDeliveryAndFilingAsync(Path.Combine(testRoot, "confirmed"));
+        await AssertRestartNeverResendsConfirmedDeliveryWithoutDispositionAsync(
+            Path.Combine(testRoot, "confirmed-delivery-restart"));
         await AssertDefiniteAndUnknownResultsAsync(Path.Combine(testRoot, "outcomes"));
         await AssertStartupNeverResendsInterruptedAttemptAsync(Path.Combine(testRoot, "restart"));
         await AssertAmbiguousFileRecoveryAsync(Path.Combine(testRoot, "file-recovery"));
@@ -78,6 +80,42 @@ internal static class RoutingExecutorTests
         _ = await executor.RunOnceAsync();
         Assert(provider.Calls == 1 && filer.FileCalls == 1,
             "Re-running a completed executor must not repeat either side effect.");
+    }
+
+    private static async Task AssertRestartNeverResendsConfirmedDeliveryWithoutDispositionAsync(
+        string root)
+    {
+        var seeded = await SeedAsync(root, includeDelivery: true);
+        var provider = new RecordingProvider((_, _, _) =>
+            RoutingDeliveryAttemptResult.Confirmed("discord:message-restart-proof"));
+
+        using (var firstExecutor = Executor(
+                   seeded.Store, provider, new RecordingResolver(), new RecordingFiler()))
+        {
+            var firstRun = await firstExecutor.RunOnceAsync();
+            Assert(firstRun.ProviderAttempts == 1 && provider.Calls == 1,
+                "The initial delivery-only plan must call Discord exactly once.");
+        }
+
+        var beforeRestart = seeded.Store.Load().Document!;
+        var recovered = await seeded.Store.LoadAndRecoverAsync(At(20));
+        var recoveredDelivery = recovered.Deliveries.Single();
+        Assert(beforeRestart.FileDispositions.Count == 0 &&
+               recovered.FileDispositions.Count == 0 &&
+               recoveredDelivery.State == PlannedDeliveryState.Delivered &&
+               recoveredDelivery.RemoteReceiptReference == "discord:message-restart-proof",
+            "Startup recovery must preserve a confirmed delivery-only plan as Delivered.");
+
+        using (var restartedExecutor = Executor(
+                   seeded.Store, provider, new RecordingResolver(), new RecordingFiler()))
+        {
+            var restartedRun = await restartedExecutor.RunOnceAsync();
+            var finalDelivery = seeded.Store.Load().Document!.Deliveries.Single();
+            Assert(restartedRun.ProviderAttempts == 0 && provider.Calls == 1 &&
+                   finalDelivery.State == PlannedDeliveryState.Delivered &&
+                   finalDelivery.RemoteReceiptReference == "discord:message-restart-proof",
+                "A restart must never resurrect Delivered as Ready or resend a confirmed Discord delivery.");
+        }
     }
 
     private static async Task AssertDefiniteAndUnknownResultsAsync(string root)

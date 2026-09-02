@@ -37,6 +37,8 @@ internal sealed class GalleryView : UserControl
     private readonly IGalleryThumbnailProvider _thumbnailProvider;
     private readonly IFavoritesService _favorites;
     private readonly Func<bool> _captureLibraryAccessAllowed;
+    private readonly Func<IReadOnlyList<GalleryExternalSourceRoot>>
+        _additionalExternalRootsProvider;
     private readonly Func<string, CancellationToken, string?, GalleryClipSource, GallerySnapshot>
         _scanCatalog;
     private int? _effectiveDpiForTests;
@@ -97,7 +99,10 @@ internal sealed class GalleryView : UserControl
         string? captureLibraryRoot = null,
         ClipCaptureSource externalCaptureSource = ClipCaptureSource.SteelSeriesGg,
         Func<bool>? captureLibraryAccessAllowed = null,
-        Func<string, CancellationToken, string?, GalleryClipSource, GallerySnapshot>? scanCatalog = null)
+        Func<string, CancellationToken, string?, GalleryClipSource, GallerySnapshot>? scanCatalog = null,
+        Func<IReadOnlyList<GalleryExternalSourceRoot>>? additionalExternalRootsProvider = null,
+        Func<CancellationToken, IReadOnlyList<RoutingDeliveryHistoryItem>>?
+            captureRoutingHistory = null)
     {
         _clipsFolder = clipsFolder;
         _manualClipEditService = manualClipEditService;
@@ -107,12 +112,15 @@ internal sealed class GalleryView : UserControl
         _favorites = favorites ?? new FavoritesService();
         _captureLibraryRoot = captureLibraryRoot;
         _captureLibraryAccessAllowed = captureLibraryAccessAllowed ?? (() => true);
+        _additionalExternalRootsProvider = additionalExternalRootsProvider ?? (() => []);
         _scanCatalog = scanCatalog ?? ((folder, cancellationToken, captureRoot, source) =>
             GalleryCatalog.Scan(
                 folder,
                 cancellationToken,
                 captureLibraryRoot: captureRoot,
-                externalSource: source));
+                externalSource: source,
+                additionalExternalRoots: _additionalExternalRootsProvider(),
+                captureRoutingHistory: captureRoutingHistory));
         _externalClipSource = externalCaptureSource == ClipCaptureSource.Nvidia
             ? GalleryClipSource.Nvidia
             : GalleryClipSource.SteelSeriesGg;
@@ -980,6 +988,7 @@ internal sealed class GalleryView : UserControl
         {
             clips = clips.Where(clip =>
                 clip.FileName.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+                clip.Title.Contains(search, StringComparison.OrdinalIgnoreCase) ||
                 clip.GameName.Contains(search, StringComparison.OrdinalIgnoreCase));
         }
         return _sortNewestFirst
@@ -1157,7 +1166,7 @@ internal sealed class GalleryView : UserControl
         DisposeEditor();
         DisposePlayer();
         _screen = GalleryScreen.Editor;
-        SetHeader("Edit & upload", $"{clip.GameName} · Local only · {clip.FileName}");
+        SetHeader("Edit & upload", $"{clip.GameName} · Local only · {clip.Title}");
         _backButton.Visible = true;
         _backButton.Text = "Back to clips";
         SetLibraryLayoutVisible(false);
@@ -1249,7 +1258,7 @@ internal sealed class GalleryView : UserControl
         var rendition = favoriteOwner.Renditions?.Outputs.FirstOrDefault(output =>
             output.ArtifactPath.Equals(playbackClip.Path, StringComparison.OrdinalIgnoreCase));
         var playbackKind = rendition is null ? route : $"{rendition.DisplayName} rendition";
-        SetHeader("Play clip", $"{playbackClip.GameName} · {playbackKind} · {playbackClip.FileName}");
+        SetHeader("Play clip", $"{playbackClip.GameName} · {playbackKind} · {playbackClip.Title}");
         _backButton.Visible = true;
         _backButton.Text = "Back to clips";
         SetLibraryLayoutVisible(false);
@@ -1259,7 +1268,7 @@ internal sealed class GalleryView : UserControl
             _playbackPreparer,
             _favorites.IsFavorite(favoriteOwner),
             favorite => _favorites.SetFavorite(favoriteOwner, favorite),
-            favoriteOwner.FileName,
+            favoriteOwner.Title,
             _effectiveDpiForTests);
         _playerClip = favoriteOwner;
         _playerContent = favoriteOwner.HasRenditions
@@ -1733,7 +1742,8 @@ internal sealed class GalleryView : UserControl
         {
             Path = output.ArtifactPath,
             FileName = Path.GetFileName(output.ArtifactPath),
-            Length = output.Length
+            Length = output.Length,
+            DisplayFileName = null
         };
         ShowPlayer(renditionClip, favoriteOwner);
     }
@@ -1901,8 +1911,8 @@ internal sealed class GalleryView : UserControl
             Padding = Padding.Empty,
             Margin = Padding.Empty,
             AccessibleName = clip.Renditions is null
-                ? $"{clip.FileName}, {GetRouteLabel(clip.Route)}"
-                : $"{clip.FileName}, {GetRouteLabel(clip.Route)}, {clip.Renditions.FormatsLabel}, {clip.Renditions.StatusLabel}",
+                ? $"{clip.Title}, {GetRouteLabel(clip.Route)}"
+                : $"{clip.Title}, {GetRouteLabel(clip.Route)}, {clip.Renditions.FormatsLabel}, {clip.Renditions.StatusLabel}",
             AccessibleRole = AccessibleRole.Grouping
         };
         var layout = new BufferedTableLayoutPanel
@@ -1941,7 +1951,7 @@ internal sealed class GalleryView : UserControl
             revealWhenOff: true)
         {
             Name = "GalleryClipFavoriteButton",
-            AccessibleName = $"Toggle Favorites for {clip.FileName}"
+            AccessibleName = $"Toggle Favorites for {clip.Title}"
         };
         var favoriteSide = GetFavoriteButtonSide(DeviceDpi);
         favorite.Size = new Size(favoriteSide, favoriteSide);
@@ -1953,7 +1963,7 @@ internal sealed class GalleryView : UserControl
         var play = CreateCardButton("Play", 62);
         play.Size = new Size(ScaleUi(62), ScaleUi(36));
         play.Name = "PlayGalleryClipButton";
-        play.AccessibleName = $"Play {clip.FileName}";
+        play.AccessibleName = $"Play {clip.Title}";
         play.LeadingGlyph = BrandGlyph.Play;
         play.Enabled = canAccessClip && File.Exists(clip.Path);
         play.Click += (_, _) => PlayClip(clip);
@@ -2012,7 +2022,7 @@ internal sealed class GalleryView : UserControl
         details.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var fileName = new Label
         {
-            Text = clip.FileName,
+            Text = clip.Title,
             Dock = DockStyle.Fill,
             AutoEllipsis = true,
             ForeColor = ClipCordTheme.TextPrimary,
@@ -2052,7 +2062,7 @@ internal sealed class GalleryView : UserControl
             var edit = CreateCardButton("Edit & upload", 112);
             edit.Size = new Size(ScaleUi(112), ScaleUi(36));
             edit.Name = "EditGalleryClipButton";
-            edit.AccessibleName = $"Edit and upload {clip.FileName}";
+            edit.AccessibleName = $"Edit and upload {clip.Title}";
             edit.LeadingGlyph = BrandGlyph.Trim;
             edit.Dock = DockStyle.Fill;
             edit.SurfaceColor = ClipCordTheme.VioletMuted;
@@ -2076,7 +2086,7 @@ internal sealed class GalleryView : UserControl
         var show = CreateCardButton("Folder", 76);
         show.Size = new Size(ScaleUi(76), ScaleUi(36));
         show.Name = "ShowGalleryClipButton";
-        show.AccessibleName = $"Show {clip.FileName} in its folder";
+        show.AccessibleName = $"Show {clip.Title} in its folder";
         show.LeadingGlyph = BrandGlyph.Folder;
         show.Margin = ScalePadding(8, 0, 0, 0);
         show.Enabled = canAccessClip && File.Exists(clip.Path);
@@ -2440,7 +2450,10 @@ internal sealed class GalleryView : UserControl
     }
 
     private bool CanAccessClip(GalleryClipEntry clip) =>
-        clip.Source != GalleryClipSource.ClipCord || HasCaptureLibraryAccess();
+        !IsCaptureLibrarySource(clip.Source) || HasCaptureLibraryAccess();
+
+    private static bool IsCaptureLibrarySource(GalleryClipSource source) =>
+        source is GalleryClipSource.ClipCord or GalleryClipSource.Xbox;
 
     private bool HasCaptureLibraryAccess()
     {
@@ -2462,7 +2475,7 @@ internal sealed class GalleryView : UserControl
             .Select(game => new GalleryGameEntry(
                 game.Name,
                 game.Clips
-                    .Where(clip => clip.Source != GalleryClipSource.ClipCord)
+                    .Where(clip => !IsCaptureLibrarySource(clip.Source))
                     .ToArray()))
             .Where(game => game.Clips.Count > 0)
             .ToArray();

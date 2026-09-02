@@ -85,6 +85,7 @@ internal sealed class SettingsForm : Form
     };
     private readonly Label _watcherStatusLabel = new()
     {
+        Name = "WatcherStatusLabel",
         Dock = DockStyle.Fill,
         AutoEllipsis = true,
         ForeColor = ClipCordTheme.ShellText,
@@ -93,6 +94,7 @@ internal sealed class SettingsForm : Form
     };
     private readonly Label _watcherStatusDetailLabel = new()
     {
+        Name = "WatcherStatusDetailLabel",
         Dock = DockStyle.Fill,
         AutoEllipsis = true,
         ForeColor = ClipCordTheme.TextTertiary,
@@ -193,6 +195,8 @@ internal sealed class SettingsForm : Form
     private readonly OutlineButton _nvidiaSourceButton = CreateSecondaryButton("NVIDIA", 108);
     private readonly Label _captureSourceHelper = CreateHelper(string.Empty);
     private readonly OutlineButton _testButton = CreateSecondaryButton("Test webhook", 130);
+    private readonly OutlineButton _manageRoutingConnectionsButton =
+        CreateSecondaryButton("Manage connections", 150);
     private readonly OutlineButton _checkUpdatesButton = CreateSecondaryButton("Check for updates", 166);
     private readonly GradientButton _saveButton = new()
     {
@@ -239,6 +243,10 @@ internal sealed class SettingsForm : Form
     private readonly string _silhouetteSettingsDirectory;
     private readonly DiscordConnectionCatalog? _discordConnectionCatalog;
     private readonly RoutingRouteManager? _routingRouteManager;
+    private readonly Func<RoutesRuntimeViewState>? _routesRuntimeStateProvider;
+    private readonly Func<Task<bool>>? _retryRoutesRuntimeAsync;
+    private readonly IRoutingLocalOnlyModeViewSource? _routingLocalOnlyMode;
+    private readonly Func<RoutingUiPresentationSnapshot?>? _routingPresentationProvider;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _homeNavigationItem;
     private RoundedPanel? _activityNavigationItem;
@@ -249,8 +257,17 @@ internal sealed class SettingsForm : Form
     private BufferedTableLayoutPanel? _rootLayout;
     private Control? _saveBar;
     private Control? _navigationRail;
+    private Label? _railRoutingTitleLabel;
+    private TableLayoutPanel? _railRouteSelector;
+    private RoutingRailSummaryControl? _railDestinationSummary;
     private OutlineButton? _railDiscordRouteButton;
     private OutlineButton? _railLocalRouteButton;
+    private Label? _railHotkeyHint;
+    private HomeRouteDot? _railWatcherStatusDot;
+    private Control? _clipsFolderLabelBlock;
+    private Control? _captureSourceLabelBlock;
+    private Control? _webhookLabelBlock;
+    private Control? _modeHotkeyLabelBlock;
     private HomeView? _homePage;
     private Control? _settingsPage;
     private BrandedScrollHost? _settingsScrollHost;
@@ -262,8 +279,11 @@ internal sealed class SettingsForm : Form
     private AboutView? _aboutPage;
     private bool _busy;
     private bool _galleryBusy;
+    private bool _homeRoutingActionBusy;
     private bool _dirtyTrackingReady;
     private bool _settingsDirty;
+    private bool? _lastLegacySettingsControlsAvailable;
+    private readonly List<RoundedPanel> _managedSettingsNavigationRows = [];
     private SettingsPage _currentPage;
     private ClipCaptureSource _captureSource = ClipCaptureSource.SteelSeriesGg;
     private string? _lastWatcherFullStatus;
@@ -292,7 +312,11 @@ internal sealed class SettingsForm : Form
         DiscordConnectionCatalog? discordConnectionCatalog = null,
         RoutingRouteManager? routingRouteManager = null,
         Func<bool>? captureLibraryAccessAllowed = null,
-        Func<string, bool>? repairCaptureLibraryRoot = null)
+        Func<string, bool>? repairCaptureLibraryRoot = null,
+        Func<RoutesRuntimeViewState>? routesRuntimeStateProvider = null,
+        Func<Task<bool>>? retryRoutesRuntimeAsync = null,
+        IRoutingLocalOnlyModeViewSource? localOnlyMode = null,
+        Func<RoutingUiPresentationSnapshot?>? routingPresentationProvider = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -313,6 +337,10 @@ internal sealed class SettingsForm : Form
         _repairCaptureLibraryRoot = repairCaptureLibraryRoot;
         _discordConnectionCatalog = discordConnectionCatalog;
         _routingRouteManager = routingRouteManager;
+        _routesRuntimeStateProvider = routesRuntimeStateProvider;
+        _retryRoutesRuntimeAsync = retryRoutesRuntimeAsync;
+        _routingLocalOnlyMode = localOnlyMode;
+        _routingPresentationProvider = routingPresentationProvider;
         _silhouetteSettingsDirectory = Path.GetFullPath(
             silhouetteSettingsDirectory ?? SettingsStore.DataDirectory);
         _ownsActivityHistory = activityHistory is null;
@@ -338,6 +366,7 @@ internal sealed class SettingsForm : Form
         ConfigureCompressionTargetPicker();
         _modeToggleHotkeyText.ReadOnly = true;
         _modeToggleHotkeyText.ShortcutsEnabled = false;
+        _modeToggleHotkeyAction.Name = "LegacyModeHotkeyActionButton";
         _modeToggleHotkeyText.Text = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
         _modeToggleHotkeyText.KeyDown += CaptureModeToggleHotkey;
         _modeToggleHotkeyText.Enter += (_, _) => _modeToggleHotkeyText.SelectAll();
@@ -355,7 +384,13 @@ internal sealed class SettingsForm : Form
         UpdateUploadModeText();
 
         _browseButton.Click += BrowseClicked;
+        _browseButton.Name = "BrowseClipsFolderButton";
         _testButton.Click += TestClicked;
+        _testButton.Name = "TestWebhookButton";
+        _testButton.AccessibleName = "Test legacy Discord webhook";
+        _manageRoutingConnectionsButton.Name = "ManageRoutingConnectionsButton";
+        _manageRoutingConnectionsButton.AccessibleName = "Manage Discord connections in Routes";
+        _manageRoutingConnectionsButton.Click += (_, _) => ShowPage(SettingsPage.Routes);
         _checkUpdatesButton.Click += CheckUpdatesClicked;
         _checkUpdatesButton.Name = "SettingsCheckUpdatesButton";
         _checkUpdatesButton.Enabled = _checkForUpdatesAsync is not null;
@@ -518,7 +553,8 @@ internal sealed class SettingsForm : Form
             _appliedSettings,
             _activityHistory,
             _watcherStatusProvider,
-            showPageHeader: false);
+            showPageHeader: false,
+            routingPresentationProvider: _routingPresentationProvider);
         _homePage.NavigateToActivityRequested += (_, _) => ShowPage(SettingsPage.Activity);
         _homePage.OpenClipsFolderRequested += (_, _) => OpenHomeFolder(_folderText.Text);
         _homePage.OpenUploadedFolderRequested += (_, _) =>
@@ -527,6 +563,9 @@ internal sealed class SettingsForm : Form
             OpenHomeFolder(UploadedFolder.FindExistingLocalOnly(_folderText.Text));
         _homePage.OpenLogsRequested += (_, _) => OpenHomeLogs();
         _homePage.CheckUpdatesRequested += CheckUpdatesClicked;
+        _homePage.RoutingActionRequested += HomeRoutingActionRequested;
+        var legacySettingsControls = UsesLegacySettingsControls();
+        _lastLegacySettingsControlsAvailable = legacySettingsControls;
         _settingsScrollHost = new BrandedScrollHost
         {
             Name = "SettingsScrollHost",
@@ -535,7 +574,7 @@ internal sealed class SettingsForm : Form
             Dock = DockStyle.Fill,
             Margin = Padding.Empty,
             BackColor = ClipCordTheme.Shell,
-            Content = BuildCards()
+            Content = BuildSettingsCards(legacySettingsControls)
         };
         _settingsPage = _settingsScrollHost;
         _activityPage = new ActivityView(
@@ -551,16 +590,32 @@ internal sealed class SettingsForm : Form
             _saveCaptureSettings,
             _manualCaptureRecorder,
             _captureLibraryAccessAllowed,
-            _repairCaptureLibraryRoot);
+            _repairCaptureLibraryRoot,
+            modeHotkeyProvider: GetAuthoritativeModeHotkey);
+        var inputSourceCatalog = new RoutingInputSourceCatalog();
         var routeManager = _routingRouteManager ?? new RoutingRouteManager(
-            connectionMembership: _discordConnectionCatalog);
+            connectionMembership: _discordConnectionCatalog,
+            inputSourceMembership: inputSourceCatalog);
         _routesPage = new RoutesView(
             routeManager,
             connections: _discordConnectionCatalog is null
                 ? new LegacyDiscordConnectionViewSource(() => _appliedSettings)
-                : new DiscordConnectionCatalogViewSource(_discordConnectionCatalog));
+                : new DiscordConnectionCatalogViewSource(_discordConnectionCatalog),
+            runtimeStateProvider: _routesRuntimeStateProvider,
+            retryRuntimeAsync: _retryRoutesRuntimeAsync,
+            inputSources: new RoutingInputSourceCatalogViewSource(
+                inputSourceCatalog,
+                new WindowsXboxDvrMetadataFileSystem(),
+                libraryRoot: _initialCaptureSettings.LibraryRoot,
+                legacyWatchedRoot: _appliedSettings.ClipsFolder),
+            localOnlyMode: _routingLocalOnlyMode,
+            migratedInputSource: new RoutingMigratedInputSourceDisplay(
+                $"{AppSettings.DescribeCaptureSource(_appliedSettings.CaptureSource)} · migrated source",
+                $"Existing 1.x folder · {Path.GetFileName(Path.TrimEndingDirectorySeparator(_appliedSettings.ClipsFolder))} · locked to the committed Routing migration",
+                AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource)));
         _routesPage.OpenSettingsRequested += (_, _) => ShowPage(SettingsPage.Settings);
         _routesPage.DeliveryHistoryRequested += (_, _) => ShowRoutingDeliveryHistory();
+        _routesPage.LocalOnlyModeChanged += (_, _) => RefreshRoutingPresentation();
         _silhouetteLayoutsPage = new SilhouetteLayoutEditorView(
             _silhouetteSettingsDirectory,
             mirrorCameraDefault: true);
@@ -577,7 +632,22 @@ internal sealed class SettingsForm : Form
             _favorites,
             _initialCaptureSettings.LibraryRoot,
             _appliedSettings.CaptureSource,
-            _captureLibraryAccessAllowed);
+            _captureLibraryAccessAllowed,
+            additionalExternalRootsProvider: () =>
+            {
+                var snapshot = inputSourceCatalog.Inspect();
+                if (!snapshot.IsUsable) return [];
+                return snapshot.Sources
+                    .Where(IsTrustedNamedGallerySource)
+                    .Select(source => new GalleryExternalSourceRoot(
+                        source.CanonicalRoot,
+                        source.Kind == RoutingInputSourceKind.Nvidia
+                            ? GalleryClipSource.Nvidia
+                            : GalleryClipSource.SteelSeriesGg))
+                    .ToArray();
+            },
+            captureRoutingHistory: new RoutingDeliveryHistoryReader(
+                new RoutingOutboxStore()).Read);
         _capturePage.SettingsChanged += settings => _galleryPage.SetCaptureLibraryRoot(settings.LibraryRoot);
         _galleryPage.SetEmbeddedHeaderVisible(false);
         _galleryPage.HeaderChanged += (title, subtitle) =>
@@ -588,7 +658,10 @@ internal sealed class SettingsForm : Form
         };
         _galleryPage.OperationBusyChanged += GalleryOperationBusyChanged;
         _galleryPage.RenditionRetryRequested += GalleryRenditionRetryRequestedFromView;
-        _aboutPage = new AboutView(_appliedSettings, _watcherStatusProvider);
+        _aboutPage = new AboutView(
+            _appliedSettings,
+            _watcherStatusProvider,
+            routingPresentationProvider: _routingPresentationProvider);
         _aboutPage.CheckUpdatesRequested += CheckUpdatesClicked;
         _aboutPage.SetBusy(false, _checkForUpdatesAsync is not null);
         _homePage.SetUpdateBusy(false, _checkForUpdatesAsync is not null);
@@ -829,16 +902,18 @@ internal sealed class SettingsForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(1)));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(24)));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.Controls.Add(new Label
+        _railRoutingTitleLabel = new Label
         {
+            Name = "RailRoutingTitleLabel",
             Text = "NEW CLIPS GO TO",
             AutoSize = true,
             ForeColor = ClipCordTheme.TextTertiary,
             Font = ClipCordTheme.InterfaceFont(7.25f, FontStyle.Bold),
             Margin = new Padding(0, 0, 0, 5)
-        }, 0, 0);
+        };
+        layout.Controls.Add(_railRoutingTitleLabel, 0, 0);
 
-        var routes = new BufferedTableLayoutPanel
+        _railRouteSelector = new BufferedTableLayoutPanel
         {
             Name = "RailRouteSelector",
             Dock = DockStyle.Fill,
@@ -848,18 +923,27 @@ internal sealed class SettingsForm : Form
             Padding = new Padding(2),
             BackColor = ClipCordTheme.SurfaceBase
         };
-        routes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        routes.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        routes.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _railRouteSelector.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _railRouteSelector.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _railRouteSelector.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         _railDiscordRouteButton = CreateRailRouteButton("● Discord", "Route new clips to Discord");
         _railLocalRouteButton = CreateRailRouteButton("● Local", "Keep new clips local only");
+        _railDiscordRouteButton.Name = "RailDiscordRouteButton";
+        _railLocalRouteButton.Name = "RailLocalRouteButton";
         _railDiscordRouteButton.Click += (_, _) => StageRailRoute(uploadToDiscord: true);
         _railLocalRouteButton.Click += (_, _) => StageRailRoute(uploadToDiscord: false);
-        routes.Controls.Add(_railDiscordRouteButton, 0, 0);
-        routes.Controls.Add(_railLocalRouteButton, 1, 0);
-        layout.Controls.Add(routes, 0, 1);
+        _railRouteSelector.Controls.Add(_railDiscordRouteButton, 0, 0);
+        _railRouteSelector.Controls.Add(_railLocalRouteButton, 1, 0);
+        layout.Controls.Add(_railRouteSelector, 0, 1);
+        _railDestinationSummary = new RoutingRailSummaryControl
+        {
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Visible = false
+        };
+        layout.Controls.Add(_railDestinationSummary, 0, 1);
 
-        var hotkey = new Label
+        _railHotkeyHint = new Label
         {
             Name = "RailHotkeyHint",
             Text = $"{AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text)}  to swap",
@@ -868,7 +952,7 @@ internal sealed class SettingsForm : Form
             Font = ClipCordTheme.InterfaceFont(8f),
             Margin = new Padding(0, 6, 0, 5)
         };
-        layout.Controls.Add(hotkey, 0, 2);
+        layout.Controls.Add(_railHotkeyHint, 0, 2);
         layout.Controls.Add(new Panel
         {
             Dock = DockStyle.Fill,
@@ -888,14 +972,15 @@ internal sealed class SettingsForm : Form
         watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(16)));
         watcherHeadline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         watcherHeadline.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        watcherHeadline.Controls.Add(new HomeRouteDot
+        _railWatcherStatusDot = new HomeRouteDot
         {
             Name = "RailWatcherStatusDot",
             Dock = DockStyle.Fill,
             Accent = Color.FromArgb(49, 196, 130),
             Margin = Padding.Empty,
             AccessibleName = string.Empty
-        }, 0, 0);
+        };
+        watcherHeadline.Controls.Add(_railWatcherStatusDot, 0, 0);
         _watcherStatusLabel.Font = ClipCordTheme.InterfaceFont(9f, FontStyle.Bold);
         _watcherStatusLabel.ForeColor = ClipCordTheme.TextPrimary;
         watcherHeadline.Controls.Add(_watcherStatusLabel, 1, 0);
@@ -922,6 +1007,11 @@ internal sealed class SettingsForm : Form
 
     private void StageRailRoute(bool uploadToDiscord)
     {
+        if (!UsesLegacyRailPresentation())
+        {
+            ShowPage(SettingsPage.Routes);
+            return;
+        }
         if (_busy || _galleryBusy || _uploadToDiscord.Checked == uploadToDiscord) return;
         _uploadToDiscord.Checked = uploadToDiscord;
         // Routing a watcher is a durable lifecycle change. Bring the user to the
@@ -962,6 +1052,7 @@ internal sealed class SettingsForm : Form
         _aboutPage.Visible = showAbout;
         if (showHome)
         {
+            _activityHistory.RefreshExternalEntries();
             _galleryPage.Deactivate();
             _homePage?.BringToFront();
             _homePage?.ActivateView();
@@ -977,6 +1068,7 @@ internal sealed class SettingsForm : Form
         }
         else if (showActivity)
         {
+            _activityHistory.RefreshExternalEntries();
             _homePage?.DeactivateView();
             _galleryPage.Deactivate();
             _activityPage.BringToFront();
@@ -1041,7 +1133,9 @@ internal sealed class SettingsForm : Form
         (_pageTitleLabel.Text, _pageSubtitleLabel.Text) = page switch
         {
             SettingsPage.Home => ("Home", "Everything ClipCord is doing right now"),
-            SettingsPage.Settings => ("Settings", "Where clips come from, and where they go"),
+            SettingsPage.Settings => UsesLegacySettingsControls()
+                ? ("Settings", "Where clips come from, and where they go")
+                : ("Settings", "App preferences · clip sources, connections and delivery live in Routes"),
             SettingsPage.Activity => ("Activity", "Recent clip activity stored on this PC"),
             SettingsPage.Capture => ("Capture", "Save the last minutes of gameplay locally, encoded on your GPU"),
             SettingsPage.Routes => ("Routes", "Decide what happens to every new clip"),
@@ -1061,7 +1155,7 @@ internal sealed class SettingsForm : Form
         var aboutAction = _aboutPage.UpdateActionButton;
         var galleryAction = _galleryPage?.HeaderActions;
         var captureAction = _capturePage?.HeaderStatusPill;
-        var routesAction = _routesPage?.HeaderActionButton;
+        var routesAction = _routesPage?.HeaderActions;
         var silhouetteBackAction = _silhouetteLayoutsPage?.HeaderBackButton;
         var useSharedGalleryHeader = page == SettingsPage.Gallery &&
                                      ClientSize.Width >= ScaleLogical(1050);
@@ -1099,7 +1193,7 @@ internal sealed class SettingsForm : Form
         }
 
         action.Dock = DockStyle.None;
-        if (ReferenceEquals(action, galleryAction))
+        if (ReferenceEquals(action, galleryAction) || ReferenceEquals(action, routesAction))
         {
             action.AutoSize = true;
         }
@@ -1231,7 +1325,15 @@ internal sealed class SettingsForm : Form
         return surface;
     }
 
-    private Control BuildCards()
+    private Control BuildSettingsCards(bool legacySettingsControls)
+    {
+        _managedSettingsNavigationRows.Clear();
+        return legacySettingsControls
+            ? BuildLegacySettingsCards()
+            : BuildRoutingOwnedSettingsCards();
+    }
+
+    private Control BuildLegacySettingsCards()
     {
         var cards = new BufferedTableLayoutPanel
         {
@@ -1261,6 +1363,449 @@ internal sealed class SettingsForm : Form
         cards.Controls.Add(CreateSettingsSection(
             "APPLICATION", BrandGlyph.Settings, BuildAppPreferencesCard(), new Padding(7, 0, 0, 0)), 1, 2);
         return cards;
+    }
+
+    private Control BuildRoutingOwnedSettingsCards()
+    {
+        var cards = new BufferedTableLayoutPanel
+        {
+            Name = "SettingsCards",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            AutoScroll = false,
+            ColumnCount = 1,
+            RowCount = 4,
+            Margin = Padding.Empty,
+            Padding = ScalePadding(new Padding(28, 4, 28, 20)),
+            BackColor = ClipCordTheme.Shell
+        };
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var row = 0; row < cards.RowCount; row++)
+            cards.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        cards.Controls.Add(CreateRoutingSettingsSection(
+            "IDENTITY & DELIVERY DEFAULTS",
+            BuildIdentityDeliveryDefaultsCard(),
+            new Padding(0, 0, 0, 14)), 0, 0);
+        cards.Controls.Add(CreateRoutingSettingsSection(
+            "APPLICATION",
+            BuildGeneralApplicationCard(),
+            new Padding(0, 0, 0, 14)), 0, 1);
+        cards.Controls.Add(CreateRoutingSettingsSection(
+            "MANAGED IN ROUTES & CAPTURE",
+            BuildManagedSettingsCard(),
+            Padding.Empty), 0, 2);
+        cards.Controls.Add(new Label
+        {
+            Name = "ManagedSettingsFooterLabel",
+            Text = "Clip sources, connections and delivery rules moved to Routes in ClipCord 2.0. " +
+                   "Settings keeps only preferences that apply to the whole app.",
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            MaximumSize = new Size(ScaleLogical(760), 0),
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8.5f),
+            Margin = ScalePadding(new Padding(2, 10, 2, 0)),
+            UseMnemonic = false
+        }, 0, 3);
+        return cards;
+    }
+
+    private Control CreateRoutingSettingsSection(string title, Control card, Padding margin)
+    {
+        var section = new BufferedTableLayoutPanel
+        {
+            Name = title.Replace(" ", string.Empty, StringComparison.Ordinal)
+                .Replace("&", "And", StringComparison.Ordinal) + "Section",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = ScalePadding(margin),
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.Shell
+        };
+        section.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        section.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(24)));
+        section.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        section.Controls.Add(new Label
+        {
+            Text = title,
+            Dock = DockStyle.Fill,
+            ForeColor = ClipCordTheme.TextTertiary,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = ClipCordTheme.InterfaceFont(7.75f, FontStyle.Bold),
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 0, 0);
+        card.Margin = Padding.Empty;
+        section.Controls.Add(card, 0, 1);
+        return section;
+    }
+
+    private Control BuildIdentityDeliveryDefaultsCard()
+    {
+        var layout = CreateRoutingSettingsCardContent(3);
+        layout.ColumnCount = 2;
+        layout.ColumnStyles.Clear();
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 54));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(50)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(1)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(56)));
+
+        layout.Controls.Add(CreateRoutingPreferenceCopy(
+            "Uploader name",
+            "Shown beside every clip ClipCord posts."), 0, 0);
+        var uploaderHost = CreateFieldHost(_uploaderNameText);
+        uploaderHost.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        uploaderHost.Margin = ScalePadding(new Padding(0, 7, 0, 7));
+        layout.Controls.Add(uploaderHost, 1, 0);
+
+        var divider = CreateRoutingSettingsDivider();
+        layout.Controls.Add(divider, 0, 1);
+        layout.SetColumnSpan(divider, 2);
+
+        layout.Controls.Add(CreateRoutingPreferenceCopy(
+            "Discord compression target",
+            "The size ClipCord compresses toward before sending to Discord. " +
+            "95 MB is the current Discord default."), 0, 2);
+        var compressionHost = CreateCompressionHost();
+        compressionHost.Anchor = AnchorStyles.Right;
+        compressionHost.Margin = ScalePadding(new Padding(0, 9, 0, 9));
+        layout.Controls.Add(compressionHost, 1, 2);
+
+        return CreateRoutingSettingsCard(
+            "IdentityDeliveryDefaultsCard",
+            "Identity and delivery defaults",
+            layout,
+            132);
+    }
+
+    private Control BuildGeneralApplicationCard()
+    {
+        var layout = CreateRoutingSettingsCardContent(3);
+        layout.ColumnCount = 2;
+        layout.ColumnStyles.Clear();
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 72));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(48)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(1)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(50)));
+
+        layout.Controls.Add(CreateRoutingPreferenceCopy(
+            "Start with Windows",
+            "ClipCord opens minimised to the tray."), 0, 0);
+        _startWithWindows.Text = string.Empty;
+        _startWithWindows.Name = "StartWithWindowsToggle";
+        _startWithWindows.AccessibleName = "Start with Windows";
+        _startWithWindows.Anchor = AnchorStyles.Right;
+        _startWithWindows.Margin = Padding.Empty;
+        layout.Controls.Add(_startWithWindows, 1, 0);
+
+        var divider = CreateRoutingSettingsDivider();
+        layout.Controls.Add(divider, 0, 1);
+        layout.SetColumnSpan(divider, 2);
+
+        layout.Controls.Add(CreateRoutingPreferenceCopy(
+            "Updates",
+            "Stable release channel."), 0, 2);
+        _checkUpdatesButton.Anchor = AnchorStyles.Right;
+        _checkUpdatesButton.Margin = Padding.Empty;
+        layout.Controls.Add(_checkUpdatesButton, 1, 2);
+
+        return CreateRoutingSettingsCard(
+            "GeneralApplicationCard",
+            "Application preferences",
+            layout,
+            124);
+    }
+
+    private Control BuildManagedSettingsCard()
+    {
+        var layout = CreateRoutingSettingsCardContent(3);
+        layout.ColumnCount = 2;
+        layout.ColumnStyles.Clear();
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        layout.Controls.Add(CreateManagedSettingsNavigationRow(
+            "ManagedClipSourcesRow",
+            FigmaIconAsset.Folder,
+            "Clip sources",
+            "Recorders and folders ClipCord watches",
+            "Routes › Connections",
+            () => OpenRoutesSettingsSection(showConnections: true),
+            new Padding(0, 0, 6, 8)), 0, 0);
+        layout.Controls.Add(CreateManagedSettingsNavigationRow(
+            "ManagedConnectionsRow",
+            FigmaIconAsset.Connection,
+            "Connections",
+            "Discord, YouTube and TikTok accounts",
+            "Routes › Connections",
+            () => OpenRoutesSettingsSection(showConnections: true),
+            new Padding(6, 0, 0, 8)), 1, 0);
+        layout.Controls.Add(CreateManagedSettingsNavigationRow(
+            "ManagedRecordingCameraRow",
+            FigmaIconAsset.Capture,
+            "Recording and camera",
+            "Resolution, encoder, reaction camera",
+            "Capture",
+            () => ShowPage(SettingsPage.Capture),
+            new Padding(0, 0, 6, 8)), 0, 1);
+        layout.Controls.Add(CreateManagedSettingsNavigationRow(
+            "ManagedDeliveryRulesRow",
+            FigmaIconAsset.Routes,
+            "Delivery rules",
+            "What happens to each new clip",
+            "Routes",
+            () => OpenRoutesSettingsSection(showConnections: false),
+            new Padding(6, 0, 0, 8)), 1, 1);
+        var localOnly = CreateManagedSettingsNavigationRow(
+            "ManagedLocalOnlyModeRow",
+            FigmaIconAsset.Shield,
+            "Local-only mode",
+            "Pause external delivery for future clips",
+            "Routes",
+            () => OpenRoutesSettingsSection(showConnections: false),
+            Padding.Empty);
+        layout.Controls.Add(localOnly, 0, 2);
+        layout.SetColumnSpan(localOnly, 2);
+
+        return CreateRoutingSettingsCard(
+            "ManagedSettingsCard",
+            "Preferences managed in Routes and Capture",
+            layout,
+            190);
+    }
+
+    private RoundedPanel CreateManagedSettingsNavigationRow(
+        string name,
+        FigmaIconAsset asset,
+        string title,
+        string subtitle,
+        string destination,
+        Action action,
+        Padding margin)
+    {
+        var row = new RoundedPanel
+        {
+            Name = name,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(0, ScaleLogical(54)),
+            BackColor = ClipCordTheme.SettingsField,
+            BorderColor = ClipCordTheme.SettingsCardBorder,
+            CornerRadius = ScaleLogical(10),
+            Padding = ScalePadding(new Padding(12, 7, 10, 7)),
+            Margin = ScalePadding(margin),
+            AccessibleName = title,
+            AccessibleDescription = $"{subtitle}. Opens {destination}.",
+            AccessibleRole = AccessibleRole.Link
+        };
+        row.EnableKeyboardAccess(action);
+
+        var content = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 4,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SettingsField
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(32)));
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleLogical(22)));
+        content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        content.Controls.Add(new FigmaIconControl
+        {
+            Asset = asset,
+            IconColor = ClipCordTheme.Violet,
+            Dock = DockStyle.Fill,
+            Padding = ScalePadding(new Padding(5)),
+            Margin = ScalePadding(new Padding(0, 2, 6, 2))
+        }, 0, 0);
+        content.Controls.Add(CreateManagedSettingsRowCopy(title, subtitle), 1, 0);
+        content.Controls.Add(new Label
+        {
+            Text = destination,
+            AutoSize = true,
+            Anchor = AnchorStyles.Right,
+            ForeColor = ClipCordTheme.TextSecondary,
+            Font = ClipCordTheme.InterfaceFont(8.25f, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleRight,
+            Margin = ScalePadding(new Padding(8, 0, 4, 0)),
+            UseMnemonic = false,
+            TabStop = false
+        }, 2, 0);
+        content.Controls.Add(new FigmaIconControl
+        {
+            Asset = FigmaIconAsset.ChevronRight,
+            IconColor = ClipCordTheme.TextTertiary,
+            Dock = DockStyle.Fill,
+            Padding = ScalePadding(new Padding(6)),
+            Margin = Padding.Empty
+        }, 3, 0);
+        row.Controls.Add(content);
+        WireClick(row, action);
+        _managedSettingsNavigationRows.Add(row);
+        return row;
+    }
+
+    private static Control CreateManagedSettingsRowCopy(string title, string subtitle)
+    {
+        var copy = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SettingsField,
+            TabStop = false
+        };
+        copy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.Controls.Add(new Label
+        {
+            Text = title,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoEllipsis = true,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Font = ClipCordTheme.InterfaceFont(9.5f, FontStyle.Bold),
+            Margin = Padding.Empty,
+            UseMnemonic = false,
+            TabStop = false
+        }, 0, 0);
+        copy.Controls.Add(new Label
+        {
+            Text = subtitle,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoEllipsis = true,
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8.25f),
+            Margin = Padding.Empty,
+            UseMnemonic = false,
+            TabStop = false
+        }, 0, 1);
+        return copy;
+    }
+
+    private static BufferedTableLayoutPanel CreateRoutingSettingsCardContent(int rows)
+    {
+        var layout = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = rows,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = ClipCordTheme.SettingsCard
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        return layout;
+    }
+
+    private Control CreateRoutingPreferenceCopy(string title, string subtitle)
+    {
+        var copy = new BufferedTableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = new Padding(0, 0, ScaleLogical(18), 0),
+            BackColor = ClipCordTheme.SettingsCard
+        };
+        copy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.Controls.Add(new Label
+        {
+            Text = title,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Font = ClipCordTheme.InterfaceFont(9.75f, FontStyle.Bold),
+            Margin = Padding.Empty,
+            UseMnemonic = false
+        }, 0, 0);
+        copy.Controls.Add(new Label
+        {
+            Text = subtitle,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            MaximumSize = new Size(ScaleLogical(430), 0),
+            ForeColor = ClipCordTheme.TextTertiary,
+            Font = ClipCordTheme.InterfaceFont(8.25f),
+            Margin = new Padding(0, ScaleLogical(2), 0, 0),
+            UseMnemonic = false
+        }, 0, 1);
+        return copy;
+    }
+
+    private RoundedPanel CreateRoutingSettingsCard(
+        string name,
+        string accessibleName,
+        Control content,
+        int minimumHeight)
+    {
+        var card = new RoundedPanel
+        {
+            Name = name,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(0, ScaleLogical(minimumHeight)),
+            BackColor = ClipCordTheme.SettingsCard,
+            BorderColor = ClipCordTheme.SettingsCardBorder,
+            CornerRadius = ScaleLogical(16),
+            Padding = ScalePadding(new Padding(18, 10, 18, 10)),
+            Margin = Padding.Empty,
+            AccessibleName = accessibleName,
+            AccessibleRole = AccessibleRole.Grouping
+        };
+        content.Margin = Padding.Empty;
+        card.Controls.Add(content);
+        return card;
+    }
+
+    private static Panel CreateRoutingSettingsDivider() => new()
+    {
+        Dock = DockStyle.Fill,
+        BackColor = ClipCordTheme.BorderDefault,
+        Margin = Padding.Empty,
+        TabStop = false
+    };
+
+    private void OpenRoutesSettingsSection(bool showConnections)
+    {
+        ShowPage(SettingsPage.Routes);
+        if (_routesPage is null) return;
+        var targetName = showConnections ? "ConnectionsRouteTab" : "RoutesRouteTab";
+        var tab = EnumerateControls(_routesPage)
+            .OfType<OutlineButton>()
+            .FirstOrDefault(candidate => candidate.Name == targetName);
+        tab?.PerformClick();
     }
 
     private Control CreateSettingsSection(
@@ -1330,13 +1875,17 @@ internal sealed class SettingsForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleLogical(10)));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(CreateFieldLabelBlock(
+        _clipsFolderLabelBlock = CreateFieldLabelBlock(
             "Clips folder",
-            "Any folder that receives finished MP4 clips."), 0, 0);
+            "Any folder that receives finished MP4 clips.");
+        _clipsFolderLabelBlock.Name = "ClipsFolderLabelBlock";
+        layout.Controls.Add(_clipsFolderLabelBlock, 0, 0);
         layout.Controls.Add(CreateFieldRow(CreateFieldHost(_folderText), _browseButton), 1, 0);
-        layout.Controls.Add(CreateFieldLabelBlock(
+        _captureSourceLabelBlock = CreateFieldLabelBlock(
             "Recorded with",
-            "Tells ClipCord how your recorder files clips."), 0, 2);
+            "Tells ClipCord how your recorder files clips.");
+        _captureSourceLabelBlock.Name = "CaptureSourceLabelBlock";
+        layout.Controls.Add(_captureSourceLabelBlock, 0, 2);
 
         var sourceChoices = new FlowLayoutPanel
         {
@@ -1372,6 +1921,7 @@ internal sealed class SettingsForm : Form
 
     private void SetCaptureSource(ClipCaptureSource source)
     {
+        if (!UsesLegacySettingsControls()) return;
         var normalized = AppSettings.NormalizeCaptureSource(source);
         if (_captureSource == normalized) return;
         _captureSource = normalized;
@@ -1383,9 +1933,11 @@ internal sealed class SettingsForm : Form
     {
         SetCaptureSourceSelected(_steelSeriesSourceButton, _captureSource == ClipCaptureSource.SteelSeriesGg);
         SetCaptureSourceSelected(_nvidiaSourceButton, _captureSource == ClipCaptureSource.Nvidia);
-        _captureSourceHelper.Text = _captureSource == ClipCaptureSource.Nvidia
-            ? @"New MP4 clips inside this folder's <game> subfolders are detected automatically."
-            : "New MP4 clips in this folder are detected automatically.";
+        _captureSourceHelper.Text = UsesLegacySettingsControls()
+            ? _captureSource == ClipCaptureSource.Nvidia
+                ? @"New MP4 clips inside this folder's <game> subfolders are detected automatically."
+                : "New MP4 clips in this folder are detected automatically."
+            : "Routing owns the active watched source. Open Routes to manage what happens to its clips.";
     }
 
     private static void SetCaptureSourceSelected(OutlineButton button, bool selected)
@@ -1413,10 +1965,20 @@ internal sealed class SettingsForm : Form
             "Uploader name",
             "Shown beside every clip you send."), 0, 0);
         layout.Controls.Add(CreateFieldHost(_uploaderNameText), 1, 0);
-        layout.Controls.Add(CreateFieldLabelBlock(
+        _webhookLabelBlock = CreateFieldLabelBlock(
             "Webhook URL",
-            "Encrypted with Windows DPAPI for this account only."), 0, 2);
-        layout.Controls.Add(CreateFieldRow(CreateFieldHost(_webhookText), _testButton), 1, 2);
+            "Encrypted with Windows DPAPI for this account only.");
+        _webhookLabelBlock.Name = "WebhookLabelBlock";
+        layout.Controls.Add(_webhookLabelBlock, 0, 2);
+        var webhookRow = (BufferedTableLayoutPanel)CreateFieldRow(
+            CreateFieldHost(_webhookText),
+            _testButton);
+        _manageRoutingConnectionsButton.Dock = DockStyle.Fill;
+        _manageRoutingConnectionsButton.Margin = Padding.Empty;
+        _manageRoutingConnectionsButton.Visible = false;
+        _manageRoutingConnectionsButton.TabStop = false;
+        webhookRow.Controls.Add(_manageRoutingConnectionsButton, 1, 0);
+        layout.Controls.Add(webhookRow, 1, 2);
         return CreateCard(
             BrandGlyph.DiscordDestination,
             "DiscordDestinationCard",
@@ -1531,9 +2093,11 @@ internal sealed class SettingsForm : Form
         shortcut.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 37));
         shortcut.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 63));
         shortcut.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        shortcut.Controls.Add(CreateFieldLabelBlock(
+        _modeHotkeyLabelBlock = CreateFieldLabelBlock(
             "Mode shortcut",
-            "Swaps the route for future clips."), 0, 0);
+            "Swaps the route for future clips.");
+        _modeHotkeyLabelBlock.Name = "ModeHotkeyLabelBlock";
+        shortcut.Controls.Add(_modeHotkeyLabelBlock, 0, 0);
         shortcut.Controls.Add(
             CreateFieldRow(CreateFieldHost(_modeToggleHotkeyText), _modeToggleHotkeyAction),
             1,
@@ -1996,8 +2560,16 @@ internal sealed class SettingsForm : Form
     private void UpdateWatcherStatus()
     {
         if (IsDisposed || Disposing) return;
+        UpdateRailRoutingPresentation();
+        UpdateRoutingOwnedSettingsPresentation();
+        if (_routesPage is { Visible: true }) _routesPage.RefreshRuntimeStatus();
         var fullStatus = _watcherStatusProvider?.Invoke() ?? "Settings";
         if (_aboutPage is { Visible: true }) _aboutPage.UpdateWatcherStatus(fullStatus);
+        if (!UsesLegacyRailPresentation())
+        {
+            _lastWatcherFullStatus = fullStatus;
+            return;
+        }
         var presentation = AboutPageSupport.NormalizeWatcherStatus(
             fullStatus,
             !fullStatus.StartsWith("Discord closed", StringComparison.OrdinalIgnoreCase));
@@ -2020,6 +2592,11 @@ internal sealed class SettingsForm : Form
 
     private void BrowseClicked(object? sender, EventArgs eventArgs)
     {
+        if (!UsesLegacySettingsControls())
+        {
+            ShowPage(SettingsPage.Routes);
+            return;
+        }
         using var dialog = new FolderBrowserDialog
         {
             Description = "Choose the folder where your clipping tool saves MP4 clips",
@@ -2046,6 +2623,11 @@ internal sealed class SettingsForm : Form
 
     private async void TestClicked(object? sender, EventArgs eventArgs)
     {
+        if (!UsesLegacySettingsControls())
+        {
+            ShowPage(SettingsPage.Routes);
+            return;
+        }
         if (!WebhookValidation.IsDiscordWebhook(_webhookText.Text.Trim()))
         {
             MessageBox.Show(this, "Enter a valid HTTPS Discord webhook URL.", "Invalid webhook", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -2120,6 +2702,12 @@ internal sealed class SettingsForm : Form
 
     private void CaptureModeToggleHotkey(object? sender, KeyEventArgs eventArgs)
     {
+        if (!UsesLegacySettingsControls())
+        {
+            eventArgs.Handled = true;
+            eventArgs.SuppressKeyPress = true;
+            return;
+        }
         if (eventArgs.KeyCode == Keys.Tab) return;
         eventArgs.Handled = true;
         eventArgs.SuppressKeyPress = true;
@@ -2138,6 +2726,11 @@ internal sealed class SettingsForm : Form
 
     private void ToggleModeHotkeyEnabled()
     {
+        if (!UsesLegacySettingsControls())
+        {
+            ShowPage(SettingsPage.Routes);
+            return;
+        }
         _modeToggleHotkeyText.Text = string.IsNullOrWhiteSpace(_modeToggleHotkeyText.Text)
             ? GlobalHotkeyBinding.DefaultDisplayText
             : string.Empty;
@@ -2146,6 +2739,25 @@ internal sealed class SettingsForm : Form
 
     private void UpdateModeToggleHotkeyEditor()
     {
+        if (!UsesLegacySettingsControls())
+        {
+            SetFieldLabelBlockText(
+                _modeHotkeyLabelBlock,
+                "Legacy mode shortcut",
+                "Unavailable while Routes owns delivery.");
+            const string managedGuidance =
+                "Destinations are managed in Routes; the legacy Discord/Local shortcut is unavailable.";
+            _modeToggleHotkeyText.AccessibleDescription = managedGuidance;
+            _toolTip.SetToolTip(_modeToggleHotkeyText, managedGuidance);
+            _toolTip.SetToolTip(_modeToggleHotkeyAction, "Open Routes to manage delivery destinations.");
+            RecomputeSettingsDirty();
+            return;
+        }
+
+        SetFieldLabelBlockText(
+            _modeHotkeyLabelBlock,
+            "Mode shortcut",
+            "Swaps the route for future clips.");
         var disabled = string.IsNullOrWhiteSpace(_modeToggleHotkeyText.Text);
         _modeToggleHotkeyAction.Text = disabled ? "Use default" : "Disable";
         var guidance = disabled
@@ -2156,16 +2768,10 @@ internal sealed class SettingsForm : Form
         _toolTip.SetToolTip(_modeToggleHotkeyAction, disabled
             ? $"Restore {GlobalHotkeyBinding.DefaultDisplayText}."
             : "Disable the global mode shortcut.");
-        if (_navigationRail is not null)
+        if (_railHotkeyHint is not null && UsesLegacyRailPresentation())
         {
-            var hint = EnumerateControls(_navigationRail)
-                .OfType<Label>()
-                .FirstOrDefault(label => label.Name == "RailHotkeyHint");
-            if (hint is not null)
-            {
-                var shortcut = disabled ? "Shortcut off" : AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text);
-                hint.Text = $"{shortcut}  to swap";
-            }
+            var shortcut = disabled ? "Shortcut off" : AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text);
+            _railHotkeyHint.Text = $"{shortcut}  to swap";
         }
         RecomputeSettingsDirty();
     }
@@ -2184,7 +2790,10 @@ internal sealed class SettingsForm : Form
             return false;
         }
 
-        var modeToggleHotkey = _modeToggleHotkeyText.Text.Trim();
+        var legacySettingsControls = UsesLegacySettingsControls();
+        var modeToggleHotkey = legacySettingsControls
+            ? _modeToggleHotkeyText.Text.Trim()
+            : AppSettings.NormalizeModeToggleHotkey(_appliedSettings.ModeToggleHotkey);
         GlobalHotkeyBinding parsedHotkey = default;
         if (!string.IsNullOrWhiteSpace(modeToggleHotkey) &&
             !GlobalHotkeyBinding.TryParse(modeToggleHotkey, out parsedHotkey))
@@ -2201,16 +2810,18 @@ internal sealed class SettingsForm : Form
         if (!string.IsNullOrWhiteSpace(modeToggleHotkey)) modeToggleHotkey = parsedHotkey.DisplayText;
 
         settings = new AppSettings(
-            _folderText.Text.Trim(),
-            _webhookText.Text.Trim(),
+            legacySettingsControls ? _folderText.Text.Trim() : _appliedSettings.ClipsFolder,
+            legacySettingsControls ? _webhookText.Text.Trim() : _appliedSettings.WebhookUrl,
             _startWithWindows.Checked,
             compressionTargetMb,
             AppSettings.NormalizeUploaderName(_uploaderNameText.Text),
-            _uploadToDiscord.Checked,
+            legacySettingsControls ? _uploadToDiscord.Checked : _appliedSettings.UploadToDiscord,
             modeToggleHotkey,
-            _captureSource);
+            legacySettingsControls
+                ? _captureSource
+                : AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource));
 
-        if (_uploadToDiscord.Checked && string.IsNullOrWhiteSpace(_uploaderNameText.Text))
+        if (settings.UploadToDiscord && string.IsNullOrWhiteSpace(_uploaderNameText.Text))
         {
             MessageBox.Show(this, "Enter the name Discord should show with uploaded clips.", "Invalid uploader name", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
@@ -2235,7 +2846,7 @@ internal sealed class SettingsForm : Form
             return false;
         }
 
-        if (_uploadToDiscord.Checked && !WebhookValidation.IsDiscordWebhook(settings.WebhookUrl))
+        if (settings.UploadToDiscord && !WebhookValidation.IsDiscordWebhook(settings.WebhookUrl))
         {
             MessageBox.Show(this, "Enter a valid HTTPS Discord webhook URL.", "Invalid webhook", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
@@ -2249,6 +2860,18 @@ internal sealed class SettingsForm : Form
 
     private void UpdateUploadModeText()
     {
+        if (!UsesLegacySettingsControls())
+        {
+            _uploadModeHelper.Text =
+                "Delivery destinations are managed in Routes. Compression remains available here.";
+            _toolTip.SetToolTip(
+                _uploadToDiscord,
+                "Open Routes to manage Discord and Library delivery actions.");
+            UpdateRailRouteSelection();
+            RecomputeSettingsDirty();
+            return;
+        }
+
         if (_uploadToDiscord.Checked)
         {
             _uploadModeHelper.Text = "New clips upload to Discord and move to uploaded.";
@@ -2291,21 +2914,25 @@ internal sealed class SettingsForm : Form
     private int GetChangedSettingsFieldCount()
     {
         var changed = 0;
-        if (!string.Equals(_folderText.Text.Trim(), _appliedSettings.ClipsFolder, StringComparison.Ordinal)) changed++;
-        if (!string.Equals(_webhookText.Text.Trim(), _appliedSettings.WebhookUrl, StringComparison.Ordinal)) changed++;
+        var legacySettingsControls = UsesLegacySettingsControls();
+        if (legacySettingsControls &&
+            !string.Equals(_folderText.Text.Trim(), _appliedSettings.ClipsFolder, StringComparison.Ordinal)) changed++;
+        if (legacySettingsControls &&
+            !string.Equals(_webhookText.Text.Trim(), _appliedSettings.WebhookUrl, StringComparison.Ordinal)) changed++;
         if (!string.Equals(
                 AppSettings.NormalizeUploaderName(_uploaderNameText.Text),
                 AppSettings.NormalizeUploaderName(_appliedSettings.UploaderName),
                 StringComparison.Ordinal)) changed++;
         if (!TryParseCompressionTarget(_compressionTarget.Text, out var target) ||
             target != Math.Clamp(_appliedSettings.CompressionTargetMb, 1, 100)) changed++;
-        if (!string.Equals(
+        if (legacySettingsControls && !string.Equals(
                 AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text),
                 AppSettings.NormalizeModeToggleHotkey(_appliedSettings.ModeToggleHotkey),
                 StringComparison.Ordinal)) changed++;
         if (_startWithWindows.Checked != _appliedSettings.StartWithWindows) changed++;
-        if (_uploadToDiscord.Checked != _appliedSettings.UploadToDiscord) changed++;
-        if (_captureSource != AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource)) changed++;
+        if (legacySettingsControls && _uploadToDiscord.Checked != _appliedSettings.UploadToDiscord) changed++;
+        if (legacySettingsControls &&
+            _captureSource != AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource)) changed++;
         return changed;
     }
 
@@ -2337,8 +2964,377 @@ internal sealed class SettingsForm : Form
     private void UpdateRailRouteSelection()
     {
         if (_railDiscordRouteButton is null || _railLocalRouteButton is null) return;
+        if (!UsesLegacyRailPresentation())
+        {
+            ApplyRailRouteButtonState(_railDiscordRouteButton, selected: false);
+            ApplyRailRouteButtonState(_railLocalRouteButton, selected: false);
+            return;
+        }
         ApplyRailRouteButtonState(_railDiscordRouteButton, _uploadToDiscord.Checked);
         ApplyRailRouteButtonState(_railLocalRouteButton, !_uploadToDiscord.Checked);
+    }
+
+    internal void RefreshRoutingPresentation()
+    {
+        if (IsDisposed || Disposing) return;
+        UpdateRailRoutingPresentation();
+        UpdateRoutingOwnedSettingsPresentation();
+        _homePage?.RefreshRuntimeStatus();
+        if (_routesPage is { Visible: true }) _routesPage.RefreshRuntimeStatus();
+        if (_aboutPage is { Visible: true }) _aboutPage.RefreshStatus();
+    }
+
+    private async void HomeRoutingActionRequested(
+        object? sender,
+        HomeRoutingActionRequestedEventArgs eventArgs)
+    {
+        await HandleHomeRoutingActionAsync(eventArgs.Action).ConfigureAwait(true);
+    }
+
+    internal async Task HandleHomeRoutingActionAsync(HomeRoutingAction action)
+    {
+        if (action is HomeRoutingAction.OpenRoutes or HomeRoutingAction.CreateRoute)
+        {
+            ShowPage(SettingsPage.Routes);
+            if (action == HomeRoutingAction.CreateRoute &&
+                _routesPage is not null && !_routesPage.TryBeginCreateRoute())
+            {
+                Log.Error("The Home create-route action opened Routes, but route creation is not currently available.");
+            }
+            return;
+        }
+        if (_homeRoutingActionBusy) return;
+        if (_routingLocalOnlyMode is null)
+        {
+            ShowPage(SettingsPage.Routes);
+            return;
+        }
+
+        _homeRoutingActionBusy = true;
+        try
+        {
+            var result = await _routingLocalOnlyMode.SetEnabledAsync(
+                    action == HomeRoutingAction.EnableLocalOnlyMode)
+                .ConfigureAwait(true);
+            RefreshRoutingPresentation();
+            if (!result.Succeeded)
+            {
+                Log.Error("The Home routing action did not change saved Local-only mode.");
+                ShowPage(SettingsPage.Routes);
+            }
+        }
+        catch (Exception exception)
+        {
+            Log.Error("The Home routing action could not update Local-only mode.", exception);
+            RefreshRoutingPresentation();
+            ShowPage(SettingsPage.Routes);
+        }
+        finally
+        {
+            _homeRoutingActionBusy = false;
+        }
+    }
+
+    private bool UsesLegacyRailPresentation()
+    {
+        if (_routesRuntimeStateProvider is null) return true;
+        try
+        {
+            return _routesRuntimeStateProvider() is
+                RoutesRuntimeViewState.LegacySetupNeeded or
+                RoutesRuntimeViewState.LegacyActive;
+        }
+        catch
+        {
+            // A status provider failure must not expose legacy delivery controls as
+            // authoritative. The Routes page owns recovery and can explain the block.
+            return false;
+        }
+    }
+
+    private bool UsesLegacySettingsControls()
+    {
+        if (_routesRuntimeStateProvider is null) return true;
+        try
+        {
+            return _routesRuntimeStateProvider() is
+                RoutesRuntimeViewState.LegacySetupNeeded or
+                RoutesRuntimeViewState.LegacyActive;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal string GetAuthoritativeModeHotkey()
+    {
+        var legacyHotkey = AppSettings.NormalizeModeToggleHotkey(
+            _appliedSettings.ModeToggleHotkey);
+        if (UsesLegacySettingsControls()) return legacyHotkey;
+        if (_routingLocalOnlyMode is null) return string.Empty;
+        try
+        {
+            return _routingLocalOnlyMode.Inspect().HotkeyDisplayText ?? string.Empty;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("The Routing-owned Local-only shortcut could not be read.", exception);
+            return string.Empty;
+        }
+    }
+
+    private void UpdateRoutingOwnedSettingsPresentation()
+    {
+        var legacy = UsesLegacySettingsControls();
+        var presentationChanged = _lastLegacySettingsControlsAvailable != legacy;
+        if (_lastLegacySettingsControlsAvailable == true && !legacy)
+        {
+            ResetRoutingProtectedDraftFields();
+        }
+        _lastLegacySettingsControlsAvailable = legacy;
+
+        if (presentationChanged && _settingsScrollHost is not null)
+        {
+            _settingsScrollHost.Content = BuildSettingsCards(legacy);
+            _settingsScrollHost.RefreshContentLayout(preservePosition: false);
+        }
+
+        var legacyControlsEnabled = legacy && !_busy && !_galleryBusy;
+        _folderText.Enabled = legacyControlsEnabled;
+        _folderText.TabStop = legacyControlsEnabled;
+        _browseButton.Enabled = legacyControlsEnabled;
+        _browseButton.TabStop = legacyControlsEnabled;
+        _steelSeriesSourceButton.Enabled = legacyControlsEnabled;
+        _steelSeriesSourceButton.TabStop = legacyControlsEnabled;
+        _nvidiaSourceButton.Enabled = legacyControlsEnabled;
+        _nvidiaSourceButton.TabStop = legacyControlsEnabled;
+        _webhookText.Enabled = legacyControlsEnabled;
+        _webhookText.TabStop = legacyControlsEnabled;
+        _testButton.Visible = legacy;
+        _testButton.Enabled = legacyControlsEnabled;
+        _testButton.TabStop = legacyControlsEnabled;
+        _manageRoutingConnectionsButton.Visible = false;
+        _manageRoutingConnectionsButton.Enabled = false;
+        _manageRoutingConnectionsButton.TabStop = false;
+        _uploadToDiscord.Visible = legacy;
+        _uploadToDiscord.Enabled = legacyControlsEnabled;
+        _uploadToDiscord.TabStop = legacyControlsEnabled;
+        _modeToggleHotkeyText.Enabled = legacyControlsEnabled;
+        _modeToggleHotkeyText.TabStop = legacyControlsEnabled;
+        _modeToggleHotkeyAction.Enabled = legacyControlsEnabled;
+        _modeToggleHotkeyAction.TabStop = legacyControlsEnabled;
+        var managedNavigationEnabled = !legacy && !_busy && !_galleryBusy;
+        foreach (var row in _managedSettingsNavigationRows)
+        {
+            row.Enabled = managedNavigationEnabled;
+            row.TabStop = managedNavigationEnabled;
+        }
+
+        SetFieldLabelBlockText(
+            _clipsFolderLabelBlock,
+            "Clips folder",
+            legacy
+                ? "Any folder that receives finished MP4 clips."
+                : "Locked while Routing owns watched-source processing.");
+        SetFieldLabelBlockText(
+            _captureSourceLabelBlock,
+            "Recorded with",
+            legacy
+                ? "Tells ClipCord how your recorder files clips."
+                : "Routing owns this watched source until delivery is stopped.");
+        SetFieldLabelBlockText(
+            _webhookLabelBlock,
+            legacy ? "Webhook URL" : "Discord connections",
+            legacy
+                ? "Encrypted with Windows DPAPI for this account only."
+                : "Add, test, or remove webhooks in Routes → Connections.");
+
+        const string routesGuidance =
+            "Routing owns this setting. Open Routes to manage delivery safely.";
+        _folderText.AccessibleDescription = legacy ? string.Empty : routesGuidance;
+        _webhookText.AccessibleDescription = legacy
+            ? string.Empty
+            : "Webhook credentials are managed in Routes → Connections.";
+        _uploadToDiscord.AccessibleName = legacy
+            ? "Upload new clips to Discord"
+            : "Delivery destinations are managed in Routes";
+        _uploadToDiscord.AccessibleDescription = legacy ? string.Empty : routesGuidance;
+        _manageRoutingConnectionsButton.AccessibleDescription =
+            "Discord connections are available from the Connections row in Settings.";
+
+        if (legacy) _testButton.BringToFront();
+
+        if (!presentationChanged) return;
+        if (_currentPage == SettingsPage.Settings && !_statusLabel.Visible)
+        {
+            _pageSubtitleLabel.Text = legacy
+                ? "Where clips come from, and where they go"
+                : "App preferences · clip sources, connections and delivery live in Routes";
+        }
+        UpdateCaptureSourceSelection();
+        UpdateModeToggleHotkeyEditor();
+        UpdateUploadModeText();
+        RecomputeSettingsDirty();
+    }
+
+    private void ResetRoutingProtectedDraftFields()
+    {
+        var wasTracking = _dirtyTrackingReady;
+        _dirtyTrackingReady = false;
+        try
+        {
+            _folderText.Text = _appliedSettings.ClipsFolder;
+            _webhookText.Text = _appliedSettings.WebhookUrl;
+            _modeToggleHotkeyText.Text =
+                AppSettings.NormalizeModeToggleHotkey(_appliedSettings.ModeToggleHotkey);
+            _uploadToDiscord.Checked = _appliedSettings.UploadToDiscord;
+            _captureSource = AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource);
+        }
+        finally
+        {
+            _dirtyTrackingReady = wasTracking;
+        }
+    }
+
+    private static void SetFieldLabelBlockText(
+        Control? block,
+        string title,
+        string subtitle)
+    {
+        if (block is not TableLayoutPanel layout) return;
+        if (layout.GetControlFromPosition(0, 0) is Label titleLabel)
+            titleLabel.Text = title;
+        if (layout.GetControlFromPosition(0, 1) is Label subtitleLabel)
+            subtitleLabel.Text = subtitle;
+    }
+
+    private void UpdateRailRoutingPresentation()
+    {
+        if (_railRoutingTitleLabel is null || _railRouteSelector is null ||
+            _railDiscordRouteButton is null || _railLocalRouteButton is null ||
+            _railHotkeyHint is null || _railDestinationSummary is null)
+        {
+            return;
+        }
+
+        var legacy = UsesLegacyRailPresentation();
+        if (!legacy)
+        {
+            var routing = CaptureRailRoutingPresentation();
+            _railRoutingTitleLabel.Text = "NEW CLIPS GO TO";
+            _railRouteSelector.Visible = false;
+            _railDiscordRouteButton.TabStop = false;
+            _railLocalRouteButton.TabStop = false;
+            _railDestinationSummary.Apply(routing);
+            _railDestinationSummary.Visible = true;
+            _railDestinationSummary.BringToFront();
+            _railHotkeyHint.Text = FormatRailRouteComposition(routing);
+            ApplyManagedRailStatus(routing);
+            return;
+        }
+
+        _railDestinationSummary.Visible = false;
+        _railRouteSelector.Visible = true;
+        _railRouteSelector.SuspendLayout();
+        try
+        {
+            _railRoutingTitleLabel.Text = "NEW CLIPS GO TO";
+            _railDiscordRouteButton.Visible = true;
+            _railDiscordRouteButton.TabStop = true;
+            _railDiscordRouteButton.AccessibleRole = AccessibleRole.RadioButton;
+
+            _railRouteSelector.SetColumnSpan(_railLocalRouteButton, 1);
+            _railRouteSelector.SetCellPosition(
+                _railLocalRouteButton,
+                new TableLayoutPanelCellPosition(1, 0));
+            _railLocalRouteButton.Text = "● Local";
+            _railLocalRouteButton.AccessibleName = "Keep new clips local only";
+            _railLocalRouteButton.AccessibleRole = AccessibleRole.RadioButton;
+            _railLocalRouteButton.TabStop = true;
+            _railHotkeyHint.Text = $"{(string.IsNullOrWhiteSpace(_modeToggleHotkeyText.Text) ? "Shortcut off" : AppSettings.NormalizeModeToggleHotkey(_modeToggleHotkeyText.Text))}  to swap";
+            _railLocalRouteButton.AccessibleDescription = string.Empty;
+            UpdateRailRouteSelection();
+        }
+        finally
+        {
+            _railRouteSelector.ResumeLayout(performLayout: true);
+        }
+    }
+
+    private RoutingUiPresentationSnapshot CaptureRailRoutingPresentation()
+    {
+        try
+        {
+            return (_routingPresentationProvider?.Invoke() ??
+                    new RoutingUiPresentationSnapshot(
+                        RoutingUiState.Unavailable,
+                        ActiveRouteCount: 0,
+                        WatchingSourceCount: 0,
+                        LocalOnlyModeEnabled: false))
+                .Normalize();
+        }
+        catch (Exception exception)
+        {
+            Log.Error("The privacy-safe Routing rail projection could not be read.", exception);
+            return new RoutingUiPresentationSnapshot(
+                RoutingUiState.Unavailable,
+                ActiveRouteCount: 0,
+                WatchingSourceCount: 0,
+                LocalOnlyModeEnabled: true);
+        }
+    }
+
+    private static string FormatRailRouteComposition(RoutingUiPresentationSnapshot routing)
+    {
+        var parts = new List<string>(3);
+        if (routing.SpecificRouteCount > 0) parts.Add($"{routing.SpecificRouteCount:N0} specific");
+        if (routing.FallbackRouteCount > 0) parts.Add($"{routing.FallbackRouteCount:N0} fallback");
+        if (routing.PausedRouteCount > 0) parts.Add($"{routing.PausedRouteCount:N0} paused");
+        return parts.Count > 0
+            ? string.Join(" · ", parts)
+            : routing.State is RoutingUiState.NeedsAttention or RoutingUiState.Unavailable
+                ? "Routing status unavailable"
+                : "No routes yet";
+    }
+
+    private void ApplyManagedRailStatus(RoutingUiPresentationSnapshot routing)
+    {
+        string headline;
+        string detail;
+        Color accent;
+        if (routing.State is RoutingUiState.NeedsAttention or RoutingUiState.Unavailable)
+        {
+            headline = "Routes need attention";
+            detail = "Open Routes to review";
+            accent = ClipCordTheme.Coral;
+        }
+        else if (routing.LocalOnlyModeEnabled)
+        {
+            headline = "Local-only mode on";
+            detail = "Future clips stay here";
+            accent = Color.FromArgb(224, 151, 54);
+        }
+        else if (routing.State == RoutingUiState.Active)
+        {
+            headline = routing.ActiveRouteCount > 0 ? "Routes armed" : "No routes yet";
+            detail = "Library always on";
+            accent = routing.ActiveRouteCount > 0
+                ? Color.FromArgb(49, 196, 130)
+                : ClipCordTheme.TextTertiary;
+        }
+        else
+        {
+            headline = "Routing paused";
+            detail = "Library always on";
+            accent = Color.FromArgb(224, 151, 54);
+        }
+
+        _watcherStatusLabel.Text = headline;
+        _watcherStatusLabel.AccessibleDescription = $"{headline}. {detail}.";
+        _watcherStatusDetailLabel.Text = detail;
+        if (_railWatcherStatusDot is not null) _railWatcherStatusDot.Accent = accent;
+        _toolTip.SetToolTip(_watcherStatusLabel, $"{headline} · {detail}");
     }
 
     private static void ApplyRailRouteButtonState(OutlineButton button, bool selected)
@@ -2397,6 +3393,7 @@ internal sealed class SettingsForm : Form
         _minimizeButton.Enabled = !busy;
         _maximizeButton.Enabled = !busy;
         _closeButton.Enabled = !busy;
+        UpdateRoutingOwnedSettingsPresentation();
         if (status is not null)
         {
             _statusLabel.ForeColor = ClipCordTheme.ShellMutedText;
@@ -2447,6 +3444,7 @@ internal sealed class SettingsForm : Form
             _statusLabel.Text = "Gallery reads uploaded and local-only archives only while this page is open.";
             _privacySummaryLabel.Text = "Playing or browsing a local-only clip never uploads it.";
         }
+        UpdateRoutingOwnedSettingsPresentation();
         UpdateSaveBarVisibility();
     }
 
@@ -2492,6 +3490,27 @@ internal sealed class SettingsForm : Form
         {
             yield return child;
             foreach (var descendant in EnumerateControls(child)) yield return descendant;
+        }
+    }
+
+    private static bool IsTrustedNamedGallerySource(RoutingInputSourceRecord source)
+    {
+        if (source.Kind is not (RoutingInputSourceKind.SteelSeriesGg or
+                RoutingInputSourceKind.Nvidia))
+            return false;
+        try
+        {
+            return RoutingWatchedSourceRootIdentity.Create(
+                    source.Kind,
+                    source.CanonicalRoot)
+                .Equals(source.RootIdentitySha256, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidDataException or IOException or
+                UnauthorizedAccessException or NotSupportedException or
+                System.Security.SecurityException)
+        {
+            return false;
         }
     }
 

@@ -30,7 +30,8 @@ internal sealed record RoutingClipOutputRevision(
 /// <summary>
 /// Immutable facts for one source-arrival evaluation. Derived renditions and library operations are
 /// represented explicitly so they can be rejected as routing inputs instead of feeding back into
-/// Any new source clip.
+/// Any new source clip. Named external inputs add a canonical source-catalog id and, when their
+/// admission is time-bounded, the source-owned UTC capture timestamp.
 /// </summary>
 internal sealed record RoutingClipFacts(
     string ClipId,
@@ -42,7 +43,11 @@ internal sealed record RoutingClipFacts(
     bool ReactionCamera,
     long DurationMilliseconds,
     string SourceContentSha256,
-    IReadOnlyList<RoutingClipOutputRevision> Outputs);
+    IReadOnlyList<RoutingClipOutputRevision> Outputs,
+    string? SourceConnectionId = null,
+    DateTimeOffset? CapturedUtc = null,
+    string? SourceOccurrenceId = null,
+    string? SourceRevisionId = null);
 
 /// <summary>
 /// A frozen, persistence-ready proposal. If RequiresAtomicResolvedAppend is true, one or more
@@ -58,14 +63,15 @@ internal sealed record RoutingPlanProposal(
     PlannedFileDisposition? FileDisposition,
     IReadOnlyList<RoutingImmediateMissingResolution> ImmediateMissingResolutions,
     IReadOnlyList<IntentionalDuplicateProvenance> LatentDuplicateAuthorizations,
-    bool RequiresAtomicResolvedAppend)
+    bool RequiresAtomicResolvedAppend,
+    RoutingLocalOnlyAdmissionSnapshot? LocalOnlyOverride = null)
 {
     internal bool HasWork => Deliveries.Count > 0 || FileDisposition is not null;
 }
 
 /// <summary>
-/// Pure deterministic route evaluation. It performs no I/O and is not wired into capture, watcher,
-/// upload, or UI runtime paths.
+/// Pure deterministic route evaluation. It performs no I/O; production Capture, Xbox, and watched
+/// admission paths supply their immutable source facts and Local-only admission snapshot here.
 /// </summary>
 internal static class RoutingEvaluator
 {
@@ -87,27 +93,55 @@ internal static class RoutingEvaluator
         RoutingClipFacts facts,
         Guid planId,
         IReadOnlyList<IntentionalDuplicateProvenance> deliberateDuplicateAuthorizations,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        RoutingLocalOnlyAdmissionSnapshot? localOnlyOverride = null)
     {
         RoutingSnapshotModel.Validate(snapshot);
         ValidateFacts(facts);
         RoutingValidation.Require(planId != Guid.Empty, "A routing plan id is missing.");
         ArgumentNullException.ThrowIfNull(deliberateDuplicateAuthorizations);
         ValidateDuplicateAuthorizations(deliberateDuplicateAuthorizations, facts.ClipId);
+        if (localOnlyOverride is not null)
+            RoutingLocalOnlyAdmissionSnapshot.Validate(localOnlyOverride);
 
         if (facts.EventKind != RoutingEvaluationEventKind.SourceArrival)
         {
-            return Empty(planId, facts.ClipId, snapshot.Generation);
+            return Empty(planId, facts.ClipId, snapshot.Generation, localOnlyOverride);
         }
 
         var matched = FindMatchedRoutes(snapshot, facts);
 
-        if (matched.Length == 0)
+        if (matched.Length == 0 && localOnlyOverride is not { Enabled: true })
         {
-            return Empty(planId, facts.ClipId, snapshot.Generation);
+            return Empty(planId, facts.ClipId, snapshot.Generation, localOnlyOverride);
         }
 
         var matchedRouteIds = matched.Select(item => item.Route.RouteId).ToArray();
+        if (localOnlyOverride is { Enabled: true })
+        {
+            var route = RoutingLocalOnlyPlanPolicy.CreateRouteReference(snapshot.Generation);
+            var localOnlyDisposition = RoutingOutboxModel.CreateFileDisposition(
+                StableId(planId, route.RouteId, route.ActionId, "local-only-override"),
+                planId,
+                facts.ClipId,
+                facts.SourceContentSha256,
+                route,
+                RoutingLibraryArea.LocalOnly,
+                prerequisiteDeliveryIds: [],
+                now);
+            return new RoutingPlanProposal(
+                planId,
+                facts.ClipId,
+                snapshot.Generation,
+                matchedRouteIds,
+                Deliveries: [],
+                localOnlyDisposition,
+                ImmediateMissingResolutions: [],
+                LatentDuplicateAuthorizations: [],
+                RequiresAtomicResolvedAppend: false,
+                localOnlyOverride);
+        }
+
         var matchedRouteIdSet = matchedRouteIds.ToHashSet();
         var latentAuthorizations = deliberateDuplicateAuthorizations
             .Where(proof => matchedRouteIdSet.Contains(proof.FirstRouteId) &&
@@ -199,7 +233,8 @@ internal static class RoutingEvaluator
                 null,
                 [],
                 latentAuthorizations,
-                RequiresAtomicResolvedAppend: false);
+                RequiresAtomicResolvedAppend: false,
+                localOnlyOverride);
         }
 
         // Exercise the existing outbox creation and transition APIs so the proposal has exactly the
@@ -214,7 +249,8 @@ internal static class RoutingEvaluator
             disposition,
             [],
             latentAuthorizations,
-            RequiresAtomicResolvedAppend: false);
+            RequiresAtomicResolvedAppend: false,
+            localOnlyOverride);
         var temporary = RoutingOutboxModel.AppendEvaluatedPlan(
             RoutingOutboxModel.CreateEmpty(now),
             provisional,
@@ -271,7 +307,8 @@ internal static class RoutingEvaluator
             finalDisposition,
             resolutions,
             latentAuthorizations,
-            RequiresAtomicResolvedAppend: resolutions.Length > 0);
+            RequiresAtomicResolvedAppend: resolutions.Length > 0,
+            localOnlyOverride);
     }
 
     internal static RoutingOutputReference CreateLogicalOutputReference(
@@ -296,8 +333,13 @@ internal static class RoutingEvaluator
             Convert.ToHexString(SHA256.HashData(input)).ToLowerInvariant());
     }
 
-    private static RoutingPlanProposal Empty(Guid planId, string clipId, long generation) =>
-        new(planId, clipId, generation, [], [], null, [], [], RequiresAtomicResolvedAppend: false);
+    private static RoutingPlanProposal Empty(
+        Guid planId,
+        string clipId,
+        long generation,
+        RoutingLocalOnlyAdmissionSnapshot? localOnlyOverride) =>
+        new(planId, clipId, generation, [], [], null, [], [],
+            RequiresAtomicResolvedAppend: false, localOnlyOverride);
 
     private static IntentionalDuplicateProvenance Clone(
         IntentionalDuplicateProvenance proof) => proof with
@@ -420,10 +462,11 @@ internal static class RoutingEvaluator
             .ToArray();
         var specificMatches = orderedRoutes
             .Where(item => item.Route.Enabled && item.Route.Kind == RoutingRouteKind.Specific)
+            .Where(item => XboxSourceContractMatches(item.Route, facts))
             .Where(item => TriggerMatches(item.Route.Trigger, facts.ArrivalTrigger))
             .Where(item => item.Route.Conditions.All(condition => ConditionMatches(condition, facts)))
             .ToArray();
-        return specificMatches.Length > 0
+        return specificMatches.Length > 0 || facts.ClipSource == RoutingClipSource.XboxOneDrive
             ? specificMatches
             : orderedRoutes
                 .Where(item => item.Route.Enabled && item.Route.Kind == RoutingRouteKind.Fallback)
@@ -431,11 +474,51 @@ internal static class RoutingEvaluator
                 .ToArray();
     }
 
+    private static bool XboxSourceContractMatches(
+        RoutingRoute route,
+        RoutingClipFacts facts) =>
+        facts.ClipSource != RoutingClipSource.XboxOneDrive ||
+        route.XboxHistorySelection is not null &&
+        HasExactSourceConnectionBinding(route, facts.SourceConnectionId!) &&
+        MatchesFrozenXboxHistory(route, facts);
+
+    private static bool HasExactSourceConnectionBinding(
+        RoutingRoute route,
+        string sourceConnectionId) =>
+        route.Conditions.Any(condition =>
+            condition.Field == RoutingConditionField.SourceConnection &&
+            condition.Operator == RoutingConditionOperator.Equals &&
+            condition.Value.Equals(sourceConnectionId, StringComparison.Ordinal));
+
+    private static bool MatchesFrozenXboxHistory(
+        RoutingRoute route,
+        RoutingClipFacts facts)
+    {
+        var selection = route.XboxHistorySelection ??
+                        throw new InvalidDataException(
+                            "An Xbox route has no frozen history selection.");
+        var capturedUtc = facts.CapturedUtc ??
+                          throw new InvalidDataException(
+                              "An Xbox clip has no capture timestamp.");
+        var occurrenceId = facts.SourceOccurrenceId ??
+                           throw new InvalidDataException(
+                               "An Xbox clip has no occurrence identity.");
+        var revisionId = facts.SourceRevisionId ??
+                         throw new InvalidDataException(
+                             "An Xbox clip has no source revision identity.");
+        return capturedUtc > selection.ActivationUtc ||
+               selection.HistoricalOccurrences.Any(item =>
+                   item.OccurrenceId.Equals(occurrenceId, StringComparison.Ordinal) &&
+                   item.RevisionId.Equals(revisionId, StringComparison.Ordinal));
+    }
+
     private static bool ConditionMatches(RoutingCondition condition, RoutingClipFacts facts) =>
         condition.Field switch
         {
-            RoutingConditionField.Game => CompareText(
-                facts.Game, condition.Operator, condition.Value),
+            RoutingConditionField.Game => facts.ClipSource == RoutingClipSource.XboxOneDrive
+                ? XboxDvrGameMatch.Matches(
+                    facts.Game, condition.Operator, condition.Value)
+                : CompareText(facts.Game, condition.Operator, condition.Value),
             RoutingConditionField.ClipSource => CompareEnum(
                 facts.ClipSource, condition.Operator, condition.Value),
             RoutingConditionField.ReactionCamera => CompareBoolean(
@@ -444,6 +527,10 @@ internal static class RoutingEvaluator
                 facts.CaptureType, condition.Operator, condition.Value),
             RoutingConditionField.Duration => CompareDuration(
                 facts.DurationMilliseconds, condition.Operator, condition.Value),
+            RoutingConditionField.SourceConnection => CompareSourceConnection(
+                facts.SourceConnectionId, condition.Operator, condition.Value),
+            RoutingConditionField.CapturedAt => CompareCapturedAt(
+                facts.CapturedUtc, condition.Operator, condition.Value),
             _ => throw new InvalidDataException("A route condition kind is unsupported.")
         };
 
@@ -521,6 +608,40 @@ internal static class RoutingEvaluator
         };
     }
 
+    private static bool CompareSourceConnection(
+        string? actual,
+        RoutingConditionOperator comparison,
+        string expected) => comparison switch
+        {
+            RoutingConditionOperator.Equals =>
+                actual is not null && actual.Equals(expected, StringComparison.Ordinal),
+            RoutingConditionOperator.DoesNotEqual =>
+                actual is null || !actual.Equals(expected, StringComparison.Ordinal),
+            _ => throw new InvalidDataException(
+                "A source-connection condition uses an unsupported operator.")
+        };
+
+    private static bool CompareCapturedAt(
+        DateTimeOffset? actual,
+        RoutingConditionOperator comparison,
+        string expected)
+    {
+        var parsed = DateTimeOffset.ParseExact(
+            expected,
+            "O",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None);
+        return comparison switch
+        {
+            RoutingConditionOperator.GreaterThanOrEqual =>
+                actual is { } value && value >= parsed,
+            RoutingConditionOperator.LessThanOrEqual =>
+                actual is { } value && value <= parsed,
+            _ => throw new InvalidDataException(
+                "A captured-at condition uses an unsupported operator.")
+        };
+    }
+
     private static RoutingRouteSnapshotReference FreezeRouteReference(
         long generation,
         RoutingRoute route,
@@ -557,6 +678,9 @@ internal static class RoutingEvaluator
         RoutingValidation.Require(facts.DurationMilliseconds >= 0,
             "A routing clip duration is invalid.");
         RoutingValidation.RequireSha256(facts.SourceContentSha256, "source content hash");
+        if (facts.SourceConnectionId is not null)
+            RoutingInputSourceCatalogModel.ValidateSourceId(facts.SourceConnectionId);
+        RoutingValidation.RequireOptionalUtc(facts.CapturedUtc, "source capture timestamp");
 
         switch (facts.ClipSource)
         {
@@ -565,18 +689,36 @@ internal static class RoutingEvaluator
                                           Enum.IsDefined(captureType) &&
                                           facts.ArrivalTrigger == (captureType == RoutingCaptureType.InstantReplay
                                               ? RoutingTriggerKind.InstantReplay
-                                              : RoutingTriggerKind.ManualRecording),
+                                              : RoutingTriggerKind.ManualRecording) &&
+                                          HasNoExternalSourceProvenance(facts),
                     "A ClipCord capture has inconsistent capture and trigger facts.");
                 break;
             case RoutingClipSource.WatchedFolder:
                 RoutingValidation.Require(facts.CaptureType is null &&
-                                          facts.ArrivalTrigger == RoutingTriggerKind.WatchedFolder,
+                                          facts.ArrivalTrigger == RoutingTriggerKind.WatchedFolder &&
+                                          facts.CapturedUtc is null &&
+                                          facts.SourceOccurrenceId is null &&
+                                          facts.SourceRevisionId is null,
                     "A watched-folder clip has inconsistent capture or trigger facts.");
                 break;
             case RoutingClipSource.ManualImport:
                 RoutingValidation.Require(facts.CaptureType is null &&
-                                          facts.ArrivalTrigger == RoutingTriggerKind.AnyNewSourceClip,
+                                          facts.ArrivalTrigger == RoutingTriggerKind.AnyNewSourceClip &&
+                                          HasNoExternalSourceProvenance(facts),
                     "A manual import has inconsistent capture or trigger facts.");
+                break;
+            case RoutingClipSource.XboxOneDrive:
+                RoutingValidation.Require(facts.CaptureType is null &&
+                                          facts.ArrivalTrigger == RoutingTriggerKind.WatchedFolder &&
+                                          facts.SourceConnectionId is not null &&
+                                          facts.CapturedUtc is not null &&
+                                          facts.SourceOccurrenceId is not null &&
+                                          facts.SourceRevisionId is not null,
+                    "An Xbox OneDrive clip requires exact source, occurrence, revision, and capture-time facts.");
+                RoutingValidation.RequireSha256(
+                    facts.SourceOccurrenceId, "Xbox source occurrence identity");
+                RoutingValidation.RequireSha256(
+                    facts.SourceRevisionId, "Xbox source revision identity");
                 break;
             default:
                 throw new InvalidDataException("A routing clip source is unsupported.");
@@ -625,6 +767,12 @@ internal static class RoutingEvaluator
                                       facts.SourceContentSha256, StringComparison.OrdinalIgnoreCase),
             "The source original must be ready and match the source content hash.");
     }
+
+    private static bool HasNoExternalSourceProvenance(RoutingClipFacts facts) =>
+        facts.SourceConnectionId is null &&
+        facts.CapturedUtc is null &&
+        facts.SourceOccurrenceId is null &&
+        facts.SourceRevisionId is null;
 
     private static void ValidateDuplicateAuthorizations(
         IReadOnlyList<IntentionalDuplicateProvenance> authorizations,

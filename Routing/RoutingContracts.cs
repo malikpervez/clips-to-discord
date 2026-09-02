@@ -5,9 +5,18 @@ namespace ClipsToDiscord;
 internal enum RoutingRouteSource { User, Migration }
 internal enum RoutingRouteKind { Specific, Fallback }
 internal enum RoutingTriggerKind { AnyNewSourceClip, InstantReplay, ManualRecording, WatchedFolder }
-internal enum RoutingClipSource { ClipCordCapture, WatchedFolder, ManualImport }
+internal enum RoutingClipSource { ClipCordCapture, WatchedFolder, ManualImport, XboxOneDrive }
 internal enum RoutingCaptureType { InstantReplay, ManualRecording }
-internal enum RoutingConditionField { Game, ClipSource, ReactionCamera, CaptureType, Duration }
+internal enum RoutingConditionField
+{
+    Game,
+    ClipSource,
+    ReactionCamera,
+    CaptureType,
+    Duration,
+    SourceConnection,
+    CapturedAt
+}
 internal enum RoutingConditionOperator { Equals, DoesNotEqual, Contains, GreaterThanOrEqual, LessThanOrEqual }
 internal enum RoutingActionKind { Deliver, FileIntoLibrary }
 internal enum RoutingDestinationKind { Discord, YouTube, TikTok }
@@ -19,7 +28,8 @@ internal enum RoutingLibraryArea { LocalOnly, Uploaded }
 
 /// <summary>
 /// A condition is plain data, never an expression, path, URI, or secret. Duration values are
-/// invariant-culture whole milliseconds and ReactionCamera values are true/false.
+/// invariant-culture whole milliseconds, ReactionCamera values are true/false, SourceConnection
+/// values are canonical source-catalog ids, and CapturedAt values are round-trip UTC timestamps.
 /// </summary>
 internal sealed record RoutingCondition(
     Guid ConditionId,
@@ -63,6 +73,28 @@ internal sealed record RoutingAction(
     internal bool IsTerminalSourceDisposition => Kind == RoutingActionKind.FileIntoLibrary;
 }
 
+/// <summary>
+/// Freezes the exact pre-existing Xbox occurrences a user approved when activating a history
+/// window. Clips captured after ActivationUtc remain normal new arrivals; a clip at or before that
+/// boundary is eligible only when its opaque occurrence id is in this immutable selection.
+/// </summary>
+internal sealed record RoutingXboxHistoricalOccurrence(
+    string OccurrenceId,
+    string RevisionId);
+
+internal sealed record RoutingXboxHistorySelection(
+    DateTimeOffset ActivationUtc,
+    IReadOnlyList<RoutingXboxHistoricalOccurrence> HistoricalOccurrences)
+{
+    public bool Equals(RoutingXboxHistorySelection? other) =>
+        ReferenceEquals(this, other) ||
+        other is not null && ActivationUtc == other.ActivationUtc &&
+        RoutingStructural.SequenceEqual(HistoricalOccurrences, other.HistoricalOccurrences);
+
+    public override int GetHashCode() => RoutingStructural.Hash(
+        ActivationUtc, HistoricalOccurrences);
+}
+
 internal sealed record RoutingRoute(
     Guid RouteId,
     string Name,
@@ -76,7 +108,8 @@ internal sealed record RoutingRoute(
     IReadOnlyList<RoutingCondition> Conditions,
     IReadOnlyList<RoutingAction> Actions,
     DateTimeOffset CreatedUtc,
-    DateTimeOffset ModifiedUtc)
+    DateTimeOffset ModifiedUtc,
+    RoutingXboxHistorySelection? XboxHistorySelection = null)
 {
     public bool Equals(RoutingRoute? other) =>
         ReferenceEquals(this, other) ||
@@ -85,13 +118,13 @@ internal sealed record RoutingRoute(
         Priority == other.Priority && Revision == other.Revision && Source == other.Source &&
         Kind == other.Kind && Trigger == other.Trigger && Prepare == other.Prepare &&
         CreatedUtc == other.CreatedUtc &&
-        ModifiedUtc == other.ModifiedUtc &&
+        ModifiedUtc == other.ModifiedUtc && XboxHistorySelection == other.XboxHistorySelection &&
         RoutingStructural.SequenceEqual(Conditions, other.Conditions) &&
         RoutingStructural.SequenceEqual(Actions, other.Actions);
 
     public override int GetHashCode() => RoutingStructural.Hash(
         RouteId, Name, Enabled, Priority, Revision, Source, Kind, Trigger, Prepare,
-        Conditions, Actions, CreatedUtc, ModifiedUtc);
+        Conditions, Actions, CreatedUtc, ModifiedUtc, XboxHistorySelection);
 }
 
 internal sealed record RoutingSnapshotDocument(
@@ -198,12 +231,14 @@ internal sealed record RoutingPlanDecision(
     IReadOnlyList<Guid> MatchedRouteIds,
     IReadOnlyList<RoutingImmediateMissingResolution> InitialMissingResolutions,
     IReadOnlyList<IntentionalDuplicateProvenance> LatentDuplicateAuthorizations,
-    DateTimeOffset CreatedUtc)
+    DateTimeOffset CreatedUtc,
+    RoutingLocalOnlyAdmissionSnapshot? LocalOnlyOverride = null)
 {
     public bool Equals(RoutingPlanDecision? other) =>
         ReferenceEquals(this, other) ||
         other is not null && PlanId == other.PlanId && SourceClipId == other.SourceClipId &&
         RoutingGeneration == other.RoutingGeneration && CreatedUtc == other.CreatedUtc &&
+        LocalOnlyOverride == other.LocalOnlyOverride &&
         RoutingStructural.SequenceEqual(MatchedRouteIds, other.MatchedRouteIds) &&
         RoutingStructural.SequenceEqual(InitialMissingResolutions, other.InitialMissingResolutions) &&
         RoutingStructural.SequenceEqual(
@@ -211,7 +246,7 @@ internal sealed record RoutingPlanDecision(
 
     public override int GetHashCode() => RoutingStructural.Hash(
         PlanId, SourceClipId, RoutingGeneration, MatchedRouteIds, InitialMissingResolutions,
-        LatentDuplicateAuthorizations, CreatedUtc);
+        LatentDuplicateAuthorizations, CreatedUtc, LocalOnlyOverride);
 }
 
 internal sealed record PlannedDelivery(

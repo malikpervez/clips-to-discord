@@ -223,7 +223,8 @@ internal sealed class RoutingPlanCommitter
             expected.MatchedRouteIds.ToArray(),
             expected.ImmediateMissingResolutions.ToArray(),
             expected.LatentDuplicateAuthorizations.ToArray(),
-            planCreatedUtc);
+            planCreatedUtc,
+            expected.LocalOnlyOverride);
         RoutingValidation.Require(actualPlan == expectedPlan,
             "The durable routing decision conflicts with the watched source journal.");
         RoutingValidation.Require(actualDeliveries.Count == expected.Deliveries.Count &&
@@ -267,6 +268,8 @@ internal sealed class RoutingPlanCommitter
                 actual.CreatedUtc == expectedDisposition.CreatedUtc,
                 "A durable file disposition changed immutable frozen-plan data.");
         }
+        RoutingValidation.Require(actualPlan.LocalOnlyOverride == expected.LocalOnlyOverride,
+            "The durable routing decision changed its frozen local-only override state.");
     }
 
     private static void ValidateFrozenProposal(

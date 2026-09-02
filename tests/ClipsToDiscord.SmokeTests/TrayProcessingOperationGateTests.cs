@@ -10,6 +10,8 @@ internal static class TrayProcessingOperationGateTests
         AssertSynchronousMutationFailsFastWhileBusy();
         await AssertCancellationAndStartupFailurePropagateAsync();
         await AssertAuthorityAwareStartupRecoveryOrderingAsync();
+        await AssertRetryRestartsLegacyBeforeActivationAsync();
+        AssertRuntimeViewPresentationTracksRealTransitions();
         await AssertRoutingManualOperationQuiescesRecoversAndRestartsAsync();
         await AssertBlockedAuthorityManualOperationFailsClosedAsync(
             Path.Combine(testRoot, "blocked-authority"));
@@ -412,6 +414,112 @@ internal static class TrayProcessingOperationGateTests
                !committed.ActivationAttempted && committed.RecoveryError is null &&
                events.SequenceEqual(["recovery", "routing-start"]),
             "Committed Routing must start only after recovery finishes successfully.");
+    }
+
+    private static async Task AssertRetryRestartsLegacyBeforeActivationAsync()
+    {
+        var events = new List<string>();
+        var legacyReady = true;
+        var retry = await TrayRoutingRetrySequence.RunAsync(
+            _ =>
+            {
+                events.Add("recovery");
+                return Task.CompletedTask;
+            },
+            () => legacyReady,
+            _ =>
+            {
+                events.Add("legacy-start");
+                legacyReady = false;
+                return Task.FromResult("legacy-running");
+            },
+            result => result == "legacy-running",
+            _ =>
+            {
+                events.Add("routing-activate");
+                return Task.FromResult("routing-running");
+            },
+            CancellationToken.None);
+        Assert(retry.Result == "routing-running" && retry.ActivationAttempted &&
+               events.SequenceEqual(["recovery", "legacy-start", "routing-activate"]),
+            "A user retry from LegacyReady must recover, start Legacy under its retained lease, and only then attempt Routing activation.");
+
+        events.Clear();
+        legacyReady = true;
+        var failedStart = await TrayRoutingRetrySequence.RunAsync(
+            _ =>
+            {
+                events.Add("recovery");
+                return Task.CompletedTask;
+            },
+            () => legacyReady,
+            _ =>
+            {
+                events.Add("legacy-start");
+                return Task.FromResult("legacy-ready");
+            },
+            result => result == "legacy-running",
+            _ =>
+            {
+                events.Add("routing-activate");
+                return Task.FromResult("routing-running");
+            },
+            CancellationToken.None);
+        Assert(failedStart.Result == "legacy-ready" &&
+               !failedStart.ActivationAttempted &&
+               events.SequenceEqual(["recovery", "legacy-start"]),
+            "A failed Legacy restart must remain retryable without attempting an invalid Routing activation.");
+
+        events.Clear();
+        legacyReady = false;
+        var runningLegacy = await TrayRoutingRetrySequence.RunAsync(
+            _ =>
+            {
+                events.Add("recovery");
+                return Task.CompletedTask;
+            },
+            () => legacyReady,
+            _ => throw new InvalidOperationException(
+                "An already-running Legacy runtime must not be started twice."),
+            _ => false,
+            _ =>
+            {
+                events.Add("routing-activate");
+                return Task.FromResult("routing-running");
+            },
+            CancellationToken.None);
+        Assert(runningLegacy.Result == "routing-running" &&
+               runningLegacy.ActivationAttempted &&
+               events.SequenceEqual(["recovery", "routing-activate"]),
+            "A retry from LegacyRunning must recover and activate without starting a competing watcher.");
+    }
+
+    private static void AssertRuntimeViewPresentationTracksRealTransitions()
+    {
+        Assert(TrayRoutesRuntimePresentation.Map(
+                   startupRunning: true,
+                   RoutingApplicationLifecycleState.LegacyRunning) ==
+               RoutesRuntimeViewState.Activating,
+            "An in-flight startup or manual retry must stay visibly Activating even while Lifecycle has not yet published its final state.");
+        Assert(TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.LegacyReady) ==
+               RoutesRuntimeViewState.LegacySetupNeeded,
+            "LegacyReady after startup settles must expose editable first-run recovery instead of an endless disabled Starting state or Routing-owned lockout.");
+        Assert(TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.LegacyRunning) ==
+               RoutesRuntimeViewState.LegacyActive &&
+               TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.RoutingRunning) ==
+               RoutesRuntimeViewState.Active,
+            "Settled runtime presentation must distinguish the live Legacy and Routing owners.");
+        Assert(TrayRoutesRuntimePresentation.IsActivationStatus(
+                   "Routes activating — safely preparing existing clips") &&
+               !TrayRoutesRuntimePresentation.IsActivationStatus(
+                   "Discord open — watching for clips"),
+            "A failed retry may restore its prior watcher status only while the temporary activation status is still current.");
     }
 
     private static async Task AssertConfirmedDispositionRecoveryIsLocalOnlyAsync(string root)

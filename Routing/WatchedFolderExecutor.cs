@@ -7,7 +7,7 @@ namespace ClipsToDiscord;
 /// <summary>Resolves only immutable, journal-backed watched-folder source occurrences.</summary>
 internal sealed class WatchedFolderRoutingArtifactResolver : IRoutingArtifactResolver
 {
-    private readonly string _clipsRoot;
+    private readonly Func<RoutingWatchedSourceJournalDocument, string> _resolveRoot;
     private readonly RoutingWatchedSourceJournalStore _journals;
 
     internal WatchedFolderRoutingArtifactResolver(
@@ -15,7 +15,19 @@ internal sealed class WatchedFolderRoutingArtifactResolver : IRoutingArtifactRes
         RoutingWatchedSourceJournalStore journals)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clipsRoot);
-        _clipsRoot = Path.GetFullPath(clipsRoot);
+        var canonicalRoot = Path.GetFullPath(clipsRoot);
+        _resolveRoot = journal => journal.SourceConnectionId is null
+            ? canonicalRoot
+            : throw new InvalidDataException(
+                "A named watched source has no catalog root resolver.");
+        _journals = journals ?? throw new ArgumentNullException(nameof(journals));
+    }
+
+    internal WatchedFolderRoutingArtifactResolver(
+        Func<RoutingWatchedSourceJournalDocument, string> resolveRoot,
+        RoutingWatchedSourceJournalStore journals)
+    {
+        _resolveRoot = resolveRoot ?? throw new ArgumentNullException(nameof(resolveRoot));
         _journals = journals ?? throw new ArgumentNullException(nameof(journals));
     }
 
@@ -35,10 +47,12 @@ internal sealed class WatchedFolderRoutingArtifactResolver : IRoutingArtifactRes
                 "A watched-folder delivery does not resolve to its frozen original artifact.");
         }
 
+        var clipsRoot = _resolveRoot(journal);
+
         var current = await WatchedFolderRoutingEvidence.RevalidateSourceAsync(
-                _clipsRoot, journal, cancellationToken)
+                clipsRoot, journal, cancellationToken)
             .ConfigureAwait(false);
-        var path = WatchedFolderRoutingEvidence.SourcePath(_clipsRoot, journal);
+        var path = WatchedFolderRoutingEvidence.SourcePath(clipsRoot, journal);
         var opened = RoutingWatchedFileSystem.OpenOrdinaryFile(path, current.CanonicalRoot);
         try
         {
@@ -86,7 +100,7 @@ internal enum WatchedFolderRoutingInspectionPoint
 
 internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
 {
-    private readonly string _clipsRoot;
+    private readonly Func<RoutingWatchedSourceJournalDocument, string> _resolveRoot;
     private readonly RoutingWatchedSourceJournalStore _journals;
     private readonly Action<WatchedFolderRoutingInspectionPoint>? _beforeInspection;
 
@@ -96,7 +110,21 @@ internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
         Action<WatchedFolderRoutingInspectionPoint>? beforeInspection = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clipsRoot);
-        _clipsRoot = Path.GetFullPath(clipsRoot);
+        var canonicalRoot = Path.GetFullPath(clipsRoot);
+        _resolveRoot = journal => journal.SourceConnectionId is null
+            ? canonicalRoot
+            : throw new InvalidDataException(
+                "A named watched source has no catalog root resolver.");
+        _journals = journals ?? throw new ArgumentNullException(nameof(journals));
+        _beforeInspection = beforeInspection;
+    }
+
+    internal WatchedFolderRoutingLibraryFiler(
+        Func<RoutingWatchedSourceJournalDocument, string> resolveRoot,
+        RoutingWatchedSourceJournalStore journals,
+        Action<WatchedFolderRoutingInspectionPoint>? beforeInspection = null)
+    {
+        _resolveRoot = resolveRoot ?? throw new ArgumentNullException(nameof(resolveRoot));
         _journals = journals ?? throw new ArgumentNullException(nameof(journals));
         _beforeInspection = beforeInspection;
     }
@@ -109,14 +137,16 @@ internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
         var journal = WatchedFolderRoutingEvidence.LoadPrepared(
             _journals, disposition.SourceClipId, cancellationToken);
         WatchedFolderRoutingEvidence.RequireFrozenDisposition(journal, disposition);
+        var clipsRoot = _resolveRoot(journal);
         var moveAttempted = false;
         try
         {
-            var rootLease = WatchedFolderRoutingEvidence.OpenValidatedRoot(_clipsRoot, journal);
+            var rootLease = WatchedFolderRoutingEvidence.OpenValidatedRoot(clipsRoot, journal);
             using var heldRoot = rootLease.Handle;
             var before = await InspectAsync(
                     journal,
                     disposition,
+                    clipsRoot,
                     WatchedFolderRoutingInspectionPoint.BeforeMove,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -133,8 +163,8 @@ internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
             }
 
             var destination = WatchedFolderLibraryLayout.GetDestinationPath(
-                _clipsRoot, journal, disposition, createDirectories: true);
-            var source = WatchedFolderRoutingEvidence.SourcePath(_clipsRoot, journal);
+                clipsRoot, journal, disposition, createDirectories: true);
+            var source = WatchedFolderRoutingEvidence.SourcePath(clipsRoot, journal);
             try
             {
                 moveAttempted = true;
@@ -145,6 +175,7 @@ internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
                 var afterFailure = await InspectAsync(
                         journal,
                         disposition,
+                        clipsRoot,
                         WatchedFolderRoutingInspectionPoint.AfterMoveAttempt,
                         CancellationToken.None)
                     .ConfigureAwait(false);
@@ -158,6 +189,7 @@ internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
             var after = await InspectAsync(
                     journal,
                     disposition,
+                    clipsRoot,
                     WatchedFolderRoutingInspectionPoint.AfterMoveAttempt,
                     CancellationToken.None)
                 .ConfigureAwait(false);
@@ -189,11 +221,13 @@ internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
             var journal = WatchedFolderRoutingEvidence.LoadPrepared(
                 _journals, disposition.SourceClipId, cancellationToken);
             WatchedFolderRoutingEvidence.RequireFrozenDisposition(journal, disposition);
-            var rootLease = WatchedFolderRoutingEvidence.OpenValidatedRoot(_clipsRoot, journal);
+            var clipsRoot = _resolveRoot(journal);
+            var rootLease = WatchedFolderRoutingEvidence.OpenValidatedRoot(clipsRoot, journal);
             using var heldRoot = rootLease.Handle;
             var state = await InspectAsync(
                     journal,
                     disposition,
+                    clipsRoot,
                     WatchedFolderRoutingInspectionPoint.Recovery,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -223,19 +257,20 @@ internal sealed class WatchedFolderRoutingLibraryFiler : IRoutingLibraryFiler
     private async Task<WatchedInspection> InspectAsync(
         RoutingWatchedSourceJournalDocument journal,
         PlannedFileDisposition disposition,
+        string clipsRoot,
         WatchedFolderRoutingInspectionPoint point,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         _beforeInspection?.Invoke(point);
-        WatchedFolderRoutingEvidence.RequireRoot(_clipsRoot, journal);
+        WatchedFolderRoutingEvidence.RequireRoot(clipsRoot, journal);
         var source = await WatchedFolderRoutingEvidence.InspectSourceAsync(
-                _clipsRoot, journal, cancellationToken)
+                clipsRoot, journal, cancellationToken)
             .ConfigureAwait(false);
         var destinationPath = WatchedFolderLibraryLayout.GetDestinationPath(
-            _clipsRoot, journal, disposition, createDirectories: false);
+            clipsRoot, journal, disposition, createDirectories: false);
         var destination = await WatchedFolderRoutingEvidence.InspectContentAsync(
-                _clipsRoot, destinationPath, journal.ContentSha256, cancellationToken)
+                clipsRoot, destinationPath, journal.ContentSha256, cancellationToken)
             .ConfigureAwait(false);
         return new WatchedInspection(source, destination);
     }
@@ -369,6 +404,95 @@ internal static class WatchedFolderLibraryLayout
 }
 
 internal enum WatchedPathState { Missing, Exact, Conflict }
+
+internal sealed class RoutingWatchedSourceRootResolver
+{
+    private readonly string _legacyRoot;
+    private readonly RoutingInputSourceCatalog _sources;
+
+    internal RoutingWatchedSourceRootResolver(
+        string legacyRoot,
+        RoutingInputSourceCatalog sources)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(legacyRoot);
+        _legacyRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(legacyRoot));
+        _sources = sources ?? throw new ArgumentNullException(nameof(sources));
+    }
+
+    internal string Resolve(RoutingWatchedSourceJournalDocument journal)
+    {
+        var configuredRoot = ResolveConfigured(journal);
+        if (journal.SourceConnectionId is null) return configuredRoot;
+
+        var source = ResolveNamedAuthority(journal);
+        var currentRootIdentity = RoutingWatchedSourceRootIdentity.Create(
+            source.Kind,
+            configuredRoot);
+        RoutingValidation.Require(
+            currentRootIdentity.Equals(
+                journal.SourceRootIdentitySha256, StringComparison.Ordinal),
+            "The named watched-source root no longer matches its persisted authority.");
+        return configuredRoot;
+    }
+
+    /// <summary>
+    /// Resolves the catalog-bound path without opening the folder. Durable history uses this
+    /// authority so an offline drive or a folder replaced at the same path cannot erase an
+    /// Activity row. Filesystem consumers must continue to use <see cref="Resolve"/>.
+    /// </summary>
+    internal string ResolveConfigured(RoutingWatchedSourceJournalDocument journal)
+    {
+        RoutingWatchedJournalModel.Validate(journal);
+        if (journal.SourceConnectionId is null) return _legacyRoot;
+        return ResolveNamedAuthority(journal).CanonicalRoot;
+    }
+
+    /// <summary>
+    /// Returns whether a catalog-bound root can currently be reopened under the exact native
+    /// authority recorded by the journal. Operational absence or replacement is represented as
+    /// false so a historical Activity row can remain visible with its filesystem action disabled.
+    /// </summary>
+    internal bool IsCurrent(RoutingWatchedSourceJournalDocument journal)
+    {
+        RoutingWatchedJournalModel.Validate(journal);
+        if (journal.SourceConnectionId is null) return true;
+        try
+        {
+            var source = ResolveNamedAuthority(journal);
+            var currentRootIdentity = RoutingWatchedSourceRootIdentity.Create(
+                source.Kind,
+                source.CanonicalRoot);
+            return currentRootIdentity.Equals(
+                journal.SourceRootIdentitySha256, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidDataException or
+            System.Security.SecurityException or PlatformNotSupportedException or
+            NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private RoutingInputSourceRecord ResolveNamedAuthority(
+        RoutingWatchedSourceJournalDocument journal)
+    {
+        var snapshot = _sources.Inspect();
+        if (!snapshot.IsUsable)
+            throw new InvalidDataException("The named watched-source catalog is unavailable.");
+        var source = snapshot.Sources.SingleOrDefault(candidate =>
+            candidate.SourceId.Equals(journal.SourceConnectionId, StringComparison.Ordinal));
+        if (source is null)
+            throw new InvalidDataException("The named watched source is no longer registered.");
+        var captureSource = RoutingNamedWatchedFolderRuntimeHost.ToCaptureSource(source.Kind);
+        RoutingValidation.Require(
+            captureSource == journal.CaptureSource &&
+            source.RootIdentitySha256.Equals(
+                journal.SourceRootIdentitySha256, StringComparison.Ordinal),
+            "The named watched-source journal no longer matches its catalog authority.");
+        return source;
+    }
+}
 
 internal static class WatchedFolderRoutingEvidence
 {

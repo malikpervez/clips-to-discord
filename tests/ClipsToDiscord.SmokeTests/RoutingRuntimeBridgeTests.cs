@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using ClipsToDiscord;
 
 internal static class RoutingRuntimeBridgeTests
@@ -28,6 +30,10 @@ internal static class RoutingRuntimeBridgeTests
             await AssertDefaultBridgeIsInertAsync(Path.Combine(root, "disabled"));
             await AssertRouteSnapshotLossFailsClosedAsync(Path.Combine(root, "snapshot-loss"));
             await AssertPlanIsFrozenOnceAndSurvivesRestartAsync(Path.Combine(root, "restart"));
+            await AssertLocalOnlyOverrideIsSampledAtAdmissionAsync(
+                Path.Combine(root, "local-only-admission"));
+            await AssertLegacyJournalWithoutOverrideFailsSafeAsync(
+                Path.Combine(root, "legacy-local-only-admission"));
             await AssertArchivedPlanPreventsReplanningAsync(Path.Combine(root, "archived-restart"));
             await AssertCapacityAttentionIsTypedAsync(Path.Combine(root, "capacity-attention"));
             await AssertEveryJournalStatePlansWithStableOutputsAsync(Path.Combine(root, "states"));
@@ -1114,7 +1120,8 @@ internal static class RoutingRuntimeBridgeTests
     private static async Task<Fixture> CreateFixtureAsync(
         string root,
         bool reactionCamera,
-        CaptureJournalState targetState = CaptureJournalState.OriginalCommitted)
+        CaptureJournalState targetState = CaptureJournalState.OriginalCommitted,
+        RoutingLocalOnlyAdmissionSnapshot? localOnlyOverride = null)
     {
         Directory.CreateDirectory(root);
         var gameDirectory = CaptureLibraryLayout.GetRecordingDirectory(root, "Runtime Test Game");
@@ -1135,7 +1142,11 @@ internal static class RoutingRuntimeBridgeTests
             1080,
             reactionCamera,
             requested,
-            now: Now);
+            now: Now,
+            localOnlyOverride: localOnlyOverride ?? new RoutingLocalOnlyAdmissionSnapshot(
+                Enabled: false,
+                StateRevision: 1,
+                FailSafe: false));
         if (targetState != CaptureJournalState.OriginalCommitted)
         {
             journal = await CaptureJournalStore.BeginCameraAsync(
@@ -1408,6 +1419,85 @@ internal static class RoutingRuntimeBridgeTests
         Assert(planner.Calls == 1 && checksAfterPlanner >= 2 &&
                before.SequenceEqual(after) && persisted.Plans.Count == 0,
             "A Capture-library revocation inside the outbox CAS boundary must leave the outbox byte-identical and append no plan.");
+    }
+
+    private static async Task AssertLocalOnlyOverrideIsSampledAtAdmissionAsync(string root)
+    {
+        var state = new RoutingLocalOnlyOverrideState(
+            new RoutingLocalOnlyOverrideStore(Path.Combine(
+                root, "override", RoutingLocalOnlyOverrideStore.FileName)),
+            () => Now);
+        var admitted = await state.EnsureMigratedAsync(
+            legacyUploadToDiscord: false,
+            GlobalHotkeyBinding.DefaultDisplayText);
+        var fixture = await CreateFixtureAsync(
+            root,
+            reactionCamera: false,
+            localOnlyOverride: admitted.AdmissionSnapshot);
+        try
+        {
+            var toggled = await state.SetEnabledAsync(false);
+            var result = await fixture.CreateBridge(new RecordingPlanner())
+                .PlanAsync(SourceEvent(fixture.Item));
+            var outbox = fixture.OutboxStore.Load().Document ??
+                         throw new InvalidOperationException(
+                             "The Local-only runtime plan did not reload.");
+            var plan = outbox.Plans.Single(candidate => candidate.PlanId == result.PlanId);
+            Assert(result.Status == RoutingRuntimePlanStatus.Planned &&
+                   !toggled.EffectiveEnabled &&
+                   fixture.Item.Document!.Clip.LocalOnlyOverride == admitted.AdmissionSnapshot &&
+                   plan.LocalOnlyOverride == admitted.AdmissionSnapshot &&
+                   outbox.Deliveries.All(item => item.PlanId != plan.PlanId) &&
+                   outbox.FileDispositions.Single(item => item.PlanId == plan.PlanId)
+                       .LibraryArea == RoutingLibraryArea.LocalOnly,
+                "Capture admission must freeze Local-only mode in its durable journal so a later toggle cannot change bridge planning.");
+        }
+        finally
+        {
+            fixture.RoutingLease.Dispose();
+        }
+    }
+
+    private static async Task AssertLegacyJournalWithoutOverrideFailsSafeAsync(string root)
+    {
+        var fixture = await CreateFixtureAsync(root, reactionCamera: false);
+        try
+        {
+            var path = CaptureJournalStore.GetPath(
+                fixture.LibraryRoot, fixture.Item.ClipId);
+            var json = JsonNode.Parse(await File.ReadAllTextAsync(path))?.AsObject() ??
+                       throw new InvalidOperationException(
+                           "The legacy Capture fixture JSON was unavailable.");
+            var clip = json["clip"]?.AsObject() ?? throw new InvalidOperationException(
+                "The legacy Capture fixture clip was unavailable.");
+            Assert(clip.Remove("localOnlyOverride"),
+                "The legacy Capture fixture must begin with modern admission evidence.");
+            await File.WriteAllTextAsync(
+                path,
+                json.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var loaded = CaptureJournalStore.Load(
+                fixture.LibraryRoot, fixture.Item.ClipId);
+            Assert(loaded.LoadedFromDisk && loaded.Document?.Clip.LocalOnlyOverride is null,
+                "A pre-override Capture journal must remain readable without inventing OFF evidence.");
+            var legacyItem = fixture.Item with { Document = loaded.Document };
+
+            var result = await fixture.CreateBridge(new RecordingPlanner())
+                .PlanAsync(SourceEvent(legacyItem));
+            var outbox = fixture.OutboxStore.Load().Document ??
+                         throw new InvalidOperationException(
+                             "The legacy Capture fail-safe plan did not reload.");
+            var plan = outbox.Plans.Single(candidate => candidate.PlanId == result.PlanId);
+            Assert(plan.LocalOnlyOverride ==
+                       RoutingLocalOnlyAdmissionSnapshot.FailSafeSnapshot &&
+                   outbox.Deliveries.All(item => item.PlanId != plan.PlanId) &&
+                   outbox.FileDispositions.Single(item => item.PlanId == plan.PlanId)
+                       .LibraryArea == RoutingLibraryArea.LocalOnly,
+                "A legacy Capture journal without admission evidence must fail safe Local-only instead of retroactively inferring OFF.");
+        }
+        finally
+        {
+            fixture.RoutingLease.Dispose();
+        }
     }
 
     private static RoutingCaptureLibraryBinding CreateCaptureLibraryBinding(string root)

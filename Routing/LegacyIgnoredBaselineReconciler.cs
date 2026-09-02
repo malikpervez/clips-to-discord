@@ -42,8 +42,6 @@ internal sealed class LegacyIgnoredBaselineReconciler
         }
         var state = probe.State;
         var source = RequireExactSource(settings, state);
-        if (state.IgnoredFileKeys.Count == 0) return RequireDrainedProbe(cancellationToken);
-
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(settings.ClipsFolder));
         var adapter = _adapterProvider(source) ??
                       throw new InvalidDataException(
@@ -58,19 +56,32 @@ internal sealed class LegacyIgnoredBaselineReconciler
             .Select(ParseFileKey)
             .OrderBy(item => item.CanonicalPath, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        if (parsed.GroupBy(item => item.CanonicalPath, StringComparer.OrdinalIgnoreCase)
+        var reconciled = Clone(state);
+        var changed = ApplyUploadedClassificationPrecedence(reconciled);
+        var inScope = new List<LegacyIgnoredFileKey>(parsed.Length);
+        foreach (var item in parsed)
+        {
+            if (BelongsToSourceGeometry(root, item.CanonicalPath, source))
+            {
+                inScope.Add(item);
+                continue;
+            }
+            // This exact key cannot match anything the configured scanner is authorized to
+            // enumerate. Older builds retained such keys after folder/source changes. Remove it
+            // without opening, statting, or hashing the out-of-scope path.
+            changed |= reconciled.IgnoredFileKeys.Remove(item.OriginalKey);
+        }
+        if (inScope.GroupBy(item => item.CanonicalPath, StringComparer.OrdinalIgnoreCase)
             .Any(group => group.Count() != 1))
         {
             throw new InvalidDataException(
                 "The legacy ignored baseline contains ambiguous evidence for one path.");
         }
 
-        var reconciled = Clone(state);
         var addedHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in parsed)
+        foreach (var item in inScope)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            RequireLexicalGeometry(root, item.CanonicalPath, source);
             EnsureExistingComponentsAreOrdinary(root, item.CanonicalPath);
             if (!TryReadCurrentFileFacts(
                     item.CanonicalPath,
@@ -79,7 +90,7 @@ internal sealed class LegacyIgnoredBaselineReconciler
             {
                 // A missing exact occurrence is stale protection, not evidence for whatever may
                 // later appear at the same name.
-                reconciled.IgnoredFileKeys.Remove(item.OriginalKey);
+                changed |= reconciled.IgnoredFileKeys.Remove(item.OriginalKey);
                 continue;
             }
 
@@ -88,7 +99,7 @@ internal sealed class LegacyIgnoredBaselineReconciler
             {
                 // A changed occurrence is intentionally not grandfathered into the content-hash
                 // exclusion set. Routing may observe it later as new content.
-                reconciled.IgnoredFileKeys.Remove(item.OriginalKey);
+                changed |= reconciled.IgnoredFileKeys.Remove(item.OriginalKey);
                 continue;
             }
 
@@ -104,9 +115,9 @@ internal sealed class LegacyIgnoredBaselineReconciler
                 throw new InvalidDataException(
                     "A legacy ignored file changed while its baseline was reconciled.");
             }
-            reconciled.KnownContentHashes.Add(fingerprint.ContentSha256);
+            changed |= reconciled.KnownContentHashes.Add(fingerprint.ContentSha256);
             addedHashes.Add(fingerprint.ContentSha256);
-            reconciled.IgnoredFileKeys.Remove(item.OriginalKey);
+            changed |= reconciled.IgnoredFileKeys.Remove(item.OriginalKey);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -115,7 +126,7 @@ internal sealed class LegacyIgnoredBaselineReconciler
             throw new InvalidDataException(
                 "The legacy ignored baseline was not reconciled completely.");
         }
-        _watchState.Save(reconciled);
+        if (changed) _watchState.Save(reconciled);
 
         var verified = RequireDrainedProbe(CancellationToken.None);
         if (verified.State is null ||
@@ -134,6 +145,13 @@ internal sealed class LegacyIgnoredBaselineReconciler
         {
             throw new InvalidDataException(
                 $"The reconciled legacy watcher baseline cannot be trusted ({verified.Status}).");
+        }
+        if (verified.State.UploadedContentHashes.Intersect(
+                verified.State.LocalOnlyContentHashes,
+                StringComparer.OrdinalIgnoreCase).Any())
+        {
+            throw new InvalidDataException(
+                "The reconciled legacy delivery classifications remain ambiguous.");
         }
         return verified;
     }
@@ -183,7 +201,7 @@ internal sealed class LegacyIgnoredBaselineReconciler
         return new LegacyIgnoredFileKey(key, canonical, length, ticks);
     }
 
-    private static void RequireLexicalGeometry(
+    private static bool BelongsToSourceGeometry(
         string root,
         string candidate,
         ClipCaptureSource source)
@@ -193,8 +211,7 @@ internal sealed class LegacyIgnoredBaselineReconciler
             relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
             relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
         {
-            throw new InvalidDataException(
-                "A legacy ignored file escaped its configured source folder.");
+            return false;
         }
         var components = relative.Split(
             [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
@@ -207,13 +224,9 @@ internal sealed class LegacyIgnoredBaselineReconciler
                                             components[0], StringComparer.OrdinalIgnoreCase),
             _ => false
         };
-        if (!valid || components.Any(component => component is "." or "..") ||
-            !Path.GetExtension(components[^1]).Equals(
-                ".mp4", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException(
-                "A legacy ignored file does not match its capture-source geometry.");
-        }
+        return valid && !components.Any(component => component is "." or "..") &&
+               Path.GetExtension(components[^1]).Equals(
+                   ".mp4", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void EnsureExistingComponentsAreOrdinary(string root, string candidate)
@@ -322,6 +335,9 @@ internal sealed class LegacyIgnoredBaselineReconciler
             ? null
             : new HashSet<string>(state.KnownSignatures, StringComparer.OrdinalIgnoreCase)
     };
+
+    private static bool ApplyUploadedClassificationPrecedence(WatchState state) =>
+        state.LocalOnlyContentHashes.RemoveWhere(state.UploadedContentHashes.Contains) != 0;
 
     private sealed record LegacyIgnoredFileKey(
         string OriginalKey,

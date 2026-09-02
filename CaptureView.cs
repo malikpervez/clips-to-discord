@@ -40,6 +40,7 @@ internal sealed class CaptureView : UserControl
     private readonly Action<CaptureSettings>? _saveSettings;
     private readonly Func<bool> _captureLibraryAccessAllowed;
     private readonly Func<string, bool>? _repairCaptureLibraryRoot;
+    private readonly Func<string> _modeHotkeyProvider;
     private readonly BrandedScrollHost _scrollHost;
     private readonly ActivityListPanel _content;
     private readonly RoundedPanel _statusPill;
@@ -102,7 +103,8 @@ internal sealed class CaptureView : UserControl
         Action<CaptureSettings>? saveSettings = null,
         IManualCaptureRecorder? manualRecorder = null,
         Func<bool>? captureLibraryAccessAllowed = null,
-        Func<string, bool>? repairCaptureLibraryRoot = null)
+        Func<string, bool>? repairCaptureLibraryRoot = null,
+        Func<string>? modeHotkeyProvider = null)
     {
         _externalSettings = externalSettings;
         _settings = CaptureSettings.Normalize(settings);
@@ -113,6 +115,8 @@ internal sealed class CaptureView : UserControl
         _saveSettings = saveSettings;
         _captureLibraryAccessAllowed = captureLibraryAccessAllowed ?? (() => true);
         _repairCaptureLibraryRoot = repairCaptureLibraryRoot;
+        _modeHotkeyProvider = modeHotkeyProvider ?? (() =>
+            AppSettings.NormalizeModeToggleHotkey(_externalSettings.ModeToggleHotkey));
         _state = !_engineAvailable
             ? CaptureViewState.Unavailable
             : _settings.InstantReplayEnabled ? CaptureViewState.Armed : CaptureViewState.Off;
@@ -1344,12 +1348,12 @@ internal sealed class CaptureView : UserControl
         if (!GlobalHotkeyBinding.TryFromKeyData(eventArgs.KeyData, out var binding)) return;
         if (string.Equals(
                 binding.DisplayText,
-                AppSettings.NormalizeModeToggleHotkey(_externalSettings.ModeToggleHotkey),
+                _modeHotkeyProvider(),
                 StringComparison.OrdinalIgnoreCase))
         {
             MessageBox.Show(
                 this,
-                "That shortcut already switches ClipCord's upload mode. Choose a separate Capture shortcut so one key press cannot trigger two actions.",
+                "That shortcut already controls Local-only mode. Choose a separate Capture shortcut so one key press cannot trigger two actions.",
                 "Shortcut conflict",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);

@@ -83,6 +83,7 @@ internal sealed class ActivityHistoryStore : IDisposable
     private readonly string _path;
     private readonly List<ClipActivityEntry> _entries;
     private readonly Dictionary<int, ActivitySubscription> _subscriptions = [];
+    private Func<IReadOnlyList<ClipActivityEntry>>? _externalEntriesProvider;
     private int _nextSubscriptionId;
     private bool _disposed;
 
@@ -94,11 +95,51 @@ internal sealed class ActivityHistoryStore : IDisposable
 
     internal ClipActivitySnapshot GetSnapshot()
     {
+        ClipActivityEntry[] localEntries;
+        Func<IReadOnlyList<ClipActivityEntry>>? externalEntriesProvider;
         lock (_gate)
         {
-            return CreateSnapshotLocked();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            localEntries = _entries.ToArray();
+            externalEntriesProvider = _externalEntriesProvider;
+        }
+        return CreateSnapshot(localEntries, externalEntriesProvider);
+    }
+
+    /// <summary>
+    /// Adds a read-only durable history projection. Projected entries are never copied into
+    /// activity.json; their source of truth remains the owning subsystem, so a crash cannot split
+    /// one durable transition across two stores.
+    /// </summary>
+    internal void SetExternalEntriesProvider(
+        Func<IReadOnlyList<ClipActivityEntry>> externalEntriesProvider)
+    {
+        ArgumentNullException.ThrowIfNull(externalEntriesProvider);
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _externalEntriesProvider = externalEntriesProvider;
+        }
+        QueueExternalRefresh();
+    }
+
+    /// <summary>
+    /// Invalidates the UI view after another subsystem durably commits state. Projection happens
+    /// away from the caller so its I/O and any Activity failure cannot enter clip processing.
+    /// </summary>
+    internal void QueueExternalRefresh()
+    {
+        try
+        {
+            _ = Task.Run(PublishCurrentSnapshotBestEffort);
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not schedule a recent-activity refresh; clip processing will continue.", exception);
         }
     }
+
+    internal void RefreshExternalEntries() => PublishCurrentSnapshotBestEffort();
 
     internal ClipActivityEntry Transition(ClipActivityUpdate update)
     {
@@ -127,7 +168,8 @@ internal sealed class ActivityHistoryStore : IDisposable
 
     private ClipActivityEntry TransitionCore(ClipActivityUpdate update)
     {
-        ClipActivitySnapshot snapshot;
+        ClipActivityEntry[] localEntries;
+        Func<IReadOnlyList<ClipActivityEntry>>? externalEntriesProvider;
         ActivitySubscription[] subscriptions;
         ClipActivityEntry result;
         lock (_gate)
@@ -195,11 +237,13 @@ internal sealed class ActivityHistoryStore : IDisposable
             }
 
             SaveLocked();
-            snapshot = CreateSnapshotLocked();
+            localEntries = _entries.ToArray();
+            externalEntriesProvider = _externalEntriesProvider;
             subscriptions = _subscriptions.Values.ToArray();
             result = next;
         }
 
+        var snapshot = CreateSnapshot(localEntries, externalEntriesProvider);
         foreach (var subscription in subscriptions) subscription.Post(snapshot);
         return result;
     }
@@ -209,15 +253,18 @@ internal sealed class ActivityHistoryStore : IDisposable
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(observer);
         ActivitySubscription subscription;
-        ClipActivitySnapshot snapshot;
+        ClipActivityEntry[] localEntries;
+        Func<IReadOnlyList<ClipActivityEntry>>? externalEntriesProvider;
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var id = ++_nextSubscriptionId;
             subscription = new ActivitySubscription(this, id, context, observer);
             _subscriptions.Add(id, subscription);
-            snapshot = CreateSnapshotLocked();
+            localEntries = _entries.ToArray();
+            externalEntriesProvider = _externalEntriesProvider;
         }
+        var snapshot = CreateSnapshot(localEntries, externalEntriesProvider);
         subscription.Post(snapshot);
         return subscription;
     }
@@ -253,7 +300,60 @@ internal sealed class ActivityHistoryStore : IDisposable
     private static bool EquivalentExceptTimestamp(ClipActivityEntry left, ClipActivityEntry right) =>
         left with { UpdatedUtc = default } == right with { UpdatedUtc = default };
 
-    private ClipActivitySnapshot CreateSnapshotLocked() => new(_entries.ToArray());
+    private static ClipActivitySnapshot CreateSnapshot(
+        IReadOnlyList<ClipActivityEntry> localEntries,
+        Func<IReadOnlyList<ClipActivityEntry>>? externalEntriesProvider)
+    {
+        IReadOnlyList<ClipActivityEntry> externalEntries = [];
+        if (externalEntriesProvider is not null)
+        {
+            try
+            {
+                externalEntries = externalEntriesProvider() ?? [];
+            }
+            catch (Exception exception)
+            {
+                Log.Error(
+                    "Could not read durable Routing activity; legacy activity remains available.",
+                    exception);
+            }
+        }
+
+        var merged = externalEntries
+            .Concat(localEntries)
+            .Where(entry => entry is not null && entry.Id != Guid.Empty)
+            .GroupBy(entry => entry.Id)
+            .Select(group => group.First())
+            .OrderByDescending(entry => entry.UpdatedUtc)
+            .ThenBy(entry => entry.Id)
+            .Take(MaximumEntries)
+            .ToArray();
+        return new ClipActivitySnapshot(merged);
+    }
+
+    private void PublishCurrentSnapshotBestEffort()
+    {
+        try
+        {
+            ActivitySubscription[] subscriptions;
+            ClipActivityEntry[] localEntries;
+            Func<IReadOnlyList<ClipActivityEntry>>? externalEntriesProvider;
+            lock (_gate)
+            {
+                if (_disposed) return;
+                subscriptions = _subscriptions.Values.ToArray();
+                localEntries = _entries.ToArray();
+                externalEntriesProvider = _externalEntriesProvider;
+            }
+            if (subscriptions.Length == 0) return;
+            var snapshot = CreateSnapshot(localEntries, externalEntriesProvider);
+            foreach (var subscription in subscriptions) subscription.Post(snapshot);
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not refresh recent activity; clip processing will continue.", exception);
+        }
+    }
 
     private void SaveLocked()
     {

@@ -16,7 +16,8 @@ internal enum CaptureJournalState
 internal enum CaptureJournalSourceKind
 {
     ManualCapture,
-    InstantReplay
+    InstantReplay,
+    XboxGameDvr
 }
 
 internal static class CaptureJournalArtifactKinds
@@ -56,7 +57,11 @@ internal sealed record CaptureJournalClipMetadata(
     int Height,
     bool ReactionCameraRequested,
     IReadOnlyList<string> RequestedRenditions,
-    CaptureJournalArtifact Original);
+    CaptureJournalArtifact Original,
+    string? SourceConnectionId = null,
+    string? SourceOccurrenceId = null,
+    string? SourceRevisionId = null,
+    RoutingLocalOnlyAdmissionSnapshot? LocalOnlyOverride = null);
 
 internal sealed record CaptureJournalDocument(
     int SchemaVersion,
@@ -386,7 +391,11 @@ internal static class CaptureJournalModel
         left.Height == right.Height &&
         left.ReactionCameraRequested == right.ReactionCameraRequested &&
         left.RequestedRenditions.SequenceEqual(right.RequestedRenditions, StringComparer.Ordinal) &&
-        left.Original == right.Original;
+        left.Original == right.Original &&
+        left.SourceConnectionId == right.SourceConnectionId &&
+        left.SourceOccurrenceId == right.SourceOccurrenceId &&
+        left.SourceRevisionId == right.SourceRevisionId &&
+        left.LocalOnlyOverride == right.LocalOnlyOverride;
 
     internal static bool IsClipId(string? value) =>
         value is { Length: 32 } && value.All(character =>
@@ -414,6 +423,9 @@ internal static class CaptureJournalModel
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
                 .ToArray(),
+            SourceConnectionId = clip.SourceConnectionId?.Trim(),
+            SourceOccurrenceId = clip.SourceOccurrenceId?.Trim().ToLowerInvariant(),
+            SourceRevisionId = clip.SourceRevisionId?.Trim().ToLowerInvariant(),
             Original = clip.Original with
             {
                 Fingerprint = clip.Original.Fingerprint with
@@ -445,6 +457,32 @@ internal static class CaptureJournalModel
         Require(
             clip.ReactionCameraRequested == (requested.Count > 0),
             "Reaction Camera and requested rendition metadata disagree.");
+        if (clip.SourceKind == CaptureJournalSourceKind.XboxGameDvr)
+        {
+            RoutingValidation.RequireOpaqueId(
+                clip.SourceConnectionId, 128, "Xbox source connection id");
+            Require(
+                IsSha256(clip.SourceOccurrenceId) &&
+                clip.SourceOccurrenceId!.All(character =>
+                    character is >= '0' and <= '9' or >= 'a' and <= 'f'),
+                "The Xbox source occurrence id is invalid.");
+            Require(
+                IsSha256(clip.SourceRevisionId) &&
+                clip.SourceRevisionId!.All(character =>
+                    character is >= '0' and <= '9' or >= 'a' and <= 'f'),
+                "The Xbox source revision id is invalid.");
+            Require(!clip.ReactionCameraRequested && requested.Count == 0,
+                "An imported Xbox clip cannot request a captured Reaction Camera layer.");
+        }
+        else
+        {
+            Require(string.IsNullOrWhiteSpace(clip.SourceConnectionId) &&
+                    string.IsNullOrWhiteSpace(clip.SourceOccurrenceId) &&
+                    string.IsNullOrWhiteSpace(clip.SourceRevisionId),
+                "A ClipCord capture cannot carry external-source provenance.");
+        }
+        if (clip.LocalOnlyOverride is not null)
+            RoutingLocalOnlyAdmissionSnapshot.Validate(clip.LocalOnlyOverride);
         ValidateArtifact(clip.Original, clip.ClipId, allowOriginal: true);
         Require(
             clip.Original.Kind.Equals("original", StringComparison.Ordinal),
@@ -622,7 +660,11 @@ internal static class CaptureJournalStore
         IReadOnlyList<string> requestedRenditions,
         CancellationToken cancellationToken = default,
         DateTimeOffset? now = null,
-        CaptureJournalFingerprint? expectedFingerprint = null)
+        CaptureJournalFingerprint? expectedFingerprint = null,
+        string? sourceConnectionId = null,
+        string? sourceOccurrenceId = null,
+        string? sourceRevisionId = null,
+        RoutingLocalOnlyAdmissionSnapshot? localOnlyOverride = null)
     {
         ArgumentNullException.ThrowIfNull(requestedRenditions);
         cancellationToken.ThrowIfCancellationRequested();
@@ -655,7 +697,11 @@ internal static class CaptureJournalStore
             height,
             reactionCameraRequested,
             requestedRenditions.ToArray(),
-            original);
+            original,
+            sourceConnectionId,
+            sourceOccurrenceId,
+            sourceRevisionId,
+            RoutingLocalOnlyAdmissionSnapshot.PersistedOrFailSafe(localOnlyOverride));
         var document = CaptureJournalModel.CreateOriginalCommitted(
             clip,
             (now ?? DateTimeOffset.UtcNow).ToUniversalTime());

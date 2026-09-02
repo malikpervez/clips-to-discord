@@ -1,4 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Net;
+using System.Text;
 using ClipsToDiscord;
 
 internal static class RoutingActiveWorkSessionTests
@@ -13,13 +16,25 @@ internal static class RoutingActiveWorkSessionTests
             Path.Combine(testRoot, "lifecycle"));
         await AssertUnexpectedHostExitFailsClosedAsync(
             Path.Combine(testRoot, "terminal-failure"));
+        await AssertRequiredNamedHostExitIsObservedAsync();
+        await AssertOptionalXboxFailureRepairsWithoutAggregateRestartAsync(
+            Path.Combine(testRoot, "optional-xbox-restart"));
+        await AssertOptionalXboxCanceledStartupStopsItsRetryLoopAsync(
+            Path.Combine(testRoot, "optional-xbox-canceled-start"));
+        await AssertOptionalXboxStopFailureDoesNotShortCircuitWatchedStopAsync();
+        await AssertOptionalXboxDisposeFailureDoesNotShortCircuitOwnedCleanupAsync();
         await AssertProductionFactoryRejectsReplacedCaptureLibraryAsync(
             Path.Combine(testRoot, "capture-library-replaced-before-create"));
         await AssertRunningSessionWithRetainedPinBlocksReplacementAsync(
             Path.Combine(testRoot, "capture-library-pinned-while-running"));
         await AssertProductionFactorySurvivesRouteEditAndExecutesAsync(
             Path.Combine(testRoot, "production-route-edit"));
+        await AssertProductionWatchedDiscordDeliveryIsRestartSafeAsync(
+            Path.Combine(testRoot, "d"));
     }
+
+    internal static Task RunProductionWatchedDiscordE2EAsync(string testRoot) =>
+        AssertProductionWatchedDiscordDeliveryIsRestartSafeAsync(testRoot);
 
     private static async Task AssertStartupAndStopOrderingBorrowLeaseAsync(string root)
     {
@@ -105,6 +120,234 @@ internal static class RoutingActiveWorkSessionTests
             "An unexpected host exit must durably fault Completion, quiesce both producers, dispose shared work once, and never release the borrowed Routing lease.");
     }
 
+    private static async Task AssertRequiredNamedHostExitIsObservedAsync()
+    {
+        var migrated = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var named = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = RoutingRequiredExternalSourceCompletion.ObserveAsync(
+            migrated.Task,
+            named.Task);
+        var failure = new InvalidDataException("named-watched-runtime-terminal");
+
+        named.TrySetException(failure);
+        await AssertSameFailureAsync(completion, failure);
+
+        Assert(!migrated.Task.IsCompleted,
+            "A named watched-source runtime failure must wake the required external-source supervisor without waiting for the migrated watcher to stop.");
+    }
+
+    private static async Task AssertOptionalXboxFailureRepairsWithoutAggregateRestartAsync(
+        string root)
+    {
+        using var authority = await AuthorityFixture.CreateAsync(root);
+        var events = new ConcurrentQueue<string>();
+        var capture = new FakeHost("capture", events);
+        var watched = new FakeHost("watched", events);
+        var startupFailure = new InvalidOperationException("xbox-startup-failure");
+        var first = new FakeOptionalXboxInstance(startFailure: startupFailure)
+        {
+            ThrowOnDispose = true
+        };
+        var second = new FakeOptionalXboxInstance();
+        var third = new FakeOptionalXboxInstance();
+        var instances = new Queue<FakeOptionalXboxInstance>([first, second, third]);
+        var retryEntered = Enumerable.Range(0, 3)
+            .Select(_ => new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously))
+            .ToArray();
+        var repairReleased = Enumerable.Range(0, 3)
+            .Select(_ => new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously))
+            .ToArray();
+        var retryCall = 0;
+        var optionalFailures = new ConcurrentQueue<Exception>();
+        async Task DelayUntilRepairAsync(TimeSpan _, CancellationToken cancellationToken)
+        {
+            var index = Interlocked.Increment(ref retryCall) - 1;
+            retryEntered[index].TrySetResult();
+            await repairReleased[index].Task.WaitAsync(cancellationToken);
+        }
+        var supervisor = new OptionalXboxRuntimeSupervisor(
+            () => instances.Dequeue().CreateRuntimeInstance(),
+            TimeSpan.FromMilliseconds(1),
+            TimeSpan.FromMilliseconds(4),
+            DelayUntilRepairAsync,
+            (_, exception) => optionalFailures.Enqueue(exception));
+
+        async ValueTask StartExternalAsync(CancellationToken cancellationToken)
+        {
+            await watched.StartAsync(cancellationToken);
+            try
+            {
+                await supervisor.StartAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await supervisor.StopAsync(CancellationToken.None);
+                await watched.StopAsync(CancellationToken.None);
+                throw;
+            }
+        }
+        async ValueTask StopExternalAsync(CancellationToken _)
+        {
+            await supervisor.StopAsync(CancellationToken.None);
+            await watched.StopAsync(CancellationToken.None);
+        }
+        async ValueTask DisposeOwnedAsync()
+        {
+            await RoutingOwnedWorkGraphDisposer.DisposeAsync(
+                () => ValueTask.CompletedTask,
+                supervisor.DisposeAsync,
+                () => ValueTask.CompletedTask,
+                () => events.Enqueue("executor-dispose"),
+                exception => optionalFailures.Enqueue(exception));
+        }
+        var operations = new RoutingActiveWorkSessionOperations(
+            capture.StartAsync,
+            capture.StopAsync,
+            () => capture.Completion,
+            () => capture.Failure,
+            StartExternalAsync,
+            StopExternalAsync,
+            () => watched.Completion,
+            () => watched.Failure,
+            DisposeOwnedAsync);
+        await using var session = RoutingActiveWorkSession.CreateForTesting(
+            authority.Lease, authority.Gate, operations);
+
+        await session.StartAsync();
+        await retryEntered[0].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert(session.State == RoutingActiveWorkSessionState.Running &&
+               !session.Completion.IsCompleted &&
+               capture.StopCalls == 0 && watched.StopCalls == 0,
+            "An optional Xbox startup failure must degrade independently without quiescing the aggregate session.");
+
+        repairReleased[0].TrySetResult();
+        await second.StartEntered.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(
+            () => supervisor.Inspect().Status == OptionalXboxRuntimeStatus.Running);
+        second.Fail(new IOException("xbox-terminal-after-start"));
+        await retryEntered[1].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert(session.State == RoutingActiveWorkSessionState.Running &&
+               capture.StopCalls == 0 && watched.StopCalls == 0,
+            "A terminal Xbox instance must not stop ordinary watched or Capture work while repair is pending.");
+
+        repairReleased[1].TrySetResult();
+        await third.StartEntered.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(() =>
+        {
+            var inspection = supervisor.Inspect();
+            return inspection.Status == OptionalXboxRuntimeStatus.Running &&
+                   inspection.RestartCount == 2;
+        });
+        Assert(session.State == RoutingActiveWorkSessionState.Running &&
+               !session.Completion.IsCompleted &&
+               optionalFailures.Any(exception =>
+                   ReferenceEquals(exception, startupFailure)),
+            "Repair must create a fresh Xbox host inside the same aggregate session and retain inspectable failure evidence.");
+
+        third.Fail(new IOException("xbox-terminal-before-stop"));
+        await retryEntered[2].Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await session.StopAsync();
+        Assert(session.Completion.IsCompletedSuccessfully &&
+               session.State == RoutingActiveWorkSessionState.Stopped &&
+               capture.StopCalls == 1 && watched.StopCalls == 1 &&
+               instances.Count == 0,
+            "Stopping during Xbox retry backoff must cancel recreation and still stop the aggregate normally.");
+    }
+
+    private static async Task AssertOptionalXboxCanceledStartupStopsItsRetryLoopAsync(string root)
+    {
+        _ = root;
+        var startRelease = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var instance = new FakeOptionalXboxInstance(startRelease.Task);
+        var factoryCalls = 0;
+        await using var supervisor = new OptionalXboxRuntimeSupervisor(
+            () =>
+            {
+                Interlocked.Increment(ref factoryCalls);
+                return instance.CreateRuntimeInstance();
+            },
+            TimeSpan.Zero,
+            TimeSpan.Zero);
+        using var cancellation = new CancellationTokenSource();
+        var start = supervisor.StartAsync(cancellation.Token);
+        await instance.StartEntered.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await AssertCanceledAsync(start,
+            "Canceling aggregate startup must cancel the optional Xbox supervisor wait.");
+        await supervisor.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert(factoryCalls == 1 && instance.StopCalls == 1 &&
+               supervisor.Inspect().Status == OptionalXboxRuntimeStatus.Stopped,
+            "Canceled Xbox startup must leave no current instance or retry loop behind.");
+    }
+
+    private static async Task AssertOptionalXboxDisposeFailureDoesNotShortCircuitOwnedCleanupAsync()
+    {
+        var events = new ConcurrentQueue<string>();
+        var optionalFailures = 0;
+        await RoutingOwnedWorkGraphDisposer.DisposeAsync(
+            () =>
+            {
+                events.Enqueue("capture-dispose");
+                return ValueTask.CompletedTask;
+            },
+            () =>
+            {
+                events.Enqueue("xbox-dispose");
+                return ValueTask.FromException(
+                    new IOException("optional-xbox-dispose-failure"));
+            },
+            () =>
+            {
+                events.Enqueue("watched-dispose");
+                return ValueTask.CompletedTask;
+            },
+            () => events.Enqueue("executor-dispose"),
+            _ => Interlocked.Increment(ref optionalFailures));
+        Assert(events.ToArray().SequenceEqual([
+                   "capture-dispose",
+                   "xbox-dispose",
+                   "watched-dispose",
+                   "executor-dispose"
+               ]) && optionalFailures == 1,
+            "An optional Xbox dispose failure must be reported without preventing watched or executor cleanup.");
+    }
+
+    private static async Task AssertOptionalXboxStopFailureDoesNotShortCircuitWatchedStopAsync()
+    {
+        var events = new ConcurrentQueue<string>();
+        var optionalFailure = new IOException("optional-xbox-stop-failure");
+        Exception? observed = null;
+        try
+        {
+            await RoutingExternalSourceStopper.StopAsync(
+                () =>
+                {
+                    events.Enqueue("xbox-stop");
+                    return ValueTask.FromException(optionalFailure);
+                },
+                () =>
+                {
+                    events.Enqueue("watched-stop");
+                    return ValueTask.CompletedTask;
+                });
+        }
+        catch (Exception exception)
+        {
+            observed = exception;
+        }
+        Assert(ReferenceEquals(observed, optionalFailure) &&
+               events.ToArray().SequenceEqual([
+                   "xbox-stop",
+                   "watched-stop"
+               ]),
+            "An optional Xbox stop failure must remain observable without preventing the ordinary watched host from stopping.");
+    }
+
     private static async Task AssertProductionFactorySurvivesRouteEditAndExecutesAsync(
         string root)
     {
@@ -188,6 +431,126 @@ internal static class RoutingActiveWorkSessionTests
         await session.StopAsync();
         Assert(session.Completion.IsCompletedSuccessfully && authority.Lease.IsCurrent,
             "The real production aggregate did not quiesce cleanly after route-edit execution.");
+    }
+
+    private static async Task AssertProductionWatchedDiscordDeliveryIsRestartSafeAsync(
+        string root)
+    {
+        using var authority = await AuthorityFixture.CreateAsync(
+            root,
+            uploadToDiscord: true);
+        var options = new RoutingActiveWorkSessionOptions(
+            new CaptureJournalRoutingPumpOptions(
+                PollInterval: TimeSpan.FromMilliseconds(2),
+                MaximumEntriesPerPage: 100,
+                MaximumPageDuration: TimeSpan.FromSeconds(5),
+                MaximumPagesPerPass: 100),
+            new RoutingWatchedFolderRuntimeHostOptions(
+                PollInterval: TimeSpan.FromMilliseconds(2),
+                ErrorRetryInterval: TimeSpan.FromMilliseconds(2),
+                MaximumErrorRetryInterval: TimeSpan.FromMilliseconds(10),
+                MaximumConsecutiveLoopFailures: 3,
+                MaximumCandidatesPerScan: 100));
+        var posts = new DiscordPostRecorder();
+        Func<DiscordWebhookClient> clientFactory = () =>
+            new(new RecordingDiscordHandler(posts));
+        var source = Path.Combine(
+            authority.Settings.ClipsFolder,
+            "E2E Game 2026.08.29 - 22.06.00.00.DVR.mp4");
+        CreateValidVideo(source);
+        File.SetLastWriteTimeUtc(source, DateTime.UtcNow.AddMinutes(-1));
+
+        await using (var first = RoutingActiveWorkSession.CreateProduction(
+                         authority.Settings,
+                         () => authority.Settings,
+                         authority.CaptureSettings,
+                         () => authority.CaptureSettings,
+                         authority.Lease,
+                         authority.Gate,
+                         authority.Storage,
+                         options,
+                         discordClientFactory: clientFactory))
+        {
+            await first.StartAsync();
+            var completed = await WaitForCompletedWatchedPlanAsync(
+                authority.Storage.OutboxPath,
+                TimeSpan.FromSeconds(25));
+            Assert(completed is not null &&
+                   completed.Deliveries is
+                   [
+                       {
+                           State: PlannedDeliveryState.Delivered,
+                           Attempts: 1,
+                           RemoteReceiptReference: "discord:777777777777777777"
+                       }
+                   ] &&
+                   completed.FileDispositions is
+                   [
+                       {
+                           State: PlannedFileDispositionState.Completed,
+                           LibraryArea: RoutingLibraryArea.Uploaded
+                       }
+                   ] &&
+                   posts.CallCount == 1 &&
+                   posts.AllRequestedWaitReceipts &&
+                   !File.Exists(source),
+                "The production watched graph must plan one Discord delivery, receive one durable receipt, and file the source into Uploaded exactly once.");
+
+            var journals = new RoutingWatchedSourceJournalStore(
+                authority.Storage.WatchedJournalRoot);
+            var journalIds = journals.EnumerateSourceClipIds();
+            Assert(journalIds.Count == 1,
+                "The watched production graph must persist one immutable source journal.");
+            var journal = journals.Load(journalIds[0]).Document;
+            var disposition = completed!.FileDispositions.Single();
+            Assert(journal is not null &&
+                   File.Exists(WatchedFolderLibraryLayout.GetDestinationPath(
+                       authority.Settings.ClipsFolder,
+                       journal,
+                       disposition,
+                       createDirectories: false)),
+                "The completed watched disposition must point to a real managed Uploaded file.");
+            await first.StopAsync();
+        }
+
+        var beforeRestart = new RoutingOutboxStore(
+            authority.Storage.OutboxPath).Load().Document!;
+        await using (var restarted = RoutingActiveWorkSession.CreateProduction(
+                         authority.Settings,
+                         () => authority.Settings,
+                         authority.CaptureSettings,
+                         () => authority.CaptureSettings,
+                         authority.Lease,
+                         authority.Gate,
+                         authority.Storage,
+                         options,
+                         discordClientFactory: clientFactory))
+        {
+            await restarted.StartAsync();
+            await Task.Delay(100);
+            var afterRestart = new RoutingOutboxStore(
+                authority.Storage.OutboxPath).Load().Document!;
+            var receipts = new RoutingDeliveryReceiptStore(
+                authority.Storage.DeliveryReceiptPath).Load().Document!;
+            Assert(posts.CallCount == 1 &&
+                   afterRestart.Deliveries.Single().Attempts == 1 &&
+                   afterRestart.Deliveries.Single().State ==
+                   PlannedDeliveryState.Delivered &&
+                   afterRestart.FileDispositions.Single().State ==
+                   PlannedFileDispositionState.Completed &&
+                   afterRestart.Generation == beforeRestart.Generation &&
+                   receipts.Claims is
+                   [
+                       {
+                           State: RoutingDeliveryClaimState.Confirmed,
+                           RemoteReceiptReference: "discord:777777777777777777"
+                       }
+                   ] &&
+                   restarted.State == RoutingActiveWorkSessionState.Running &&
+                   restarted.Failure is null,
+                "Restart reconciliation must preserve the confirmed receipt and completed filing without a second Discord POST or outbox mutation.");
+            await restarted.StopAsync();
+        }
     }
 
     private static async Task AssertProductionFactoryRejectsReplacedCaptureLibraryAsync(
@@ -352,6 +715,69 @@ internal static class RoutingActiveWorkSessionTests
         return false;
     }
 
+    private static async Task<RoutingOutboxDocument?> WaitForCompletedWatchedPlanAsync(
+        string outboxPath,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        var outbox = new RoutingOutboxStore(outboxPath);
+        while (DateTime.UtcNow < deadline)
+        {
+            var load = outbox.Load();
+            if (load.LoadedFromDisk && load.Document is { } document &&
+                document.Plans.Count == 1 &&
+                RoutingWatchedJournalModel.IsWatchedSourceClipId(
+                    document.Plans[0].SourceClipId) &&
+                document.Deliveries.Count == 1 &&
+                document.Deliveries[0].State == PlannedDeliveryState.Delivered &&
+                document.FileDispositions.Count == 1 &&
+                document.FileDispositions[0].State ==
+                PlannedFileDispositionState.Completed)
+            {
+                return document;
+            }
+            await Task.Delay(10);
+        }
+        return null;
+    }
+
+    private static void CreateValidVideo(string path)
+    {
+        var ffmpeg = FfmpegCompressor.FindExecutable() ??
+                     throw new FileNotFoundException(
+                         "The production watched Discord E2E requires ffmpeg.exe.");
+        var startInfo = new ProcessStartInfo(ffmpeg)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = false
+        };
+        foreach (var argument in new[]
+                 {
+                     "-hide_banner", "-loglevel", "error", "-y",
+                     "-f", "lavfi", "-i", "color=c=black:s=320x240:r=15:d=0.25",
+                     "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-an", path
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+        using var process = Process.Start(startInfo) ??
+                            throw new InvalidOperationException(
+                                "The production watched Discord E2E could not start ffmpeg.");
+        if (!process.WaitForExit((int)TimeSpan.FromSeconds(10).TotalMilliseconds))
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch { }
+            throw new TimeoutException(
+                "The production watched Discord E2E ffmpeg fixture timed out.");
+        }
+        var standardError = process.StandardError.ReadToEnd();
+        Assert(process.ExitCode == 0 && File.Exists(path),
+            "The production watched Discord E2E could not create its valid MP4 fixture: " +
+            standardError);
+    }
+
     private static async Task AssertSameFailureAsync(Task completion, Exception expected)
     {
         try
@@ -364,6 +790,88 @@ internal static class RoutingActiveWorkSessionTests
         }
         throw new InvalidOperationException(
             "The aggregate Completion did not expose the exact terminal host failure.");
+    }
+
+    private static async Task AssertCanceledAsync(Task task, string message)
+    {
+        try
+        {
+            await task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        throw new InvalidOperationException(message);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!condition() && DateTime.UtcNow < deadline)
+            await Task.Delay(1);
+        Assert(condition(), "The optional Xbox lifecycle did not reach its expected state.");
+    }
+
+    private sealed class FakeOptionalXboxInstance
+    {
+        private readonly Task _startRelease;
+        private readonly Exception? _startFailure;
+        private readonly TaskCompletionSource _startEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _completion = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private Exception? _failure;
+        private int _stopCalls;
+        private int _disposeCalls;
+
+        internal FakeOptionalXboxInstance(
+            Task? startRelease = null,
+            Exception? startFailure = null)
+        {
+            _startRelease = startRelease ?? Task.CompletedTask;
+            _startFailure = startFailure;
+        }
+
+        internal bool ThrowOnDispose { get; init; }
+        internal Task StartEntered => _startEntered.Task;
+        internal int StopCalls => Volatile.Read(ref _stopCalls);
+        internal int DisposeCalls => Volatile.Read(ref _disposeCalls);
+
+        internal OptionalXboxRuntimeInstance CreateRuntimeInstance() => new(
+            StartAsync,
+            StopAsync,
+            _completion.Task,
+            () => Volatile.Read(ref _failure),
+            DisposeAsync);
+
+        private async Task StartAsync(CancellationToken cancellationToken)
+        {
+            _startEntered.TrySetResult();
+            await _startRelease.WaitAsync(cancellationToken);
+            if (_startFailure is not null) throw _startFailure;
+        }
+
+        private ValueTask StopAsync(CancellationToken _)
+        {
+            Interlocked.Increment(ref _stopCalls);
+            _completion.TrySetResult();
+            return ValueTask.CompletedTask;
+        }
+
+        private ValueTask DisposeAsync()
+        {
+            Interlocked.Increment(ref _disposeCalls);
+            return ThrowOnDispose
+                ? ValueTask.FromException(new IOException("injected-xbox-dispose-failure"))
+                : ValueTask.CompletedTask;
+        }
+
+        internal void Fail(Exception exception)
+        {
+            Volatile.Write(ref _failure, exception);
+            _completion.TrySetException(exception);
+        }
     }
 
     private sealed class FakeHost
@@ -417,6 +925,45 @@ internal static class RoutingActiveWorkSessionTests
         }
     }
 
+    private sealed class DiscordPostRecorder
+    {
+        private int _callCount;
+        private int _requestsWithoutWait;
+
+        internal int CallCount => Volatile.Read(ref _callCount);
+        internal bool AllRequestedWaitReceipts =>
+            Volatile.Read(ref _requestsWithoutWait) == 0;
+
+        internal HttpResponseMessage Send(HttpRequestMessage request)
+        {
+            Interlocked.Increment(ref _callCount);
+            if (request.RequestUri?.Query.Contains(
+                    "wait=true", StringComparison.Ordinal) != true)
+            {
+                Interlocked.Increment(ref _requestsWithoutWait);
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"id\":\"777777777777777777\"}",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        }
+    }
+
+    private sealed class RecordingDiscordHandler(DiscordPostRecorder recorder) :
+        HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(recorder.Send(request));
+        }
+    }
+
     private sealed class AuthorityFixture : IDisposable
     {
         private AuthorityFixture(
@@ -445,7 +992,9 @@ internal static class RoutingActiveWorkSessionTests
         internal ClipProcessingOwnershipCoordinator Ownership { get; }
         internal ClipProcessingOwnershipLease Lease { get; }
 
-        internal static async Task<AuthorityFixture> CreateAsync(string root)
+        internal static async Task<AuthorityFixture> CreateAsync(
+            string root,
+            bool uploadToDiscord = false)
         {
             Directory.CreateDirectory(root);
             var watchedRoot = Directory.CreateDirectory(
@@ -465,19 +1014,28 @@ internal static class RoutingActiveWorkSessionTests
                 Path.Combine(routingRoot, "legacy", "state.json"),
                 Path.Combine(routingRoot, "legacy", ".safe-baseline-required"));
             stateStore.Save(state);
+            const string webhook =
+                "https://discord.com/api/webhooks/123456789012345678/production-e2e-token";
             var settings = new AppSettings(
                 watchedRoot,
-                string.Empty,
+                uploadToDiscord ? webhook : string.Empty,
                 StartWithWindows: false,
                 AppSettings.DefaultCompressionTargetMb,
                 "Active Session Test",
-                UploadToDiscord: false,
+                UploadToDiscord: uploadToDiscord,
                 ModeToggleHotkey: string.Empty,
                 ClipCaptureSource.SteelSeriesGg);
             var captureSettings = CaptureSettings.Normalize(
                 CaptureSettings.Default with { LibraryRoot = captureRoot });
             var captureLibraryBinding = RoutingCaptureLibraryBindingModel.Create(captureRoot);
             IReadOnlyList<string> connections = [];
+            if (uploadToDiscord)
+            {
+                Assert(DiscordRoutingConnectionIdentity.TryCreate(
+                           webhook, out var connectionId),
+                    "The production watched Discord E2E webhook must have a stable connection id.");
+                connections = [connectionId];
+            }
             var readiness = LegacyRoutingMigrationPlanner.Evaluate(
                 new LegacyRoutingMigrationInput(
                     settings,

@@ -486,6 +486,8 @@ internal static class RoutingWatchedIngressTests
         internal int RevalidationCalls => Volatile.Read(ref _revalidationCalls);
         public ClipCaptureSource Source { get; } = source;
 
+        public string InspectRootIdentity(string clipsRoot) => new string('d', 64);
+
         public IReadOnlyList<string> EnumerateCandidates(
             string clipsRoot,
             CancellationToken cancellationToken = default) => [];
@@ -529,6 +531,8 @@ internal static class RoutingWatchedIngressTests
         internal int InspectionCalls => Volatile.Read(ref _inspectionCalls);
         internal int FingerprintCalls => Volatile.Read(ref _fingerprintCalls);
         public ClipCaptureSource Source => source.Source;
+
+        public string InspectRootIdentity(string clipsRoot) => source.RootIdentitySha256;
 
         public IReadOnlyList<string> EnumerateCandidates(
             string clipsRoot,

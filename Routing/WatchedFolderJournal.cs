@@ -43,7 +43,10 @@ internal sealed record RoutingWatchedSourceJournalDocument(
     // Retained so previously-written ContentDuplicateNeedsAttention journals remain readable.
     string? DuplicateOfSourceClipId,
     DateTimeOffset CreatedUtc,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc,
+    // Null identifies the one migrated 1.x watched source. Named SteelSeries/NVIDIA sources
+    // carry their opaque catalog id so their private root can be resolved without persisting it.
+    string? SourceConnectionId = null);
 
 internal enum RoutingWatchedJournalLoadStatus
 {
@@ -87,7 +90,8 @@ internal static class RoutingWatchedJournalModel
         int height,
         RoutingPlanProposal? frozenPlan,
         string? duplicateOfSourceClipId,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        string? sourceConnectionId = null)
     {
         RoutingValidation.RequireSha256(occurrenceIdentitySha256,
             "watched occurrence identity");
@@ -114,7 +118,8 @@ internal static class RoutingWatchedJournalModel
             frozenPlan,
             duplicateOfSourceClipId,
             timestamp,
-            timestamp);
+            timestamp,
+            sourceConnectionId);
         Validate(document);
         return document;
     }
@@ -135,6 +140,8 @@ internal static class RoutingWatchedJournalModel
             "watched migration source fingerprint");
         RequireCanonicalSha256(document.MarkerPayloadFingerprint,
             "watched migration payload fingerprint");
+        if (document.SourceConnectionId is not null)
+            RoutingInputSourceCatalogModel.ValidateSourceId(document.SourceConnectionId);
         RoutingValidation.Require(document.CaptureSource is
                 ClipCaptureSource.SteelSeriesGg or ClipCaptureSource.Nvidia,
             "The watched source journal capture adapter is unsupported.");
@@ -520,15 +527,22 @@ internal sealed class RoutingWatchedJournalFactory
     private readonly IRoutingWatchedFolderMediaProbe _mediaProbe;
     private readonly Func<Guid> _createPlanId;
     private readonly Func<DateTimeOffset> _utcNow;
+    private readonly Func<RoutingLocalOnlyAdmissionSnapshot> _captureLocalOnlyOverride;
 
     internal RoutingWatchedJournalFactory(
         IRoutingWatchedFolderMediaProbe mediaProbe,
         Func<Guid>? createPlanId = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        Func<RoutingLocalOnlyAdmissionSnapshot>? captureLocalOnlyOverride = null)
     {
         _mediaProbe = mediaProbe ?? throw new ArgumentNullException(nameof(mediaProbe));
         _createPlanId = createPlanId ?? Guid.NewGuid;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        _captureLocalOnlyOverride = captureLocalOnlyOverride ??
+            (() => new RoutingLocalOnlyAdmissionSnapshot(
+                Enabled: false,
+                StateRevision: 1,
+                FailSafe: false));
     }
 
     internal async Task<RoutingWatchedSourceJournalDocument> CreateAsync(
@@ -619,7 +633,8 @@ internal sealed class RoutingWatchedJournalFactory
             facts,
             _createPlanId(),
             deliberateDuplicateAuthorizations: [],
-            plannedUtc);
+            plannedUtc,
+            _captureLocalOnlyOverride());
 
         return CreateDocument(
             RoutingWatchedJournalAdmissionKind.PreparedPlan,
@@ -631,6 +646,136 @@ internal sealed class RoutingWatchedJournalFactory
             media.Height,
             proposal,
             duplicateOfSourceClipId: null);
+    }
+
+    /// <summary>
+    /// Creates an immutable journal for an additive named SteelSeries/NVIDIA source. The
+    /// catalog id is route-visible, while the absolute root remains confined to local source
+    /// configuration. Existing files are filtered by the source baseline before this boundary.
+    /// </summary>
+    internal async Task<RoutingWatchedSourceJournalDocument> CreateNamedAsync(
+        RoutingWatchedSourceFile source,
+        IRoutingWatchedSourceAdapter adapter,
+        RoutingInputSourceRecord sourceAuthority,
+        string routingAuthorityFingerprint,
+        RoutingSnapshotDocument routingSnapshot,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(adapter);
+        ArgumentNullException.ThrowIfNull(sourceAuthority);
+        ArgumentNullException.ThrowIfNull(routingSnapshot);
+        RoutingSnapshotModel.Validate(routingSnapshot);
+        RoutingValidation.RequireSha256(
+            routingAuthorityFingerprint, "Routing authority fingerprint");
+        var expectedCaptureSource = sourceAuthority.Kind switch
+        {
+            RoutingInputSourceKind.SteelSeriesGg => ClipCaptureSource.SteelSeriesGg,
+            RoutingInputSourceKind.Nvidia => ClipCaptureSource.Nvidia,
+            _ => throw new InvalidDataException(
+                "A named watched source must use a SteelSeries or NVIDIA adapter.")
+        };
+        RoutingValidation.Require(
+            source.Source == expectedCaptureSource && adapter.Source == source.Source &&
+            !sourceAuthority.Retired &&
+            sourceAuthority.RootIdentitySha256.Equals(
+                source.RootIdentitySha256, StringComparison.Ordinal) &&
+            sourceAuthority.CanonicalRoot.Equals(
+                source.CanonicalRoot, StringComparison.OrdinalIgnoreCase),
+            "The named watched source is outside its catalog authority.");
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var sourceAuthorityFingerprint = CreateNamedAuthorityFingerprint(sourceAuthority);
+        var occurrence = CreateOccurrenceIdentity(source, sourceAuthorityFingerprint);
+        var sourceClipId = RoutingWatchedJournalModel.SourcePrefix + occurrence;
+        var sourcePath = Path.GetFullPath(Path.Combine(
+            source.CanonicalRoot,
+            source.PortableRelativePath.Replace('/', Path.DirectorySeparatorChar)));
+        var media = await _mediaProbe.ProbeAsync(sourcePath, cancellationToken)
+            .ConfigureAwait(false);
+        if (media.Duration <= TimeSpan.Zero || media.Width <= 0 || media.Height <= 0)
+        {
+            throw new InvalidDataException(
+                "The watched source media probe returned incomplete facts.");
+        }
+        var revalidated = await adapter.RevalidateAsync(source, cancellationToken)
+            .ConfigureAwait(false);
+        if (revalidated != source)
+        {
+            throw new InvalidDataException(
+                "The named watched source changed while its media facts were collected.");
+        }
+
+        var durationMilliseconds = checked((long)media.Duration.TotalMilliseconds);
+        var plannedUtc = RoutingValidation.Utc(_utcNow());
+        var original = RoutingEvaluator.CreateLogicalOutputReference(
+            sourceClipId,
+            source.ContentSha256,
+            RoutingOutputKind.Original);
+        var facts = new RoutingClipFacts(
+            sourceClipId,
+            RoutingEvaluationEventKind.SourceArrival,
+            RoutingClipSource.WatchedFolder,
+            RoutingTriggerKind.WatchedFolder,
+            CaptureType: null,
+            source.GameName,
+            ReactionCamera: false,
+            durationMilliseconds,
+            source.ContentSha256,
+            [
+                new RoutingClipOutputRevision(
+                    original,
+                    RoutingOutputAvailability.Ready,
+                    FailureCode: null),
+                MissingOutput(sourceClipId, source.ContentSha256, RoutingOutputKind.Landscape),
+                MissingOutput(sourceClipId, source.ContentSha256, RoutingOutputKind.Portrait)
+            ],
+            SourceConnectionId: sourceAuthority.SourceId);
+        var proposal = RoutingEvaluator.CreatePlan(
+            routingSnapshot,
+            facts,
+            _createPlanId(),
+            deliberateDuplicateAuthorizations: [],
+            plannedUtc,
+            _captureLocalOnlyOverride());
+
+        return RoutingWatchedJournalModel.Create(
+            RoutingWatchedJournalAdmissionKind.PreparedPlan,
+            occurrence,
+            source.RootIdentitySha256,
+            sourceAuthorityFingerprint,
+            routingAuthorityFingerprint.ToLowerInvariant(),
+            source.Source,
+            source.PortableRelativePath,
+            source.DisplayFileName,
+            source.GameName,
+            source.NativeFileIdentity,
+            source.ContentSha256,
+            durationMilliseconds,
+            media.Width,
+            media.Height,
+            proposal,
+            duplicateOfSourceClipId: null,
+            now: plannedUtc,
+            sourceConnectionId: sourceAuthority.SourceId);
+    }
+
+    internal static string CreateNamedAuthorityFingerprint(
+        RoutingInputSourceRecord sourceAuthority)
+    {
+        ArgumentNullException.ThrowIfNull(sourceAuthority);
+        RoutingInputSourceCatalogModel.ValidateSourceId(sourceAuthority.SourceId);
+        RoutingValidation.RequireSha256(
+            sourceAuthority.RootIdentitySha256, "named watched source root identity");
+        var material = string.Join('\n',
+        [
+            "clipcord-named-watched-authority-v1",
+            sourceAuthority.SourceId,
+            sourceAuthority.Kind.ToString(),
+            sourceAuthority.RootIdentitySha256.ToLowerInvariant()
+        ]);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)))
+            .ToLowerInvariant();
     }
 
     internal static string CreateOccurrenceIdentity(

@@ -387,12 +387,18 @@ internal sealed class UploaderWorker(
                 if (destination == ArchiveDestination.Uploaded)
                 {
                     state.UploadedContentHashes.Add(clip.ContentHash);
+                    state.LocalOnlyContentHashes.Remove(clip.ContentHash);
                     state.PendingMoves.Add(clip.FilePath);
                     state.PendingLocalOnlyMoves.Remove(clip.FilePath);
                 }
                 else
                 {
-                    state.LocalOnlyContentHashes.Add(clip.ContentHash);
+                    // A clip that reached Discord at least once keeps the stronger Uploaded
+                    // classification even if identical bytes are later filed in Local-only
+                    // mode. This preserves duplicate prevention while keeping the sets suitable
+                    // for a deterministic Routing migration.
+                    if (!state.UploadedContentHashes.Contains(clip.ContentHash))
+                        state.LocalOnlyContentHashes.Add(clip.ContentHash);
                     state.PendingLocalOnlyMoves.Add(clip.FilePath);
                     state.PendingMoves.Remove(clip.FilePath);
                 }

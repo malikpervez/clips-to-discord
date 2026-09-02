@@ -540,7 +540,7 @@ internal static class CaptureLibraryShutdownCoordinationTests
             "A Capture-library switch must latch before replay admission and idle checks, retain the old silhouette coordinator until strict child shutdown, drain settlement ownership, and only then recover the candidate root.");
     }
 
-    private static async Task AssertLateCaptureHostResponseCannotRestoreRevokedStateAsync()
+    internal static async Task AssertLateCaptureHostResponseCannotRestoreRevokedStateAsync()
     {
         var client = new LateResponseCaptureHostClient();
         using var recorder = new CaptureHostManualRecorder(client);

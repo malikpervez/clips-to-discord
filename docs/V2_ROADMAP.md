@@ -180,6 +180,28 @@ soak tests remain phase gates before release.
   atomic project journal. Both paths resolve artifacts, persist planned deliveries before sends,
   guard physical Discord deliveries with durable receipts, and file completed work through the same
   route lifecycle.
+- Xbox Game DVR clips synced through OneDrive are an additive named Routing source, not a replacement
+  for the SteelSeries/NVIDIA watched folder. Route setup offers From now, Last 24 hours, or Last 7
+  days, optionally narrowed to one game, and freezes the exact approved historical occurrence and
+  revision identities so a cloud folder cannot produce an accidental backlog blast. Setup enumerates
+  top-level MP4 metadata without hydrating content. Only an admitted clip is opened, copied into
+  `Library\Game\<Game>`, verified, promoted atomically, and passed through the existing route plan;
+  the OneDrive original is never moved, renamed, written, or deleted. Each named source persists its
+  native root authority before a route can bind it. Health recovery is compare-and-swap and
+  fail-closed: an unchanged authority can be rechecked, while a replaced folder retires the old
+  source and receives a new opaque source id that requires fresh route and history confirmation.
+  A supported corrupt or conflicting clip pauses only that Xbox source; the user can explicitly skip
+  the durable occurrence without changing the OneDrive original, after which later clips resume.
+- SteelSeries GG and NVIDIA can now be added as additional named Routing sources at arbitrary local
+  folder locations without changing the frozen 1.x migrated source. Registration preserves an
+  immutable metadata-only **from now on** baseline, routes bind to the exact opaque source id, and a
+  single optional supervisor scans every enabled named source through the established recorder
+  layout adapter. One unavailable or conflicting source is isolated from the others. Completed clips
+  retain the established watched-folder behavior and move into that source root's `uploaded` or
+  `local-only` archive; Activity and Gallery resolve the same durable source authority. These recorder
+  sources are bound to their saved canonical paths: reconnecting the original path can restore an
+  existing source, but choosing a different path registers a disabled replacement with a new source id
+  and baseline. It does not inherit routes or pending work from the retired source.
 - A first watched-folder comparison seam is now available but remains disabled by default. When a
   developer explicitly selects Shadow mode, the existing legacy watcher stays the sole scanner and
   owner: after it has accepted a stable, hashed SteelSeries or NVIDIA clip, a fail-open observer runs

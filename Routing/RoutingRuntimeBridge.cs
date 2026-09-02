@@ -35,7 +35,8 @@ internal sealed record RoutingRuntimePlanningContext(
     RoutingSnapshotDocument RoutingSnapshot,
     CaptureJournalDocument CaptureJournal,
     IReadOnlyDictionary<RoutingOutputKind, RoutingRuntimeOutput> Outputs,
-    DateTimeOffset PlannedUtc)
+    DateTimeOffset PlannedUtc,
+    RoutingLocalOnlyAdmissionSnapshot? LocalOnlyOverride = null)
 {
     internal RoutingRuntimeOutput GetOutput(RoutingOutputKind kind) =>
         Outputs.TryGetValue(kind, out var output)
@@ -82,7 +83,8 @@ internal sealed class RoutingEvaluatorRuntimePlanner : IRoutingRuntimePlanner
             facts,
             _createPlanId(),
             authorizations,
-            context.PlannedUtc);
+            context.PlannedUtc,
+            context.LocalOnlyOverride);
     }
 
     internal static RoutingClipFacts CreateFacts(RoutingRuntimePlanningContext context)
@@ -111,21 +113,30 @@ internal sealed class RoutingEvaluatorRuntimePlanner : IRoutingRuntimePlanner
                     : null))
             .ToArray();
         var sourceKind = journal.Clip.SourceKind;
+        var isXbox = sourceKind == CaptureJournalSourceKind.XboxGameDvr;
         return new RoutingClipFacts(
             journal.Clip.ClipId,
             RoutingEvaluationEventKind.SourceArrival,
-            RoutingClipSource.ClipCordCapture,
-            sourceKind == CaptureJournalSourceKind.InstantReplay
+            isXbox ? RoutingClipSource.XboxOneDrive : RoutingClipSource.ClipCordCapture,
+            isXbox
+                ? RoutingTriggerKind.WatchedFolder
+                : sourceKind == CaptureJournalSourceKind.InstantReplay
                 ? RoutingTriggerKind.InstantReplay
                 : RoutingTriggerKind.ManualRecording,
-            sourceKind == CaptureJournalSourceKind.InstantReplay
+            isXbox
+                ? null
+                : sourceKind == CaptureJournalSourceKind.InstantReplay
                 ? RoutingCaptureType.InstantReplay
                 : RoutingCaptureType.ManualRecording,
             journal.Clip.GameName,
             journal.Clip.ReactionCameraRequested,
             checked(journal.Clip.DurationTicks / TimeSpan.TicksPerMillisecond),
             original.CommittedArtifact!.Fingerprint.Sha256,
-            outputs);
+            outputs,
+            journal.Clip.SourceConnectionId,
+            isXbox ? journal.Clip.CapturedUtc : null,
+            journal.Clip.SourceOccurrenceId,
+            journal.Clip.SourceRevisionId);
     }
 
     private static bool IsRequested(CaptureJournalDocument journal, RoutingOutputKind kind) =>
@@ -626,7 +637,9 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
             snapshot,
             item.Document,
             BuildOutputInventory(item.Document),
-            plannedUtc);
+            plannedUtc,
+            RoutingLocalOnlyAdmissionSnapshot.PersistedOrFailSafe(
+                item.Document.Clip.LocalOnlyOverride));
         var proposal = _planner.BuildPlan(context) ??
                        throw new InvalidDataException("The routing planner returned no plan.");
         ValidateProposal(context, proposal);
@@ -955,14 +968,16 @@ internal sealed class RoutingRuntimeBridge : ICaptureJournalReconciliationHandle
             facts,
             proposal.PlanId,
             proposal.LatentDuplicateAuthorizations,
-            context.PlannedUtc);
+            context.PlannedUtc,
+            context.LocalOnlyOverride);
         if (!proposal.Deliveries.SequenceEqual(expected.Deliveries) ||
             proposal.FileDisposition != expected.FileDisposition ||
             !proposal.ImmediateMissingResolutions.SequenceEqual(
                 expected.ImmediateMissingResolutions) ||
             !proposal.LatentDuplicateAuthorizations.SequenceEqual(
                 expected.LatentDuplicateAuthorizations) ||
-            proposal.RequiresAtomicResolvedAppend != expected.RequiresAtomicResolvedAppend)
+            proposal.RequiresAtomicResolvedAppend != expected.RequiresAtomicResolvedAppend ||
+            proposal.LocalOnlyOverride != expected.LocalOnlyOverride)
         {
             throw new InvalidDataException(
                 "The routing planner omitted or changed an exact frozen action decision.");

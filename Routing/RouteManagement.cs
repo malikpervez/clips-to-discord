@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace ClipsToDiscord;
 
 internal sealed record RoutingRouteDraft(
@@ -9,7 +11,11 @@ internal sealed record RoutingRouteDraft(
     RoutingOutputKind Output,
     RoutingDeliveryMode DeliveryMode,
     RoutingMissingOutputBehavior OnMissingOutput,
-    bool FileIntoLibrary);
+    bool FileIntoLibrary,
+    string? WatchedSourceId = null,
+    DateTimeOffset? EarliestCapturedUtc = null,
+    RoutingXboxHistorySelection? XboxHistorySelection = null,
+    RoutingInputSourceKind? WatchedSourceKind = null);
 
 internal interface IRoutingRouteMutationAuthority
 {
@@ -79,17 +85,20 @@ internal sealed class RoutingRouteManager
     private readonly Func<DateTimeOffset> _clock;
     private readonly IRoutingRouteMutationAuthority _mutationAuthority;
     private readonly IRoutingConnectionMembership? _connectionMembership;
+    private readonly IRoutingInputSourceMembership? _inputSourceMembership;
 
     internal RoutingRouteManager(
         RoutingSnapshotStore? store = null,
         Func<DateTimeOffset>? clock = null,
         IRoutingRouteMutationAuthority? mutationAuthority = null,
-        IRoutingConnectionMembership? connectionMembership = null)
+        IRoutingConnectionMembership? connectionMembership = null,
+        IRoutingInputSourceMembership? inputSourceMembership = null)
     {
         _store = store ?? new RoutingSnapshotStore();
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
         _mutationAuthority = mutationAuthority ?? CreateDefaultMutationAuthority(_store.Path);
         _connectionMembership = connectionMembership;
+        _inputSourceMembership = inputSourceMembership;
     }
 
     internal RoutingDocumentLoadResult<RoutingSnapshotDocument> Load(
@@ -115,7 +124,9 @@ internal sealed class RoutingRouteManager
         ValidateDraft(draft);
         var routeId = Guid.NewGuid();
         var actionIds = CreateActionIds(draft);
-        var conditionId = string.IsNullOrWhiteSpace(draft.Game) ? (Guid?)null : Guid.NewGuid();
+        var conditionIds = Enumerable.Range(0, ConditionCount(draft))
+            .Select(_ => Guid.NewGuid())
+            .ToArray();
         var createdUtc = RoutingValidation.Utc(_clock());
 
         for (var attempt = 0; attempt < MaximumSaveAttempts; attempt++)
@@ -140,12 +151,13 @@ internal sealed class RoutingRouteManager
 
             RequireMutationAllowed(current, cancellationToken);
             RequireConnectionReady(draft, cancellationToken);
+            RequireInputSourceBindable(draft, cancellationToken);
 
             var route = CreateRoute(
                 draft,
                 routeId,
                 actionIds,
-                conditionId,
+                conditionIds,
                 NextPriority(current.Routes),
                 createdUtc);
             var next = RoutingSnapshotModel.ReplaceRoutes(
@@ -154,7 +166,19 @@ internal sealed class RoutingRouteManager
                 RoutingValidation.Utc(_clock()));
             try
             {
-                await _store.SaveAsync(next, current.Generation, cancellationToken)
+                using var sourceGate = await EnterInputSourceExecutionGateAsync(
+                        draft, cancellationToken)
+                    .ConfigureAwait(false);
+                RequireInputSourceBindable(draft, cancellationToken);
+                await _store.SaveAsync(
+                        next,
+                        current.Generation,
+                        cancellationToken,
+                        beforeCommit: () =>
+                        {
+                            RequireConnectionReady(draft, CancellationToken.None);
+                            RequireInputSourceBindable(draft, CancellationToken.None);
+                        })
                     .ConfigureAwait(false);
                 return route;
             }
@@ -225,6 +249,9 @@ internal sealed class RoutingRouteManager
                 RoutingValidation.Utc(_clock()));
             try
             {
+                using var sourceGate = await EnterInputSourceExecutionGateAsync(
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 await _store.SaveAsync(next, current.Generation, cancellationToken)
                     .ConfigureAwait(false);
                 return;
@@ -284,19 +311,38 @@ internal sealed class RoutingRouteManager
         RoutingRouteDraft draft,
         Guid routeId,
         IReadOnlyList<Guid> actionIds,
-        Guid? conditionId,
+        IReadOnlyList<Guid> conditionIds,
         int priority,
         DateTimeOffset createdUtc)
     {
         var game = draft.Game?.Trim();
-        var conditions = string.IsNullOrWhiteSpace(game)
-            ? Array.Empty<RoutingCondition>()
-            : [new RoutingCondition(
-                conditionId!.Value,
+        var conditions = new List<RoutingCondition>(conditionIds.Count);
+        var conditionIndex = 0;
+        if (!string.IsNullOrWhiteSpace(game))
+        {
+            conditions.Add(new RoutingCondition(
+                conditionIds[conditionIndex++],
                 RoutingConditionField.Game,
                 RoutingConditionOperator.Equals,
-                game)];
-        var kind = draft.Trigger == RoutingTriggerKind.AnyNewSourceClip && conditions.Length == 0
+                game));
+        }
+        if (draft.WatchedSourceId is { } watchedSourceId)
+        {
+            conditions.Add(new RoutingCondition(
+                conditionIds[conditionIndex++],
+                RoutingConditionField.SourceConnection,
+                RoutingConditionOperator.Equals,
+                watchedSourceId));
+        }
+        if (draft.EarliestCapturedUtc is { } earliestCapturedUtc)
+        {
+            conditions.Add(new RoutingCondition(
+                conditionIds[conditionIndex],
+                RoutingConditionField.CapturedAt,
+                RoutingConditionOperator.GreaterThanOrEqual,
+                earliestCapturedUtc.ToString("O", CultureInfo.InvariantCulture)));
+        }
+        var kind = draft.Trigger == RoutingTriggerKind.AnyNewSourceClip && conditions.Count == 0
             ? RoutingRouteKind.Fallback
             : RoutingRouteKind.Specific;
         var prepare = new RoutingPrepareSettings(
@@ -339,6 +385,14 @@ internal sealed class RoutingRouteManager
                 DeliverySettings: null));
         }
 
+        var xboxHistory = draft.XboxHistorySelection is null
+            ? null
+            : new RoutingXboxHistorySelection(
+                draft.XboxHistorySelection.ActivationUtc,
+                draft.XboxHistorySelection.HistoricalOccurrences
+                    .OrderBy(item => item.OccurrenceId, StringComparer.Ordinal)
+                    .ToArray());
+
         return new RoutingRoute(
             routeId,
             draft.Name.Trim(),
@@ -352,7 +406,8 @@ internal sealed class RoutingRouteManager
             conditions,
             actions,
             createdUtc,
-            createdUtc);
+            createdUtc,
+            xboxHistory);
     }
 
     private static IReadOnlyList<Guid> CreateActionIds(RoutingRouteDraft draft)
@@ -360,6 +415,11 @@ internal sealed class RoutingRouteManager
         var count = (draft.Destination is null ? 0 : 1) + (draft.FileIntoLibrary ? 1 : 0);
         return Enumerable.Range(0, count).Select(_ => Guid.NewGuid()).ToArray();
     }
+
+    private static int ConditionCount(RoutingRouteDraft draft) =>
+        (string.IsNullOrWhiteSpace(draft.Game) ? 0 : 1) +
+        (draft.WatchedSourceId is null ? 0 : 1) +
+        (draft.EarliestCapturedUtc is null ? 0 : 1);
 
     private static int NextPriority(IReadOnlyList<RoutingRoute> routes) =>
         routes.Count == 0 ? 0 : checked(routes.Max(route => route.Priority) + 1);
@@ -422,5 +482,123 @@ internal sealed class RoutingRouteManager
         if (draft.Trigger == RoutingTriggerKind.AnyNewSourceClip &&
             !string.IsNullOrWhiteSpace(draft.Game))
             RoutingValidation.RequireText(draft.Game.Trim(), 1, 256, "game condition");
+        if (draft.WatchedSourceId is not null)
+            RoutingInputSourceCatalogModel.ValidateSourceId(draft.WatchedSourceId);
+        if (draft.WatchedSourceKind is { } watchedSourceKind)
+            RoutingValidation.Require(Enum.IsDefined(watchedSourceKind),
+                "The watched source kind is unsupported.");
+        RoutingValidation.RequireOptionalUtc(
+            draft.EarliestCapturedUtc, "earliest capture timestamp");
+        var xboxHistory = draft.XboxHistorySelection;
+        if (xboxHistory is not null)
+        {
+            RoutingValidation.RequireUtc(
+                xboxHistory.ActivationUtc, "Xbox history activation timestamp");
+            var occurrences = xboxHistory.HistoricalOccurrences ??
+                throw new InvalidDataException(
+                    "The Xbox historical occurrence selection is missing.");
+            RoutingValidation.Require(
+                occurrences.Count <= XboxDvrHistoryPolicy.MaximumAllowedHistoricalClips,
+                "The Xbox historical occurrence selection is too large.");
+            var unique = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var occurrence in occurrences)
+            {
+                if (occurrence is null)
+                    throw new InvalidDataException(
+                        "An Xbox historical occurrence selection entry is missing.");
+                RoutingValidation.RequireSha256(
+                    occurrence.OccurrenceId, "Xbox historical occurrence identity");
+                RoutingValidation.RequireSha256(
+                    occurrence.RevisionId, "Xbox historical revision identity");
+                RoutingValidation.Require(
+                    occurrence.OccurrenceId.All(character =>
+                        character is >= '0' and <= '9' or >= 'a' and <= 'f') &&
+                    occurrence.RevisionId.All(character =>
+                        character is >= '0' and <= '9' or >= 'a' and <= 'f'),
+                    "Xbox historical identities must use canonical lowercase SHA-256 text.");
+                RoutingValidation.Require(unique.Add(occurrence.OccurrenceId),
+                    "Xbox historical occurrence identities must be unique.");
+            }
+        }
+        RoutingValidation.Require(
+            draft.WatchedSourceId is null || draft.Trigger == RoutingTriggerKind.WatchedFolder,
+            "A watched source can be bound only to a watched-folder route.");
+        RoutingValidation.Require(
+            (draft.WatchedSourceId is null) == (draft.WatchedSourceKind is null) ||
+            draft.WatchedSourceId is not null &&
+            draft.WatchedSourceKind is null &&
+            xboxHistory is not null,
+            "A named watched source requires its exact source kind.");
+
+        var effectiveSourceKind = ResolveWatchedSourceKind(draft);
+        if (effectiveSourceKind == RoutingInputSourceKind.XboxGameDvrOneDrive)
+        {
+            RoutingValidation.Require(
+                draft.WatchedSourceId is not null &&
+                draft.EarliestCapturedUtc is not null &&
+                xboxHistory is not null,
+                "An Xbox source, cutoff, and frozen history selection must be configured together.");
+            var cutoff = draft.EarliestCapturedUtc ??
+                         throw new InvalidDataException(
+                             "The Xbox capture cutoff is missing.");
+            var selection = xboxHistory ??
+                            throw new InvalidDataException(
+                                "The Xbox history selection is missing.");
+            RoutingValidation.Require(cutoff <= selection.ActivationUtc,
+                "The Xbox history cutoff cannot be after route activation.");
+        }
+        else
+        {
+            RoutingValidation.Require(
+                draft.EarliestCapturedUtc is null && xboxHistory is null,
+                "Only an Xbox source can carry a capture cutoff or frozen history selection.");
+        }
+    }
+
+    private void RequireInputSourceBindable(
+        RoutingRouteDraft draft,
+        CancellationToken cancellationToken)
+    {
+        if (draft.WatchedSourceId is not { } sourceId) return;
+        var sourceKind = ResolveWatchedSourceKind(draft) ??
+                         throw new InvalidDataException(
+                             "The watched source kind is missing.");
+        if (_inputSourceMembership is null ||
+            !_inputSourceMembership.IsRouteBindable(
+                sourceId,
+                sourceKind,
+                cancellationToken))
+        {
+            throw new InvalidOperationException(
+                "The selected input source is missing, replaced, retired, or needs attention.");
+        }
+    }
+
+    private ValueTask<IDisposable> EnterInputSourceExecutionGateAsync(
+        RoutingRouteDraft draft,
+        CancellationToken cancellationToken) =>
+        draft.WatchedSourceId is null || _inputSourceMembership is null
+            ? ValueTask.FromResult(RoutingInputSourceExecutionGate.NoopLease)
+            : _inputSourceMembership.EnterExecutionGateAsync(cancellationToken);
+
+    private ValueTask<IDisposable> EnterInputSourceExecutionGateAsync(
+        CancellationToken cancellationToken) =>
+        _inputSourceMembership is null
+            ? ValueTask.FromResult(RoutingInputSourceExecutionGate.NoopLease)
+            : _inputSourceMembership.EnterExecutionGateAsync(cancellationToken);
+
+    private static RoutingInputSourceKind? ResolveWatchedSourceKind(
+        RoutingRouteDraft draft)
+    {
+        if (draft.WatchedSourceId is null) return null;
+        if (draft.WatchedSourceKind is { } explicitKind) return explicitKind;
+
+        // Xbox drafts written before named watched sources carried no explicit kind. Their
+        // immutable cutoff/history pair is sufficient to retain exact compatibility without
+        // permitting an ordinary source id to masquerade as Xbox (or vice versa).
+        return draft.XboxHistorySelection is not null ||
+               draft.EarliestCapturedUtc is not null
+            ? RoutingInputSourceKind.XboxGameDvrOneDrive
+            : null;
     }
 }

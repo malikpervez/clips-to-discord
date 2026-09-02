@@ -70,6 +70,77 @@ try
         return;
     }
 
+    if (args.Length == 1 && args[0].Equals("--routing-rail", StringComparison.Ordinal))
+    {
+        var railRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordRoutingRail",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(railRoot);
+            Exception? railFailure = null;
+            var railThread = new Thread(() =>
+            {
+                try
+                {
+                    AssertRoutingRailOwnershipPresentation(new AppSettings(
+                        railRoot,
+                        "https://discord.com/api/webhooks/123456/routing-rail-token",
+                        true,
+                        AppSettings.DefaultCompressionTargetMb,
+                        "Routing Rail Test",
+                        true));
+                }
+                catch (Exception exception)
+                {
+                    railFailure = exception;
+                }
+            });
+            railThread.SetApartmentState(ApartmentState.STA);
+            railThread.Start();
+            if (!railThread.Join(TimeSpan.FromSeconds(15)))
+            {
+                throw new TimeoutException("Routing rail ownership tests did not finish within 15 seconds.");
+            }
+            if (railFailure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(railFailure).Throw();
+            Console.WriteLine("Routing rail ownership tests passed.");
+        }
+        finally
+        {
+            try { if (Directory.Exists(railRoot)) Directory.Delete(railRoot, recursive: true); }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--legacy-delivery-classification", StringComparison.Ordinal))
+    {
+        var classificationRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipCordLegacyClassification",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(classificationRoot);
+            await AssertLocalOnlyWorkerAsync(classificationRoot);
+            await AssertEditedClipUploadTransactionsAsync(classificationRoot);
+            Console.WriteLine("Legacy delivery-classification tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(classificationRoot))
+                    Directory.Delete(classificationRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
     if (args.Length == 1 && args[0].Equals("--capture-foundation", StringComparison.Ordinal))
     {
         var captureRoot = Path.Combine(
@@ -91,11 +162,194 @@ try
     }
 
     if (args.Length == 1 &&
+        args[0].Equals("--named-watched-source-routes", StringComparison.Ordinal))
+    {
+        var namedSourceRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipCordNamedWatchedSourceRoutes",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(namedSourceRoot);
+            NamedWatchedSourceRouteTests.Run(namedSourceRoot);
+            Console.WriteLine("Named watched-source route tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(namedSourceRoot))
+                    Directory.Delete(namedSourceRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--named-watched-folder-runtime", StringComparison.Ordinal))
+    {
+        var namedRuntimeRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipCordNamedWatchedFolderRuntime",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(namedRuntimeRoot);
+            await NamedWatchedFolderIngressTests.RunAsync(namedRuntimeRoot);
+            Console.WriteLine("Named watched-folder ingress/runtime tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(namedRuntimeRoot))
+                    Directory.Delete(namedRuntimeRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--routing-local-only", StringComparison.Ordinal))
+    {
+        var localOnlyRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipCordRoutingLocalOnly",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(localOnlyRoot);
+            await RoutingLocalOnlyOverrideTests.RunAsync(localOnlyRoot);
+            RoutingCaptureJournalTests.Run(Path.Combine(localOnlyRoot, "capture-journal"));
+            RoutingRuntimeBridgeTests.Run(Path.Combine(localOnlyRoot, "runtime-bridge"));
+            await DiscordConnectionCatalogTests.RunAsync(
+                Path.Combine(localOnlyRoot, "discord-connections"));
+            Console.WriteLine("Routing Local-only override tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(localOnlyRoot))
+                    Directory.Delete(localOnlyRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
         args[0].Equals("--capture-host-abort", StringComparison.Ordinal))
     {
         ReactionCameraStartupTests.RunCaptureLibraryAuthorityAbortOnly();
         await CaptureHostAbortTests.RunAsync();
+        await CaptureLibraryShutdownCoordinationTests
+            .AssertLateCaptureHostResponseCannotRestoreRevokedStateAsync();
         Console.WriteLine("Capture host authority-abort tests passed.");
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--routing-discord-e2e", StringComparison.Ordinal))
+    {
+        var routingRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordRoutingDiscordE2E",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(routingRoot);
+            await RoutingActiveWorkSessionTests.RunProductionWatchedDiscordE2EAsync(
+                routingRoot);
+            Console.WriteLine("Routing watched Discord E2E passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(routingRoot))
+                {
+                    Directory.Delete(routingRoot, recursive: true);
+                }
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--named-watched-sources", StringComparison.Ordinal))
+    {
+        var watchedRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordNamedWatchedSources",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(watchedRoot);
+            await RoutingInputSourceTests.RunAsync(
+                Path.Combine(watchedRoot, "routing-input-sources"));
+            await NamedWatchedFolderBaselineTests.RunAsync(
+                Path.Combine(watchedRoot, "named-watched-folder-baselines"));
+            Console.WriteLine("Named watched-source catalog and baseline tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(watchedRoot))
+                    Directory.Delete(watchedRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
+        args[0].Equals("--xbox-routing", StringComparison.Ordinal))
+    {
+        var xboxRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipsToDiscordXboxRouting",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(xboxRoot);
+            RoutesFeatureTests.Run(Path.Combine(xboxRoot, "routes-feature"));
+            await RoutingInputSourceTests.RunAsync(
+                Path.Combine(xboxRoot, "routing-input-sources"));
+            XboxDvrSourceAdapterTests.Run();
+            XboxRoutingContractTests.Run(
+                Path.Combine(xboxRoot, "xbox-routing-contract"));
+            NamedWatchedSourceRouteTests.Run(
+                Path.Combine(xboxRoot, "named-watched-source-routes"));
+            await NamedWatchedFolderBaselineTests.RunAsync(
+                Path.Combine(xboxRoot, "named-watched-folder-baselines"));
+            await NamedWatchedFolderIngressTests.RunAsync(
+                Path.Combine(xboxRoot, "named-watched-folder-runtime"));
+            await XboxDvrOccurrenceJournalTests.RunAsync(
+                Path.Combine(xboxRoot, "xbox-dvr-occurrence-journal"));
+            XboxDvrRouteAdmissionTests.Run();
+            await XboxDvrWindowsFileSystemTests.RunAsync();
+            await RoutingLocalOnlyOverrideTests.RunAsync(
+                Path.Combine(xboxRoot, "local-only-override"));
+            await XboxDvrRuntimeHostTests.RunAsync(
+                Path.Combine(xboxRoot, "xbox-dvr-runtime-host"));
+            await RoutingActivityProjectionTests.RunAsync(
+                Path.Combine(xboxRoot, "routing-activity-projection"));
+            Console.WriteLine("Xbox Routing smoke tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(xboxRoot))
+                    Directory.Delete(xboxRoot, recursive: true);
+            }
+            catch { }
+        }
         return;
     }
 
@@ -111,6 +365,27 @@ try
             Directory.CreateDirectory(routingRoot);
             RoutingFoundationTests.Run(Path.Combine(routingRoot, "foundation"));
             RoutesFeatureTests.Run(Path.Combine(routingRoot, "routes-feature"));
+            await RoutingInputSourceTests.RunAsync(
+                Path.Combine(routingRoot, "routing-input-sources"));
+            XboxDvrSourceAdapterTests.Run();
+            XboxRoutingContractTests.Run(
+                Path.Combine(routingRoot, "xbox-routing-contract"));
+            NamedWatchedSourceRouteTests.Run(
+                Path.Combine(routingRoot, "named-watched-source-routes"));
+            await NamedWatchedFolderBaselineTests.RunAsync(
+                Path.Combine(routingRoot, "named-watched-folder-baselines"));
+            await NamedWatchedFolderIngressTests.RunAsync(
+                Path.Combine(routingRoot, "named-watched-folder-runtime"));
+            await XboxDvrOccurrenceJournalTests.RunAsync(
+                Path.Combine(routingRoot, "xbox-dvr-occurrence-journal"));
+            XboxDvrRouteAdmissionTests.Run();
+            await XboxDvrWindowsFileSystemTests.RunAsync();
+            await RoutingLocalOnlyOverrideTests.RunAsync(
+                Path.Combine(routingRoot, "local-only-override"));
+            await XboxDvrRuntimeHostTests.RunAsync(
+                Path.Combine(routingRoot, "xbox-dvr-runtime-host"));
+            await RoutingActivityProjectionTests.RunAsync(
+                Path.Combine(routingRoot, "routing-activity-projection"));
             RoutingArchiveTests.Run(Path.Combine(routingRoot, "archive"));
             RoutingCaptureJournalTests.Run(Path.Combine(routingRoot, "capture-journal"));
             RoutingEvaluatorTests.Run(Path.Combine(routingRoot, "evaluator"));
@@ -860,6 +1135,27 @@ try
     TraceSmokeStep("ClipCord 2.0 routing foundation");
     RoutingFoundationTests.Run(Path.Combine(temporaryRoot, "routing-foundation"));
     RoutesFeatureTests.Run(Path.Combine(temporaryRoot, "routes-feature"));
+    await RoutingInputSourceTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-input-sources"));
+    XboxDvrSourceAdapterTests.Run();
+    XboxRoutingContractTests.Run(
+        Path.Combine(temporaryRoot, "xbox-routing-contract"));
+    NamedWatchedSourceRouteTests.Run(
+        Path.Combine(temporaryRoot, "named-watched-source-routes"));
+    await NamedWatchedFolderBaselineTests.RunAsync(
+        Path.Combine(temporaryRoot, "named-watched-folder-baselines"));
+    await NamedWatchedFolderIngressTests.RunAsync(
+        Path.Combine(temporaryRoot, "named-watched-folder-runtime"));
+    await XboxDvrOccurrenceJournalTests.RunAsync(
+        Path.Combine(temporaryRoot, "xbox-dvr-occurrence-journal"));
+    XboxDvrRouteAdmissionTests.Run();
+    await XboxDvrWindowsFileSystemTests.RunAsync();
+    await RoutingLocalOnlyOverrideTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-local-only-override"));
+    await XboxDvrRuntimeHostTests.RunAsync(
+        Path.Combine(temporaryRoot, "xbox-dvr-runtime-host"));
+    await RoutingActivityProjectionTests.RunAsync(
+        Path.Combine(temporaryRoot, "routing-activity-projection"));
     RoutingArchiveTests.Run(Path.Combine(temporaryRoot, "routing-archive"));
     RoutingCaptureJournalTests.Run(Path.Combine(temporaryRoot, "routing-journal"));
     RoutingEvaluatorTests.Run(Path.Combine(temporaryRoot, "routing-evaluator"));
@@ -1199,6 +1495,17 @@ try
     Assert(separateTrackProbe.AudioStreamCount == 2 &&
            separateTrackProbe.Duration == TimeSpan.FromSeconds(31.5),
         "Probing must report every audio track a recording carries alongside its duration.");
+    var xboxProbe = FfmpegCompressor.ParseProbe(
+        "  Duration: 00:00:29.75, start: 0.000000, bitrate: 18003 kb/s\n" +
+        "  Stream #0:0[0x1](und): Video: h264 (Main) (avc1 / 0x31637661), " +
+        "yuv420p(progressive), 1920x1080, 16456 kb/s, 58.96 fps, 59.94 tbr\n" +
+        "  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), " +
+        "48000 Hz, stereo, fltp, 157 kb/s\n");
+    Assert(xboxProbe.Duration == TimeSpan.FromSeconds(29.75) &&
+           xboxProbe.VideoWidth == 1920 && xboxProbe.VideoHeight == 1080 &&
+           Math.Abs(xboxProbe.VideoFramesPerSecond - 58.96) < 0.001 &&
+           xboxProbe.AudioStreamCount == 1,
+        "Xbox Game DVR's comma-delimited FFmpeg stream metadata must retain its video dimensions and frame rate.");
     var untrustedFfmpegFolder = Directory.CreateDirectory(Path.Combine(temporaryRoot, "path-ffmpeg"));
     var untrustedFfmpegPath = Path.Combine(untrustedFfmpegFolder.FullName, "ffmpeg.exe");
     await File.WriteAllTextAsync(untrustedFfmpegPath, "not an executable");
@@ -1495,6 +1802,49 @@ static async Task AssertLocalOnlyWorkerAsync(string temporaryRoot)
            activity.AttemptCount == 1 &&
            activity.CurrentPath == expectedDestination,
         "Local-only processing must publish its final route and archive location to Activity.");
+
+    var uploadedHistoryHash = state.LocalOnlyContentHashes.Single();
+    state.LocalOnlyContentHashes.Remove(uploadedHistoryHash);
+    state.UploadedContentHashes.Add(uploadedHistoryHash);
+    store.Save(state);
+    const string repeatedClipName = "Battlefield__2026-08-05__12-15-00.mp4";
+    var repeatedSourcePath = Path.Combine(clipsFolder, repeatedClipName);
+    File.Copy(expectedDestination, repeatedSourcePath);
+    File.SetLastWriteTimeUtc(repeatedSourcePath, DateTime.UtcNow.AddMinutes(-1));
+    var repeatedDestination = Path.Combine(
+        clipsFolder,
+        "local-only",
+        "Battlefield",
+        repeatedClipName);
+    using (var repeatedCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
+    {
+        var repeatedWorker = new UploaderWorker(
+            settings,
+            _ => { },
+            store,
+            () => throw new InvalidOperationException(
+                "Local-only duplicate filing must not construct a Discord webhook client."));
+        var repeatedTask = repeatedWorker.RunAsync(repeatedCancellation.Token);
+        try
+        {
+            await WaitUntilAsync(
+                () => File.Exists(repeatedDestination),
+                TimeSpan.FromSeconds(16),
+                "Local-only mode did not file content that had been uploaded previously.");
+        }
+        finally
+        {
+            repeatedCancellation.Cancel();
+            try { await repeatedTask; }
+            catch (OperationCanceledException) when (repeatedCancellation.IsCancellationRequested) { }
+        }
+    }
+    var precedenceProbe = store.ProbeForRoutingActivation();
+    Assert(precedenceProbe is { Status: WatchStateRoutingProbeStatus.Loaded, State: not null } &&
+           precedenceProbe.State.UploadedContentHashes.Contains(uploadedHistoryHash) &&
+           !precedenceProbe.State.LocalOnlyContentHashes.Contains(uploadedHistoryHash),
+        "Filing identical bytes in Local-only mode must retain the stronger historical Uploaded classification without recreating an overlap.");
+    state = precedenceProbe.State!;
 
     const string pendingClipName = "Apex Legends__2026-08-05__12-30-00.mp4";
     var pendingSourcePath = Path.Combine(clipsFolder, pendingClipName);
@@ -1964,6 +2314,7 @@ static void AssertFigmaIconAssets()
         [FigmaIconAsset.Crop] = ("crop.png", "7ad1f98ebb747a33efa74c0253215457d09569a9e66e57f4889bc5d8e19dee4c"),
         [FigmaIconAsset.Capture] = ("capture.png", "912e1d9bf4283f2efcb93fa5ecfc22d6ecad05bac1a814acdf978278a00208d0"),
         [FigmaIconAsset.Camera] = ("camera.png", "83ecc66bb79810e011393706955c9150f605e232e779df4cf771e397258bd4c8"),
+        [FigmaIconAsset.Connection] = ("connection.png", "f74eea938d2a877499d19877cad55f9990fb984ab22fdb640964705b8e975615"),
         [FigmaIconAsset.Disk] = ("disk.png", "0f3e02645b64cf7d500096d2366fa5fefbce876a116bf157b019526cacfda0b0"),
         [FigmaIconAsset.Discord] = ("discord.png", "f6f4c1a7709c4921c9667e13255d7fbcdb080150194754788670aed8c882e549"),
         [FigmaIconAsset.External] = ("external.png", "48d0435ca376de91be57f9d57fd6918a532b0689b96a187b93acda3de48ec696"),
@@ -1992,11 +2343,13 @@ static void AssertFigmaIconAssets()
         [FigmaIconAsset.Silhouette] = ("silhouette.png", "a8f918e0f4c504784fdb677d906ac8cb2c6ee8897ea04b60b00ab7fa69022440"),
         [FigmaIconAsset.Speaker] = ("speaker.png", "81bf0beced762c85dc15b8b0b00b1aa62ad8b0641b65cceab98be6122d26da96"),
         [FigmaIconAsset.Trim] = ("trim.png", "e231336c071756e0bb62f946bdece590f614f8aa0334665d75a244a1e01d967d"),
-        [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde")
+        [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde"),
+        [FigmaIconAsset.YouTube] = ("youtube.png", "fe7a74a3903b3c76eda578649d20050cf411c26a49919777204170cfe7289956"),
+        [FigmaIconAsset.TikTok] = ("tiktok.png", "82fe1388eda1ff725d7b5331f6d0ce8cb0ef75907f8d77cf85d57cdb95bbdb03")
     };
     var enumAssets = Enum.GetValues<FigmaIconAsset>();
-    Assert(enumAssets.Length == 41 && enumAssets.ToHashSet().SetEquals(expected.Keys),
-        $"The approved Figma icon catalog must contain exactly 41 pinned assets; got {string.Join(", ", enumAssets)}.");
+    Assert(enumAssets.Length == 44 && enumAssets.ToHashSet().SetEquals(expected.Keys),
+        $"The approved Figma icon catalog must contain exactly 44 pinned assets; got {string.Join(", ", enumAssets)}.");
 
     var assembly = typeof(FigmaIconRenderer).Assembly;
     var actualResources = assembly.GetManifestResourceNames()
@@ -2006,7 +2359,7 @@ static void AssertFigmaIconAssets()
         .Select(value => resourcePrefix + value.FileName)
         .ToHashSet(StringComparer.Ordinal);
     Assert(actualResources.SetEquals(expectedResources),
-        $"Embedded Figma icon resources diverged from the 41 approved exports: " +
+        $"Embedded Figma icon resources diverged from the 44 approved exports: " +
         $"expected={string.Join(", ", expectedResources.OrderBy(name => name, StringComparer.Ordinal))}; " +
         $"actual={string.Join(", ", actualResources.OrderBy(name => name, StringComparer.Ordinal))}.");
     foreach (var (asset, contract) in expected)
@@ -2024,8 +2377,9 @@ static void AssertFigmaIconAssets()
         using var image = Image.FromStream(imageStream);
         Assert(image.Size == new Size(96, 96),
             $"Figma icon {asset} must remain a square 96x96 alpha mask; got {image.Size}.");
-        if (asset is FigmaIconAsset.Capture or FigmaIconAsset.Camera or FigmaIconAsset.Disk or
-            FigmaIconAsset.Headset or FigmaIconAsset.Mic or FigmaIconAsset.Speaker)
+        if (asset is FigmaIconAsset.Capture or FigmaIconAsset.Camera or FigmaIconAsset.Connection or FigmaIconAsset.Disk or
+            FigmaIconAsset.Headset or FigmaIconAsset.Mic or FigmaIconAsset.Speaker or
+            FigmaIconAsset.YouTube or FigmaIconAsset.TikTok)
         {
             using var bitmap = new Bitmap(image);
             var cornerAlpha = new[]
@@ -2478,6 +2832,188 @@ static void AssertHomeViewLifecycle(AppSettings settings)
     AssertHomePrivacyTextFits(home);
     host.Close();
 
+    var routingPresentation = new RoutingUiPresentationSnapshot(
+        RoutingUiState.Active,
+        ActiveRouteCount: 3,
+        WatchingSourceCount: 2,
+        LocalOnlyModeEnabled: true,
+        SpecificRouteCount: 2,
+        FallbackRouteCount: 1,
+        PausedRouteCount: 1,
+        DestinationCount: 4,
+        Destinations: RoutingUiDestinations.Library |
+                      RoutingUiDestinations.Discord |
+                      RoutingUiDestinations.YouTube |
+                      RoutingUiDestinations.TikTok);
+    using var localOnlyHost = new Form
+    {
+        ClientSize = new Size(984, 696),
+        ShowInTaskbar = false,
+        StartPosition = FormStartPosition.Manual,
+        Location = new Point(-20000, -20000)
+    };
+    using var localOnlyHome = new HomeView(
+        settings,
+        history,
+        watcherStatusProvider: () => "Discord open — watching for clips",
+        discordRunningProvider: () => true,
+        galleryScanner: (_, _) => archiveSnapshot,
+        utcNowProvider: () => new DateTime(2026, 8, 20, 16, 0, 0, DateTimeKind.Utc),
+        showPageHeader: false,
+        routingPresentationProvider: () => routingPresentation);
+    var requestedHomeRoutingActions = new List<HomeRoutingAction>();
+    localOnlyHome.RoutingActionRequested += (_, eventArgs) =>
+        requestedHomeRoutingActions.Add(eventArgs.Action);
+    localOnlyHost.Controls.Add(localOnlyHome);
+    localOnlyHost.Show();
+    Application.DoEvents();
+
+    string LocalOnlyLabelText(string name) => EnumerateControls(localOnlyHome)
+        .OfType<Label>()
+        .Single(label => label.Name == name)
+        .Text;
+    var localOnlyPill = EnumerateControls(localOnlyHome).OfType<HomeStatusPill>().Single();
+    var routingAction = EnumerateControls(localOnlyHome).OfType<OutlineButton>()
+        .Single(button => button.Name == "HomeRoutingActionButton");
+    var localSource = EnumerateControls(localOnlyHome).Single(control => control.Name == "HomeSourceEndpoint");
+    var localDestination = EnumerateControls(localOnlyHome).Single(control => control.Name == "HomeDestinationEndpoint");
+    var routingHero = EnumerateControls(localOnlyHome).Single(control => control.Name == "HomeRouteHero");
+    var routePipeline = EnumerateControls(localOnlyHome).OfType<TableLayoutPanel>()
+        .Single(control => control.Name == "HomeRoutePipeline");
+    var expectedHomeScale = Math.Max(96, localOnlyHome.DeviceDpi) / 96d;
+    var expectedLocalOnlyPillSize = new Size(
+        (int)Math.Round(161 * expectedHomeScale),
+        (int)Math.Round(25 * expectedHomeScale));
+    var expectedRoutingHeroHeight = (int)Math.Round(154 * expectedHomeScale);
+    Assert(localOnlyPill.Size == expectedLocalOnlyPillSize &&
+           routingHero.Height == expectedRoutingHeroHeight &&
+           routePipeline.AccessibleName == "Routes deliver new clips to configured destinations" &&
+           localSource.AccessibleName == "Routes" && localDestination.AccessibleName == "New clips go to" &&
+           ((TableLayoutPanel)localSource).RowStyles[3].SizeType == SizeType.Absolute &&
+           ((TableLayoutPanel)localSource).RowStyles[3].Height == 0 &&
+           ((TableLayoutPanel)localDestination).RowStyles[3].Height == 0,
+        $"R27's routing hero geometry/accessibility diverged: pill={localOnlyPill.Size} expected={expectedLocalOnlyPillSize}; " +
+        $"hero={routingHero.Height} expected={expectedRoutingHeroHeight}; pipeline='{routePipeline.AccessibleName}'; " +
+        $"source='{localSource.AccessibleName}' row3={((TableLayoutPanel)localSource).RowStyles[3].SizeType}/" +
+        $"{((TableLayoutPanel)localSource).RowStyles[3].Height}; destination='{localDestination.AccessibleName}' " +
+        $"row3={((TableLayoutPanel)localDestination).RowStyles[3].Height}.");
+    Assert(localOnlyPill.Text == "LOCAL-ONLY MODE" &&
+           localOnlyPill.AccessibleName == "Local-only mode" &&
+           localOnlyPill.AccessibleDescription == "Future clips stay on this PC" &&
+           LocalOnlyLabelText("HomeSourceEndpointCaption") == "ROUTES" &&
+           LocalOnlyLabelText("HomeSourceNameLabel") == "3 active routes" &&
+           LocalOnlyLabelText("HomeSourcePathLabel") == "2 specific · 1 fallback · 1 paused" &&
+           LocalOnlyLabelText("HomeDestinationEndpointCaption") == "NEW CLIPS GO TO" &&
+           LocalOnlyLabelText("HomeDestinationNameLabel") == "Library → Local only" &&
+           LocalOnlyLabelText("HomeDestinationDetailLabel") ==
+               "Local-only mode on · future clips stay on this PC" &&
+           EnumerateControls(localOnlyHome).OfType<Label>()
+               .Single(label => label.Name == "HomeDestinationDetailLabel").ForeColor ==
+               Color.FromArgb(244, 166, 53) &&
+           routingAction is { Visible: true, Text: "Turn off Local-only mode", TabStop: true } &&
+           !EnumerateControls(localSource).OfType<BrandGlyphControl>().Single().Visible &&
+           EnumerateControls(localSource).OfType<FigmaIconControl>()
+               .Single(icon => icon.Name == "HomeSourceRoutingIcon") is
+               { Visible: true, Asset: FigmaIconAsset.Bolt } &&
+           !EnumerateControls(localDestination).OfType<BrandGlyphControl>().Single().Visible &&
+           EnumerateControls(localDestination).OfType<FigmaIconControl>()
+               .Single(icon => icon.Name == "HomeDestinationDiskIcon") is { Visible: true, Asset: FigmaIconAsset.Disk },
+        "Routing-owned Local-only mode must match R27's pill, Routes source, Library destination, and exact Figma disk icon semantics.");
+    routingAction.PerformClick();
+    Assert(requestedHomeRoutingActions.SequenceEqual([HomeRoutingAction.DisableLocalOnlyMode]),
+        "R27's hero action must request the same durable Local-only mutation owned by Routes.");
+    Assert(EnumerateControls(localOnlyHome).OfType<Label>().Any(label =>
+               label.Text.Contains("Local-only mode · external delivery paused", StringComparison.Ordinal)),
+        "A recent Local-only activity row must explain that external delivery is paused while the override is on.");
+
+    routingPresentation = routingPresentation with { LocalOnlyModeEnabled = false };
+    localOnlyHome.RefreshRuntimeStatus();
+    Application.DoEvents();
+    Assert(localOnlyPill.Text == "3 ACTIVE" &&
+           LocalOnlyLabelText("HomeSourceEndpointCaption") == "ROUTES" &&
+           LocalOnlyLabelText("HomeSourceNameLabel") == "3 active routes" &&
+           LocalOnlyLabelText("HomeSourcePathLabel") == "2 specific · 1 fallback · 1 paused" &&
+           LocalOnlyLabelText("HomeDestinationEndpointCaption") == "NEW CLIPS GO TO" &&
+           LocalOnlyLabelText("HomeDestinationNameLabel") == "4 destinations" &&
+           LocalOnlyLabelText("HomeDestinationDetailLabel") ==
+               "Discord · YouTube · TikTok · Library" &&
+           routingAction is { Visible: true, Text: "Pause routing", TabStop: true } &&
+           !EnumerateControls(localSource).OfType<BrandGlyphControl>().Single().Visible &&
+           EnumerateControls(localSource).OfType<FigmaIconControl>()
+               .Single(icon => icon.Name == "HomeSourceRoutingIcon") is
+               { Visible: true, Asset: FigmaIconAsset.Bolt } &&
+           !EnumerateControls(localDestination).OfType<BrandGlyphControl>().Single().Visible &&
+           EnumerateControls(localDestination).OfType<FigmaIconControl>()
+               .Single(icon => icon.Name == "HomeDestinationDiskIcon").Visible,
+        "Routing-owned Home must retain R28's active route and destination projection when Local-only mode is off.");
+    routingAction.PerformClick();
+    Assert(requestedHomeRoutingActions.Last() == HomeRoutingAction.EnableLocalOnlyMode,
+        "R28's Pause routing action must request the durable Local-only overlay.");
+
+    routingPresentation = routingPresentation with
+    {
+        ActiveRouteCount = 0,
+        SpecificRouteCount = 0,
+        FallbackRouteCount = 0,
+        PausedRouteCount = 0,
+        DestinationCount = 1,
+        Destinations = RoutingUiDestinations.Library
+    };
+    localOnlyHome.RefreshRuntimeStatus();
+    Application.DoEvents();
+    Assert(localOnlyPill.Text == "NO ROUTES" &&
+           LocalOnlyLabelText("HomeSourceNameLabel") == "No routes yet" &&
+           LocalOnlyLabelText("HomeDestinationNameLabel") == "Library only" &&
+           routingAction.Text == "Create your first route",
+        "Routing-owned Home must render R28's no-routes state without reviving legacy controls.");
+    routingAction.PerformClick();
+    Assert(requestedHomeRoutingActions.Last() == HomeRoutingAction.CreateRoute,
+        "R28's no-routes CTA must request route creation rather than only a generic navigation.");
+
+    routingPresentation = routingPresentation with
+    {
+        State = RoutingUiState.NeedsAttention,
+        ActiveRouteCount = 3,
+        SpecificRouteCount = 2,
+        FallbackRouteCount = 1,
+        PausedRouteCount = 1,
+        DestinationCount = 3,
+        Destinations = RoutingUiDestinations.Library |
+                       RoutingUiDestinations.Discord |
+                       RoutingUiDestinations.YouTube
+    };
+    localOnlyHome.RefreshRuntimeStatus();
+    Application.DoEvents();
+    Assert(localOnlyPill.Text == "1 NEEDS YOU" &&
+           LocalOnlyLabelText("HomeSourceNameLabel") == "3 active routes" &&
+           LocalOnlyLabelText("HomeSourcePathLabel").StartsWith("1 paused", StringComparison.Ordinal) &&
+           LocalOnlyLabelText("HomeDestinationNameLabel") == "3 destinations" &&
+           routingAction.Text == "Open Routes",
+        "Routing-owned Home must fail closed into R28's needs-attention state.");
+    localOnlyHost.Close();
+
+    using var failedProjectionHost = new Form
+    {
+        ClientSize = new Size(984, 696),
+        ShowInTaskbar = false,
+        StartPosition = FormStartPosition.Manual,
+        Location = new Point(-20000, -20000)
+    };
+    using var failedProjectionHome = new HomeView(
+        settings,
+        history,
+        showPageHeader: false,
+        routingPresentationProvider: () => throw new InvalidOperationException("projection unavailable"));
+    failedProjectionHost.Controls.Add(failedProjectionHome);
+    failedProjectionHost.Show();
+    Application.DoEvents();
+    Assert(EnumerateControls(failedProjectionHome).OfType<HomeStatusPill>().Single().Text ==
+               "NEEDS ATTENTION" &&
+           EnumerateControls(failedProjectionHome).OfType<Label>()
+               .Single(label => label.Name == "HomeSourceEndpointCaption").Text == "ROUTES",
+        "A Routing projection failure must fail closed on Home and must never revive legacy delivery authority.");
+    failedProjectionHost.Close();
+
     using var cancellationHistory = new ActivityHistoryStore(string.Empty);
     using var scanStarted = new ManualResetEventSlim();
     using var scanCancelled = new ManualResetEventSlim();
@@ -2544,6 +3080,8 @@ static void AssertSettingsFormLayout(AppSettings settings)
             AssertGalleryPlaybackPrewarm(settings);
             TraceSmokeStep("Settings layout: Gallery Local-only editor flow");
             AssertGalleryEditorFlow(settings);
+            TraceSmokeStep("Settings layout: Routing rail ownership handoff");
+            AssertRoutingRailOwnershipPresentation(settings);
             TraceSmokeStep("Settings layout: Gallery editor trim preview playback");
             AssertGalleryEditorPreviewPlayback(settings);
             TraceSmokeStep("Settings layout: Activity to editor handoff");
@@ -3181,6 +3719,423 @@ static void TraceSmokeStep(string message)
     Console.Out.Flush();
 }
 
+static void AssertRoutingRailOwnershipPresentation(AppSettings settings)
+{
+    var state = RoutesRuntimeViewState.LegacyActive;
+    var routingPresentation = new RoutingUiPresentationSnapshot(
+        RoutingUiState.Active,
+        ActiveRouteCount: 3,
+        WatchingSourceCount: 2,
+        LocalOnlyModeEnabled: false,
+        SpecificRouteCount: 2,
+        FallbackRouteCount: 1,
+        PausedRouteCount: 1,
+        DestinationCount: 4,
+        Destinations: RoutingUiDestinations.Library |
+                      RoutingUiDestinations.Discord |
+                      RoutingUiDestinations.YouTube |
+                      RoutingUiDestinations.TikTok);
+    var routingRoot = Path.Combine(settings.ClipsFolder, "routing-rail-ownership");
+    Directory.CreateDirectory(routingRoot);
+    var manager = new RoutingRouteManager(
+        new RoutingSnapshotStore(Path.Combine(routingRoot, RoutingSnapshotStore.FileName)),
+        mutationAuthority: TestRouteMutationAuthority.Allowed,
+        connectionMembership: TestRoutingConnectionMembership.AllowAll);
+    using var form = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Settings,
+        routingRouteManager: manager,
+        routesRuntimeStateProvider: () => state,
+        routingPresentationProvider: () => routingPresentation);
+    form.Opacity = 0;
+    form.ShowInTaskbar = false;
+    form.Show();
+    Application.DoEvents();
+
+    var update = typeof(SettingsForm).GetMethod(
+        "UpdateWatcherStatus",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    var title = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "RailRoutingTitleLabel");
+    var selector = EnumerateControls(form).OfType<TableLayoutPanel>()
+        .Single(control => control.Name == "RailRouteSelector");
+    var discord = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "RailDiscordRouteButton");
+    var action = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "RailLocalRouteButton");
+    var hint = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "RailHotkeyHint");
+    var destinationSummary = EnumerateControls(form).OfType<RoutingRailSummaryControl>()
+        .Single(control => control.Name == "RailDestinationSummary");
+    var railStatus = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "WatcherStatusLabel");
+    var railStatusDetail = EnumerateControls(form).OfType<Label>()
+        .Single(label => label.Name == "WatcherStatusDetailLabel");
+    var folder = EnumerateControls(form).OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Clips folder");
+    var webhook = EnumerateControls(form).OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Discord webhook URL");
+    var uploader = EnumerateControls(form).OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Uploader name");
+    var compression = EnumerateControls(form).OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Compression target in megabytes");
+    var hotkey = EnumerateControls(form).OfType<TextBox>()
+        .Single(control => control.AccessibleName == "Global upload-mode shortcut");
+    var browse = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "BrowseClipsFolderButton");
+    var testWebhook = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "TestWebhookButton");
+    var manageConnections = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "ManageRoutingConnectionsButton");
+    var hotkeyAction = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "LegacyModeHotkeyActionButton");
+    var steelSeries = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "SteelSeriesCaptureSourceButton");
+    var nvidia = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "NvidiaCaptureSourceButton");
+    var uploadToggle = EnumerateControls(form).OfType<CheckBox>()
+        .Single(control => control.Name == "UploadToDiscordToggle");
+    var startupToggle = EnumerateControls(form).OfType<CheckBox>()
+        .Single(control => control.Name == "StartWithWindowsToggle");
+    var checkUpdates = EnumerateControls(form).OfType<OutlineButton>()
+        .Single(button => button.Name == "SettingsCheckUpdatesButton");
+    void AssertLegacySettingsControls(RoutesRuntimeViewState runtimeState)
+    {
+        var currentControls = EnumerateControls(form).ToArray();
+        var clipsFolderLabels = currentControls.OfType<TableLayoutPanel>()
+            .Single(control => control.Name == "ClipsFolderLabelBlock");
+        var webhookLabels = currentControls.OfType<TableLayoutPanel>()
+            .Single(control => control.Name == "WebhookLabelBlock");
+        var modeLabels = currentControls.OfType<TableLayoutPanel>()
+            .Single(control => control.Name == "ModeHotkeyLabelBlock");
+        var uploadHelper = currentControls.OfType<Label>()
+            .Single(label => label.Name == "UploadModeHelperLabel");
+        Assert(currentControls.Contains(folder) && currentControls.Contains(webhook) &&
+               currentControls.Contains(uploadToggle) && currentControls.Contains(hotkey) &&
+               folder.Enabled && folder.TabStop && browse.Enabled && browse.TabStop &&
+               steelSeries.Enabled && steelSeries.TabStop && nvidia.Enabled && nvidia.TabStop &&
+               webhook.Enabled && webhook.TabStop && testWebhook.Visible && testWebhook.Enabled &&
+               testWebhook.TabStop && !manageConnections.Visible && !manageConnections.TabStop &&
+               uploadToggle.Visible && uploadToggle.Enabled && uploadToggle.TabStop &&
+               hotkey.Enabled && hotkey.TabStop && hotkeyAction.Enabled && hotkeyAction.TabStop,
+            $"{runtimeState} must keep the legacy setup controls available while legacy processing owns clips.");
+        Assert(((Label)clipsFolderLabels.GetControlFromPosition(0, 1)!).Text.Contains(
+                   "receives finished MP4", StringComparison.Ordinal) &&
+               ((Label)webhookLabels.GetControlFromPosition(0, 0)!).Text == "Webhook URL" &&
+               ((Label)modeLabels.GetControlFromPosition(0, 0)!).Text == "Mode shortcut" &&
+               !uploadHelper.Text.Contains("managed in Routes", StringComparison.OrdinalIgnoreCase),
+            $"{runtimeState} must retain truthful legacy labels while its setup controls remain authoritative.");
+    }
+
+    void AssertManagedSettingsControls(
+        RoutesRuntimeViewState runtimeState,
+        bool expectDefaultSubtitle = true)
+    {
+        var currentControls = EnumerateControls(form).ToArray();
+        var removedLegacyControls = new Control[]
+        {
+            folder,
+            browse,
+            steelSeries,
+            nvidia,
+            webhook,
+            testWebhook,
+            manageConnections,
+            uploadToggle,
+            hotkey,
+            hotkeyAction
+        };
+        Assert(removedLegacyControls.All(control => !currentControls.Contains(control)) &&
+               removedLegacyControls.All(control => !control.TabStop),
+            $"{runtimeState} must remove every legacy Routing-owned Settings control from both the visual tree and tab order.");
+        Assert(!currentControls.Any(control => control.Name is
+                   "ClipSourceCard" or
+                   "DiscordDestinationCard" or
+                   "UploadBehaviorCard" or
+                   "AppPreferencesCard" or
+                   "ModeHotkeyEditor"),
+            $"{runtimeState} must not retain obsolete legacy Settings cards as hidden or disabled UI.");
+        Assert(currentControls.Contains(uploader) && currentControls.Contains(compression) &&
+               currentControls.Contains(startupToggle) && currentControls.Contains(checkUpdates) &&
+               uploader.Enabled && compression.Enabled && startupToggle.Enabled && checkUpdates.Enabled,
+            $"{runtimeState} must leave uploader, compression, startup, and updates independently editable.");
+        Assert(currentControls.Any(control => control.Name == "IdentityDeliveryDefaultsCard") &&
+               currentControls.Any(control => control.Name == "GeneralApplicationCard") &&
+               currentControls.Any(control => control.Name == "ManagedSettingsCard") &&
+               currentControls.OfType<Label>().Any(label =>
+                   label.Name == "ManagedSettingsFooterLabel" &&
+                   label.Text.Contains("moved to Routes", StringComparison.Ordinal)),
+            $"{runtimeState} must present the approved R23 Settings hierarchy and authority footer.");
+        var settingsSubtitle = currentControls.OfType<Label>()
+            .Single(label => label.Name == "PageSubtitleLabel").Text;
+        Assert(!expectDefaultSubtitle || settingsSubtitle ==
+                   "App preferences · clip sources, connections and delivery live in Routes",
+            $"{runtimeState} must use the approved R23 Settings subtitle; actual: '{settingsSubtitle}'.");
+
+        var navigationRows = new[]
+        {
+            "ManagedClipSourcesRow",
+            "ManagedConnectionsRow",
+            "ManagedRecordingCameraRow",
+            "ManagedDeliveryRulesRow",
+            "ManagedLocalOnlyModeRow"
+        }.Select(name => currentControls.OfType<RoundedPanel>().Single(row => row.Name == name)).ToArray();
+        Assert(navigationRows.All(row => row.Visible && row.Enabled && row.TabStop &&
+                                         row.AccessibleRole == AccessibleRole.Link),
+            $"{runtimeState} must expose all five managed destinations as keyboard-reachable navigation rows.");
+        var connectionsRow = navigationRows.Single(row => row.Name == "ManagedConnectionsRow");
+        var recordingRow = navigationRows.Single(row => row.Name == "ManagedRecordingCameraRow");
+        var clipSourcesRow = navigationRows.Single(row => row.Name == "ManagedClipSourcesRow");
+        Assert(EnumerateControls(connectionsRow).OfType<FigmaIconControl>()
+                   .Any(icon => icon.Asset == FigmaIconAsset.Connection) &&
+               !EnumerateControls(connectionsRow).OfType<FigmaIconControl>()
+                   .Any(icon => icon.Asset == FigmaIconAsset.Discord) &&
+               EnumerateControls(recordingRow).OfType<FigmaIconControl>()
+                   .Any(icon => icon.Asset == FigmaIconAsset.Capture) &&
+               !EnumerateControls(recordingRow).OfType<FigmaIconControl>()
+                   .Any(icon => icon.Asset == FigmaIconAsset.Camera),
+            $"{runtimeState} must use the approved R23 Connection and Capture assets for managed Settings rows.");
+        Assert(clipSourcesRow.AccessibleDescription?.Contains(
+                   "Routes › Connections",
+                   StringComparison.Ordinal) == true,
+            $"{runtimeState} must route Clip sources to the authoritative Routes Connections surface.");
+    }
+
+    void InvokeNavigationRow(string name)
+    {
+        var row = EnumerateControls(form).OfType<RoundedPanel>().Single(control => control.Name == name);
+        typeof(Control).GetMethod(
+                "OnClick",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(row, [EventArgs.Empty]);
+        Application.DoEvents();
+    }
+
+    AssertLegacySettingsControls(RoutesRuntimeViewState.LegacyActive);
+
+    var stagedFolder = Path.Combine(settings.ClipsFolder, "staged-before-activation");
+    Directory.CreateDirectory(stagedFolder);
+    folder.Text = stagedFolder;
+    webhook.Text = "https://discord.com/api/webhooks/123456/staged-routing-token";
+    hotkey.Text = "Ctrl + Shift + U";
+    uploadToggle.Checked = !settings.UploadToDiscord;
+    nvidia.PerformClick();
+
+    state = RoutesRuntimeViewState.Activating;
+    update.Invoke(form, null);
+    Application.DoEvents();
+    AssertManagedSettingsControls(RoutesRuntimeViewState.Activating);
+    AssertSettingsCardsOpenWithoutScrolling(form);
+    AssertCriticalTextFits(form);
+    AssertRoutingOwnedSettingsMinimumViewport(form);
+    Assert(folder.Text == settings.ClipsFolder && webhook.Text == settings.WebhookUrl &&
+           hotkey.Text == AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey) &&
+           uploadToggle.Checked == settings.UploadToDiscord &&
+           steelSeries.AccessibilitySelected && !nvidia.AccessibilitySelected,
+        "Entering Activating must discard staged legacy-owned edits before authority can be fenced.");
+    Assert(title.Text == "NEW CLIPS GO TO" && !selector.Visible &&
+           !discord.Visible && !discord.TabStop && !action.Visible && !action.TabStop &&
+           destinationSummary.Visible &&
+           destinationSummary.Snapshot.Destinations == routingPresentation.Destinations &&
+           destinationSummary.AccessibleDescription?.Contains("YouTube", StringComparison.Ordinal) == true &&
+           hint.Text == "2 specific · 1 fallback · 1 paused" &&
+           railStatus.Text == "Routes armed" && railStatusDetail.Text == "Library always on",
+        "Activating must show the approved R27 destination summary and route composition while legacy controls are fenced.");
+
+    foreach (var managedState in new[]
+             {
+                 RoutesRuntimeViewState.Active,
+                 RoutesRuntimeViewState.RecoveryNeeded,
+                 RoutesRuntimeViewState.Blocked
+             })
+    {
+        state = managedState;
+        routingPresentation = routingPresentation with
+        {
+            State = managedState == RoutesRuntimeViewState.Active
+                ? RoutingUiState.Active
+                : RoutingUiState.NeedsAttention
+        };
+        update.Invoke(form, null);
+        Application.DoEvents();
+        var needsAttention = managedState is RoutesRuntimeViewState.RecoveryNeeded or
+            RoutesRuntimeViewState.Blocked;
+        Assert(title.Text == "NEW CLIPS GO TO" &&
+               !selector.Visible && !discord.Visible && !discord.TabStop &&
+               !action.Visible && !action.TabStop &&
+               destinationSummary.Visible && !destinationSummary.TabStop &&
+               destinationSummary.Snapshot.State == routingPresentation.State &&
+               destinationSummary.Snapshot.DestinationCount == 4 &&
+               destinationSummary.Snapshot.PausedRouteCount == 1 &&
+               hint.Text == "2 specific · 1 fallback · 1 paused" &&
+               railStatus.Text == (needsAttention ? "Routes need attention" : "Routes armed") &&
+               railStatusDetail.Text == (needsAttention ? "Open Routes to review" : "Library always on"),
+            $"{managedState} must show the approved static destination summary and privacy-safe Routing state.");
+        AssertManagedSettingsControls(managedState);
+        if (managedState == RoutesRuntimeViewState.Active)
+        {
+            InvokeNavigationRow("ManagedConnectionsRow");
+            Assert(form.Text == "ClipCord — Routes" &&
+                   EnumerateControls(form).Any(control => control.Name == "ConnectionsContent"),
+                "The Connections row must open Routes on its Connections tab.");
+            form.ShowPage(SettingsPage.Settings);
+            Application.DoEvents();
+
+            InvokeNavigationRow("ManagedClipSourcesRow");
+            Assert(form.Text == "ClipCord — Routes" &&
+                   EnumerateControls(form).Any(control => control.Name == "ConnectionsContent"),
+                "The Clip sources row must open the authoritative Routes Connections tab.");
+            form.ShowPage(SettingsPage.Settings);
+            Application.DoEvents();
+
+            InvokeNavigationRow("ManagedRecordingCameraRow");
+            Assert(form.Text == "ClipCord — Capture",
+                "The Recording and camera row must open Capture.");
+            form.ShowPage(SettingsPage.Settings);
+            Application.DoEvents();
+
+            foreach (var routesRow in new[]
+                     {
+                         "ManagedDeliveryRulesRow",
+                         "ManagedLocalOnlyModeRow"
+                     })
+            {
+                InvokeNavigationRow(routesRow);
+                Assert(form.Text == "ClipCord — Routes" &&
+                       EnumerateControls(form).Any(control => control.Name == "RoutesContent"),
+                    $"{routesRow} must open the main Routes tab.");
+                form.ShowPage(SettingsPage.Settings);
+                Application.DoEvents();
+            }
+        }
+    }
+
+    var setBusy = typeof(SettingsForm).GetMethod(
+        "SetBusy",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+    setBusy.Invoke(form, [true, "Busy routing control probe"]);
+    Application.DoEvents();
+    Assert(new[]
+        {
+            "ManagedClipSourcesRow",
+            "ManagedConnectionsRow",
+            "ManagedRecordingCameraRow",
+            "ManagedDeliveryRulesRow",
+            "ManagedLocalOnlyModeRow"
+        }.Select(name => EnumerateControls(form).OfType<RoundedPanel>()
+            .Single(control => control.Name == name))
+        .All(row => !row.Enabled && !row.TabStop),
+        "Busy Settings must remove every managed navigation row from the tab order.");
+    setBusy.Invoke(form, [false, null]);
+    Application.DoEvents();
+    AssertManagedSettingsControls(
+        RoutesRuntimeViewState.Blocked,
+        expectDefaultSubtitle: false);
+    Assert(!testWebhook.Enabled && !testWebhook.Visible,
+        "SetBusy(false) must never resurrect the legacy webhook POST outside the Routing outbox.");
+
+    folder.Enabled = true;
+    folder.TabStop = true;
+    browse.Enabled = true;
+    testWebhook.Visible = true;
+    testWebhook.Enabled = true;
+    testWebhook.TabStop = true;
+    typeof(SettingsForm).GetMethod(
+            "GalleryOperationBusyChanged",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(form, [false]);
+    Application.DoEvents();
+    AssertManagedSettingsControls(
+        RoutesRuntimeViewState.Blocked,
+        expectDefaultSubtitle: false);
+    Assert(!testWebhook.Enabled && !testWebhook.Visible,
+        "Leaving a Gallery operation must reapply Routing ownership instead of reviving legacy Settings controls.");
+
+    state = RoutesRuntimeViewState.Active;
+    update.Invoke(form, null);
+    folder.Text = Path.Combine(settings.ClipsFolder, "programmatic-stale-folder");
+    webhook.Text = "not-a-webhook";
+    hotkey.Text = "not-a-hotkey";
+    uploadToggle.Checked = !settings.UploadToDiscord;
+    typeof(SettingsForm).GetField(
+            "_captureSource",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .SetValue(form, ClipCaptureSource.Nvidia);
+    var validationArguments = new object?[] { null };
+    var validated = (bool)typeof(SettingsForm).GetMethod(
+            "TryValidate",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(form, validationArguments)!;
+    var validatedSettings = (AppSettings?)validationArguments[0];
+    Assert(validated && validatedSettings is not null &&
+           validatedSettings.ClipsFolder == settings.ClipsFolder &&
+           validatedSettings.WebhookUrl == settings.WebhookUrl &&
+           validatedSettings.UploadToDiscord == settings.UploadToDiscord &&
+           validatedSettings.ModeToggleHotkey ==
+               AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey) &&
+           validatedSettings.CaptureSource ==
+               AppSettings.NormalizeCaptureSource(settings.CaptureSource),
+        "An unrelated Settings save after cutover must preserve every Routing-owned applied value even if stale controls are changed programmatically.");
+    typeof(SettingsForm).GetMethod(
+            "ResetSettingsDraft",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .Invoke(form, null);
+
+    foreach (var legacyState in new[]
+             {
+                 RoutesRuntimeViewState.LegacySetupNeeded,
+                 RoutesRuntimeViewState.LegacyActive
+             })
+    {
+        state = legacyState;
+        update.Invoke(form, null);
+        Application.DoEvents();
+        Assert(title.Text == "NEW CLIPS GO TO" &&
+               discord.Visible && discord.TabStop &&
+               discord.Text == "● Discord" &&
+               discord.AccessibleName == "Route new clips to Discord" &&
+               discord.AccessibleRole == AccessibleRole.RadioButton &&
+               action.Visible && action.TabStop &&
+               action.Text == "● Local" &&
+               action.AccessibleName == "Keep new clips local only" &&
+               action.AccessibleRole == AccessibleRole.RadioButton &&
+               string.IsNullOrEmpty(action.AccessibleDescription) &&
+               selector.GetCellPosition(discord) == new TableLayoutPanelCellPosition(0, 0) &&
+               selector.GetCellPosition(action) == new TableLayoutPanelCellPosition(1, 0) &&
+               selector.GetColumnSpan(action) == 1 &&
+               hint.Text.EndsWith("  to swap", StringComparison.Ordinal),
+            $"{legacyState} must preserve the working 1.x Discord/Local rail controls until Routes owns delivery.");
+        AssertLegacySettingsControls(legacyState);
+    }
+
+    state = RoutesRuntimeViewState.Active;
+    using var activeFromStartup = new SettingsForm(
+        settings,
+        checkForUpdatesAsync: _ => Task.CompletedTask,
+        initialPage: SettingsPage.Settings,
+        routingRouteManager: manager,
+        routesRuntimeStateProvider: () => state);
+    activeFromStartup.Opacity = 0;
+    activeFromStartup.ShowInTaskbar = false;
+    activeFromStartup.Show();
+    Application.DoEvents();
+    var startupControls = EnumerateControls(activeFromStartup).ToArray();
+    Assert(!startupControls.Any(control => control.Name is
+               "ClipSourceCard" or
+               "DiscordDestinationCard" or
+               "UploadBehaviorCard" or
+               "AppPreferencesCard" or
+               "ModeHotkeyEditor") &&
+           startupControls.Any(control => control.Name == "IdentityDeliveryDefaultsCard") &&
+           startupControls.Any(control => control.Name == "ManagedSettingsCard") &&
+           startupControls.OfType<RoundedPanel>().Count(row =>
+               row.Name.StartsWith("Managed", StringComparison.Ordinal) &&
+               row.Name.EndsWith("Row", StringComparison.Ordinal)) == 5,
+        "A process that starts after Routing cutover must build only the R23 Settings tree; " +
+        "legacy controls must never be parented first and then hidden.");
+}
+
 static async Task AssertStartedWebhookPostCancellationAsync(string temporaryRoot, string webhookUrl)
 {
     var clipPath = Path.Combine(temporaryRoot, "started-post-cancellation.mp4");
@@ -3288,6 +4243,13 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
     var stateStore = new WatchStateStore(
         Path.Combine(stateDirectory, "state.json"),
         Path.Combine(stateDirectory, ".safe-baseline-required"));
+    var seededState = await stateStore.LoadOrInitializeAsync(
+        transactionRoot,
+        _ => { },
+        CancellationToken.None);
+    seededState.KnownContentHashes.Add(editedHash);
+    seededState.LocalOnlyContentHashes.Add(editedHash);
+    stateStore.Save(seededState);
     var recycleRoot = Directory.CreateDirectory(Path.Combine(transactionRoot, "fake-recycle-bin")).FullName;
     var recycler = new RecordingOriginalClipRecycler(recycleRoot);
     var favorites = new FavoritesService(new FavoritesStore(Path.Combine(stateDirectory, "favorites.json")));
@@ -3352,6 +4314,15 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
         activity,
         progress: new InlineProgress<ManualClipEditProgress>(progressUpdates.Add),
         cancellation.Token);
+    var rawCommittedProbe = stateStore.ProbeForRoutingActivation();
+    Assert(rawCommittedProbe is
+           {
+               Status: WatchStateRoutingProbeStatus.Loaded,
+               State: not null
+           } &&
+           rawCommittedProbe.State.UploadedContentHashes.Contains(editedHash) &&
+           !rawCommittedProbe.State.LocalOnlyContentHashes.Contains(editedHash),
+        "The edited-upload commit itself must replace an older Local-only classification before any normalizing reload can mask it.");
     Assert(uploader.UploadCount == 1 &&
            uploader.LastPresentation is
            {
@@ -3398,9 +4369,10 @@ static async Task AssertEditedClipUploadTransactionsAsync(string temporaryRoot)
     var committedState = await stateStore.LoadOrInitializeAsync(transactionRoot, _ => { }, CancellationToken.None);
     Assert(committedState.Version == 4 &&
            committedState.UploadedContentHashes.Contains(editedHash) &&
+           !committedState.LocalOnlyContentHashes.Contains(editedHash) &&
            committedState.KnownContentHashes.Contains(editedHash) &&
            committedState.PendingEditedUploads.Count == 0,
-        "Cancellation requested as the POST returns must not prevent the non-cancellable uploaded-hash/disposition commit.");
+        "Cancellation requested as the POST returns must not prevent the non-cancellable uploaded-hash/disposition commit, and Uploaded must replace an older Local-only classification.");
 
     var keepGame = Directory.CreateDirectory(Path.Combine(
         UploadedFolder.GetOrCreateLocalOnly(transactionRoot),
@@ -4106,14 +5078,19 @@ static void AssertAboutPageSupport(string testRoot)
     var watcherCases = new (string? Raw, bool DiscordRunning, AboutWatcherState State, string Label, string Detail)[]
     {
         ("Watcher error — restarting SecretClip.mp4", true, AboutWatcherState.NeedsAttention, "Needs attention", "Clip processing needs attention"),
+        ("Routes need attention — processing is paused", true, AboutWatcherState.NeedsAttention, "Needs attention", "Clip processing needs attention"),
         ("Setup required", false, AboutWatcherState.SetupRequired, "Setup required", "Finish setup to start watching"),
         ("Discord closed — uploader paused", false, AboutWatcherState.Paused, "Paused", "Discord is closed"),
+        ("Local-only mode on · future clips stay here", true, AboutWatcherState.LocalOnly, "Local only", "Saving new clips on this PC"),
         ("Saving SecretClip.mp4 locally", true, AboutWatcherState.LocalOnly, "Local only", "Saving new clips on this PC"),
         ("Uploaded SecretClip.mp4 — archive move pending", true, AboutWatcherState.Archiving, "Archiving", "Organizing a completed clip"),
         ("Compressing SecretClip.mp4", true, AboutWatcherState.Compressing, "Compressing", "Reducing a clip for Discord"),
         ("Hashing SecretClip.mp4", true, AboutWatcherState.Preparing, "Preparing clip", "Preparing a completed clip"),
         ("Applying settings — stopping current watcher", true, AboutWatcherState.Starting, "Starting", "Starting clip monitoring"),
+        ("Routes activating — committing safe cutover", true, AboutWatcherState.Starting, "Starting", "Starting clip monitoring"),
+        ("Starting Routes — restoring pending deliveries", false, AboutWatcherState.Starting, "Starting", "Starting clip monitoring"),
         ("Discord open — watching for clips", true, AboutWatcherState.Watching, "Watching", "Discord is open"),
+        ("Routes active — watching for new clips", false, AboutWatcherState.Watching, "Watching", "Watching for new clips"),
         ("Uploading SecretClip.mp4", true, AboutWatcherState.Uploading, "Uploading", "Sending a clip to Discord"),
         ("Uploading Setup Simulator.mp4", true, AboutWatcherState.Uploading, "Uploading", "Sending a clip to Discord"),
         ("Uploading Failed Mission.mp4", true, AboutWatcherState.Uploading, "Uploading", "Sending a clip to Discord"),
@@ -4170,17 +5147,32 @@ static void AssertAboutPageSupport(string testRoot)
     var snapshot = AboutStatusSnapshot.Create(
         settings,
         $"Uploading SecretClip.mp4 through {secretWebhook}",
-        facts);
+        facts,
+        new RoutingUiPresentationSnapshot(
+            RoutingUiState.Active,
+            ActiveRouteCount: 3,
+            WatchingSourceCount: 2,
+            LocalOnlyModeEnabled: true));
     var diagnostics = AboutPageSupport.BuildDiagnostics(snapshot);
     Assert(snapshot.Version == "9.8.7" &&
            snapshot.WatcherState == AboutWatcherState.Uploading &&
            snapshot.Watcher == "Uploading" &&
-           snapshot.Routing == "Discord uploads" &&
+           snapshot.Routing == "Routing" &&
+           snapshot.RoutingDetail == "Active · 3 routes" &&
+           snapshot.RoutingState == RoutingUiState.Active &&
+           snapshot.ActiveRouteCount == 3 &&
+           snapshot.WatchingSourceCount == 2 &&
+           snapshot.LocalOnlyModeEnabled &&
+           snapshot.LocalOnlyMode == "Local-only mode" &&
+           snapshot.LocalOnlyModeDetail == "On · future clips stay on this PC" &&
            snapshot.Installation == "Installed copy",
         "About status snapshots must contain only the expected normalized product state.");
     Assert(diagnostics.Contains("Version: 9.8.7", StringComparison.Ordinal) &&
            diagnostics.Contains("Watcher: Uploading", StringComparison.Ordinal) &&
-           diagnostics.Contains("Route: Discord uploads", StringComparison.Ordinal) &&
+           diagnostics.Contains("Routing: Active", StringComparison.Ordinal) &&
+           diagnostics.Contains("Active routes: 3", StringComparison.Ordinal) &&
+           diagnostics.Contains("Watching sources: 2", StringComparison.Ordinal) &&
+           diagnostics.Contains("Local-only mode: On", StringComparison.Ordinal) &&
            diagnostics.Contains("Install type: Installed copy", StringComparison.Ordinal) &&
            diagnostics.Contains("FFmpeg: Available", StringComparison.Ordinal) &&
            diagnostics.Contains($"Captured (UTC): {capturedAt:O}", StringComparison.Ordinal),
@@ -4194,7 +5186,10 @@ static void AssertAboutPageSupport(string testRoot)
         $"Runtime: {snapshot.Runtime}",
         $"Install type: {snapshot.Installation}",
         $"Watcher: {snapshot.Watcher}",
-        $"Route: {snapshot.Routing}",
+        $"Watching sources: {snapshot.WatchingSourceCount}",
+        $"Routing: {snapshot.RoutingState}",
+        $"Active routes: {snapshot.ActiveRouteCount}",
+        $"Local-only mode: {(snapshot.LocalOnlyModeEnabled ? "On" : "Off")}",
         $"Discord: {snapshot.Discord}",
         $"Start with Windows: {snapshot.StartupDetail}",
         $"FFmpeg: {snapshot.Ffmpeg}",
@@ -4203,6 +5198,30 @@ static void AssertAboutPageSupport(string testRoot)
     Assert(diagnostics.Split(Environment.NewLine, StringSplitOptions.None)
                .SequenceEqual(expectedDiagnosticLines, StringComparer.Ordinal),
         $"Copied diagnostics must contain only the fixed allow-listed lines:{Environment.NewLine}{diagnostics}");
+    var hostileRouting = new RoutingUiPresentationSnapshot(
+        (RoutingUiState)int.MaxValue,
+        int.MaxValue,
+        int.MinValue,
+        LocalOnlyModeEnabled: false,
+        SpecificRouteCount: int.MaxValue,
+        FallbackRouteCount: int.MinValue,
+        PausedRouteCount: int.MaxValue,
+        DestinationCount: int.MinValue,
+        Destinations: (RoutingUiDestinations)int.MaxValue).Normalize();
+    Assert(hostileRouting == new RoutingUiPresentationSnapshot(
+               RoutingUiState.Unavailable,
+               9999,
+               0,
+               LocalOnlyModeEnabled: false,
+               SpecificRouteCount: 9999,
+               FallbackRouteCount: 0,
+               PausedRouteCount: 9999,
+               DestinationCount: 0,
+               Destinations: RoutingUiDestinations.Library |
+                             RoutingUiDestinations.Discord |
+                             RoutingUiDestinations.YouTube |
+                             RoutingUiDestinations.TikTok),
+        "The shared routing UI projection must normalize unknown enum values and bound every diagnostic count.");
     foreach (var privateValue in new[]
              {
                  secretWebhook,
@@ -5333,7 +6352,12 @@ static void AssertAboutViewActions(AppSettings settings)
         ffmpegExecutableProvider: () => @"C:\Program Files\ClipCord\ffmpeg.exe",
         processStarter: starts.Add,
         clipboardWriter: value => copiedDiagnostics = value,
-        dataDirectory: dataDirectory);
+        dataDirectory: dataDirectory,
+        routingPresentationProvider: () => new RoutingUiPresentationSnapshot(
+            RoutingUiState.Active,
+            ActiveRouteCount: 3,
+            WatchingSourceCount: 2,
+            LocalOnlyModeEnabled: true));
     view.CheckUpdatesRequested += (_, _) => checkRequests++;
     using var host = new Form
     {
@@ -5352,9 +6376,86 @@ static void AssertAboutViewActions(AppSettings settings)
                WatcherState: AboutWatcherState.Uploading,
                Watcher: "Uploading",
                Discord: "Open",
-               Ffmpeg: "Available"
+               Ffmpeg: "Available",
+               RoutingState: RoutingUiState.Active,
+               ActiveRouteCount: 3,
+               WatchingSourceCount: 2,
+               LocalOnlyModeEnabled: true
            },
         "The live About view must display only normalized runtime facts from its injected providers.");
+    var statusLabelNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "AboutRoutingStatusLabel",
+        "AboutRoutingDetailLabel",
+        "AboutLocalOnlyStatusLabel",
+        "AboutLocalOnlyDetailLabel"
+    };
+    var statusLabels = EnumerateControls(view).OfType<Label>()
+        .Where(label => statusLabelNames.Contains(label.Name))
+        .ToDictionary(label => label.Name, StringComparer.Ordinal);
+    Assert(statusLabels["AboutRoutingStatusLabel"].Text == "Routing" &&
+           statusLabels["AboutRoutingDetailLabel"].Text == "Active · 3 routes" &&
+           statusLabels["AboutLocalOnlyStatusLabel"].Text == "Local-only mode" &&
+           statusLabels["AboutLocalOnlyDetailLabel"].Text == "On · future clips stay on this PC",
+        "About must render R29's typed Routing and Local-only status rows without accepting arbitrary diagnostic text.");
+
+    var failedProjectionCalls = 0;
+    using var failedProjectionView = new AboutView(
+        settings,
+        watcherStatusProvider: () => "Routes active — watching for new clips",
+        discordRunningProvider: () => false,
+        ffmpegExecutableProvider: () => @"C:\Program Files\ClipCord\ffmpeg.exe",
+        processStarter: starts.Add,
+        clipboardWriter: _ => { },
+        dataDirectory: dataDirectory,
+        routingPresentationProvider: () =>
+        {
+            failedProjectionCalls++;
+            throw new InvalidOperationException("projection unavailable");
+        });
+    Assert(failedProjectionCalls == 1 &&
+           failedProjectionView.CurrentSnapshot is
+           {
+               RoutingState: RoutingUiState.Unavailable,
+               ActiveRouteCount: 0,
+               WatchingSourceCount: 0,
+               LocalOnlyModeEnabled: true,
+               RoutingDetail: "Status unavailable",
+               LocalOnlyModeDetail: "On · future clips stay on this PC"
+           },
+        "An installed Routing provider failure must fail closed as unavailable/local-only instead of falling back to legacy Settings authority.");
+
+    using var emptyProjectionView = new AboutView(
+        settings,
+        watcherStatusProvider: () => "Routes active — watching for new clips",
+        discordRunningProvider: () => false,
+        ffmpegExecutableProvider: () => @"C:\Program Files\ClipCord\ffmpeg.exe",
+        processStarter: starts.Add,
+        clipboardWriter: _ => { },
+        dataDirectory: dataDirectory,
+        routingPresentationProvider: () => null);
+    Assert(emptyProjectionView.CurrentSnapshot is
+           {
+               RoutingState: RoutingUiState.Unavailable,
+               LocalOnlyModeEnabled: true
+           },
+        "A Routing provider that cannot produce a projection must not silently restore the legacy delivery presentation.");
+
+    using var legacyPresentationView = new AboutView(
+        settings,
+        watcherStatusProvider: () => "Discord open — watching for clips",
+        discordRunningProvider: () => true,
+        ffmpegExecutableProvider: () => @"C:\Program Files\ClipCord\ffmpeg.exe",
+        processStarter: starts.Add,
+        clipboardWriter: _ => { },
+        dataDirectory: dataDirectory);
+    var expectedLegacyPresentation = RoutingUiPresentationSnapshot.FromLegacySettings(settings);
+    Assert(legacyPresentationView.CurrentSnapshot is { } legacySnapshot &&
+           legacySnapshot.RoutingState == expectedLegacyPresentation.State &&
+           legacySnapshot.ActiveRouteCount == expectedLegacyPresentation.ActiveRouteCount &&
+           legacySnapshot.WatchingSourceCount == expectedLegacyPresentation.WatchingSourceCount &&
+           legacySnapshot.LocalOnlyModeEnabled == expectedLegacyPresentation.LocalOnlyModeEnabled,
+        "About may preserve the legacy Settings presentation only when no Routing provider has been installed.");
 
     var buttons = EnumerateControls(view).OfType<Button>().ToDictionary(button => button.Name, StringComparer.Ordinal);
     buttons["AboutOpenLogsButton"].PerformClick();
@@ -5378,6 +6479,10 @@ static void AssertAboutViewActions(AppSettings settings)
     Assert(!string.IsNullOrWhiteSpace(copiedDiagnostics) &&
            copiedDiagnostics.Contains("ClipCord diagnostics", StringComparison.Ordinal) &&
            copiedDiagnostics.Contains("Watcher: Uploading", StringComparison.Ordinal) &&
+           copiedDiagnostics.Contains("Routing: Active", StringComparison.Ordinal) &&
+           copiedDiagnostics.Contains("Active routes: 3", StringComparison.Ordinal) &&
+           copiedDiagnostics.Contains("Watching sources: 2", StringComparison.Ordinal) &&
+           copiedDiagnostics.Contains("Local-only mode: On", StringComparison.Ordinal) &&
            !copiedDiagnostics.Contains("SecretActionClip.mp4", StringComparison.Ordinal) &&
            !copiedDiagnostics.Contains(settings.WebhookUrl, StringComparison.Ordinal) &&
            !copiedDiagnostics.Contains(settings.UploaderName, StringComparison.Ordinal) &&
@@ -5497,7 +6602,7 @@ static void AssertAboutLayout(SettingsForm form, float expectedScale)
            hero.Left == status.Left &&
            Math.Abs(hero.Right - (expectedTwoColumns ? diagnostics.Right : status.Right)) <= 1,
         $"The About hero and card grid must share one aligned content width: hero={hero}, status={status}, diagnostics={diagnostics}.");
-    AssertAboutSectionMetrics(view, "AboutStatusCard", [33, 33, 33, 33], expectedScale);
+    AssertAboutSectionMetrics(view, "AboutStatusCard", [26, 26, 26, 26, 28], expectedScale);
     AssertAboutSectionMetrics(view, "AboutDiagnosticsCard", [33, 8, 33, 14, 13], expectedScale);
     AssertAboutSectionMetrics(view, "AboutPrivacyCard", [26, 26, 26, 34, 53, 33], expectedScale);
     AssertAboutSectionMetrics(view, "AboutCreditsCard", [54, 54, 54, 34, 33], expectedScale);
@@ -5614,7 +6719,7 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
 
     var requiredCopy = new HashSet<string>(StringComparer.Ordinal)
     {
-        "Your clips. Your choice. Your Discord.",
+        "Your clips. Your routes. Your PC.",
         "App status",
         "Help & diagnostics",
         "Privacy & security",
@@ -5644,6 +6749,26 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
     Assert(textControls.Select(control => control.Text).ToHashSet(StringComparer.Ordinal).SetEquals(bodyCopy) &&
            updateButton.Text == "Check for updates",
         "The live About page is missing approved mockup copy or actions.");
+
+    var description = EnumerateControls(view).OfType<Label>()
+        .Single(label => label.Name == "AboutDescriptionLabel");
+    var expectedPrivacyCopy = new[]
+    {
+        "Activity, Gallery and routing history stay on this PC.",
+        "Your connection secrets are encrypted for your Windows account.",
+        "No ClipCord account, analytics, advertising or behavioural tracking.",
+        "Network access is limited to the destinations you connect and verified GitHub updates."
+    };
+    var privacyCopy = EnumerateControls(view).OfType<Label>()
+        .Where(label => label.Parent?.Name.StartsWith("AboutPrivacyStatement", StringComparison.Ordinal) == true)
+        .OrderBy(label => label.Parent!.Name, StringComparer.Ordinal)
+        .Select(label => label.Text)
+        .ToArray();
+    Assert(description.Text ==
+               "ClipCord watches the sources you choose, runs every new clip through your Routes, " +
+               "and keeps your connections, history and gallery on this PC." &&
+           privacyCopy.SequenceEqual(expectedPrivacyCopy, StringComparer.Ordinal),
+        "About must use R29's Routing-owned, destination-neutral product and privacy copy.");
     foreach (var control in textControls)
     {
         var allowResponsiveWrap = control.Name == "AboutTaglineLabel";
@@ -6474,6 +7599,45 @@ static void AssertSettingsMinimumViewport(SettingsForm form)
     }
 }
 
+static void AssertRoutingOwnedSettingsMinimumViewport(SettingsForm form)
+{
+    var originalSize = form.Size;
+    try
+    {
+        form.Size = form.MinimumSize;
+        Application.DoEvents();
+        var host = GetSettingsScrollHost(form);
+        var cards = EnumerateControls(form).Single(control => control.Name == "SettingsCards");
+        host.RefreshContentLayout(preservePosition: false);
+        Assert(!EnumerateControls(form).OfType<ScrollableControl>().Any(control => control.AutoScroll) &&
+               host.HasOverflow == (cards.Height > host.ClientSize.Height),
+            $"Routing-owned Settings must use only its branded viewport at MinimumSize: " +
+            $"host={host.ClientSize}, cards={cards.Size}, overflow={host.HasOverflow}.");
+
+        foreach (var targetName in new[]
+                 {
+                     "CompressionTargetPresetButton",
+                     "SettingsCheckUpdatesButton",
+                     "ManagedLocalOnlyModeRow"
+                 })
+        {
+            var target = EnumerateControls(form).Single(control => control.Name == targetName);
+            host.EnsureControlVisible(target);
+            Application.DoEvents();
+            var bounds = host.RectangleToClient(target.RectangleToScreen(target.ClientRectangle));
+            Assert(bounds.Top >= -1 && bounds.Bottom <= host.ClientSize.Height + 1,
+                $"Routing-owned Settings action '{targetName}' must remain reachable at MinimumSize: " +
+                $"target={bounds}, viewport={host.ClientSize}.");
+        }
+    }
+    finally
+    {
+        form.Size = originalSize;
+        Application.DoEvents();
+        GetSettingsScrollHost(form).RefreshContentLayout(preservePosition: false);
+    }
+}
+
 static BrandedScrollHost GetSettingsScrollHost(Control root)
 {
     var hosts = EnumerateControls(root)
@@ -6707,10 +7871,16 @@ static void AssertCriticalTextFits(Form form)
         "Upload behavior",
         "App preferences",
         "Compression target",
+        "Discord compression target",
         "Mode shortcut",
         "Upload new clips to Discord",
         "Local only",
         "Start with Windows",
+        "Clip sources",
+        "Connections",
+        "Recording and camera",
+        "Delivery rules",
+        "Local-only mode",
         "Save changes",
         "Discard",
         "Recent activity",
@@ -9596,6 +10766,7 @@ internal sealed class FakeGlobalHotkeyRegistrar : IGlobalHotkeyRegistrar
 internal sealed class RecordingManualDiscordUploader : IManualDiscordUploader
 {
     public int UploadCount { get; private set; }
+    public string? LastWebhookUrl { get; private set; }
     public DiscordUploadPresentation? LastPresentation { get; private set; }
     public Action? AfterSuccessfulUpload { get; init; }
     public Exception? Failure { get; init; }
@@ -9611,6 +10782,7 @@ internal sealed class RecordingManualDiscordUploader : IManualDiscordUploader
         Action<CompressionProgress>? reportCompression)
     {
         UploadCount++;
+        LastWebhookUrl = webhookUrl;
         LastPresentation = presentation;
         AssertForFake(WebhookValidation.IsDiscordWebhook(webhookUrl),
             "The manual uploader fake received an invalid webhook.");

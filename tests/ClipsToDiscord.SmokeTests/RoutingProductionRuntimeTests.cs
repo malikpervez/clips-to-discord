@@ -11,6 +11,7 @@ internal static class RoutingProductionRuntimeTests
     internal static async Task RunAsync(string root)
     {
         Directory.CreateDirectory(root);
+        await AssertLegacyStateCompatibilityRepairAsync(Path.Combine(root, "state-repair"));
         await AssertIgnoredBaselineReconciliationAsync(Path.Combine(root, "baseline"));
         await AssertActualLegacyPreparationAsync(Path.Combine(root, "preparation"));
         await AssertPreparationAuthorityStatesAsync(Path.Combine(root, "authority-states"));
@@ -19,6 +20,140 @@ internal static class RoutingProductionRuntimeTests
         await AssertStickyBoundaryAndWorkHostAsync(Path.Combine(root, "sticky"));
         await AssertCommitPreflightFailsClosedAsync(Path.Combine(root, "preflight"));
         await AssertDeterministicColdRepeatAsync(Path.Combine(root, "repeat"));
+    }
+
+    private static async Task AssertLegacyStateCompatibilityRepairAsync(string root)
+    {
+        var clips = Directory.CreateDirectory(Path.Combine(root, "current-clips")).FullName;
+        var oldClips = Directory.CreateDirectory(Path.Combine(root, "old-clips")).FullName;
+        var currentClip = Path.Combine(clips, "current.mp4");
+        var oldClip = Path.Combine(oldClips, "old.mp4");
+        await File.WriteAllBytesAsync(currentClip, [1, 3, 3, 7]);
+        await File.WriteAllBytesAsync(oldClip, [2, 4, 6, 8]);
+        File.SetLastWriteTimeUtc(currentClip, Now.UtcDateTime);
+        File.SetLastWriteTimeUtc(oldClip, Now.AddMinutes(-1).UtcDateTime);
+
+        var store = Store(root);
+        var uploadedHash = new string('a', 64);
+        var localOnlyHash = new string('b', 64);
+        var state = State(clips);
+        state.KnownContentHashes.UnionWith([uploadedHash, localOnlyHash]);
+        state.UploadedContentHashes.Add(uploadedHash);
+        state.LocalOnlyContentHashes.UnionWith([uploadedHash, localOnlyHash]);
+        state.IgnoredFileKeys.UnionWith([
+            WatchStateStore.FileKey(new FileInfo(currentClip)),
+            WatchStateStore.FileKey(new FileInfo(oldClip))
+        ]);
+        store.Save(state);
+        Assert(store.ProbeForRoutingActivation() is
+               { Status: WatchStateRoutingProbeStatus.Loaded, IgnoredFileKeys: 2 },
+            "The strict probe must accept legitimate overlapping legacy history so the quiesced migration can canonicalize it.");
+
+        var reconciled = await new LegacyIgnoredBaselineReconciler(store).ReconcileAsync(
+            Settings(clips, upload: false),
+            legacyWorkerQuiesced: true);
+        var currentHash = await ContentIdentity.ComputeSha256Async(
+            currentClip,
+            CancellationToken.None);
+        Assert(reconciled.Loaded && reconciled.IgnoredFileKeys == 0,
+            "Compatibility repair must leave a strictly loaded, drained watcher baseline.");
+        Assert(reconciled.State!.KnownContentHashes.Contains(
+                currentHash, StringComparer.OrdinalIgnoreCase),
+            "Compatibility repair must retain the exact current baseline as a known-content exclusion.");
+        Assert(reconciled.State.UploadedContentHashes.Contains(uploadedHash),
+            "Compatibility repair must retain the stronger Uploaded duplicate exclusion.");
+        Assert(!reconciled.State.LocalOnlyContentHashes.Contains(uploadedHash),
+            "Compatibility repair must remove the weaker overlapping Local-only classification.");
+        Assert(reconciled.State.LocalOnlyContentHashes.Contains(localOnlyHash) &&
+               File.Exists(oldClip),
+            "Compatibility repair must preserve unambiguous Local-only history and never access or remove an out-of-scope clip.");
+        var stableBytes = await File.ReadAllBytesAsync(store.StatePath);
+        _ = await store.LoadOrInitializeAsync(
+            clips,
+            _ => { },
+            CancellationToken.None,
+            ClipCaptureSource.SteelSeriesGg);
+        Assert(stableBytes.SequenceEqual(await File.ReadAllBytesAsync(store.StatePath)),
+            "A repaired legacy state must be byte-idempotent on the next startup.");
+
+        var sameFolderRoot = Path.Combine(root, "same-folder-precedence");
+        var sameFolderClips = Directory.CreateDirectory(
+            Path.Combine(sameFolderRoot, "clips")).FullName;
+        var sameFolderStore = Store(sameFolderRoot);
+        var overlappingHash = new string('c', 64);
+        var sameFolderState = State(sameFolderClips);
+        sameFolderState.KnownContentHashes.Add(overlappingHash);
+        sameFolderState.UploadedContentHashes.Add(overlappingHash);
+        sameFolderState.LocalOnlyContentHashes.Add(overlappingHash);
+        sameFolderStore.Save(sameFolderState);
+        var sameFolderLoaded = await sameFolderStore.LoadOrInitializeAsync(
+            sameFolderClips,
+            _ => { },
+            CancellationToken.None,
+            ClipCaptureSource.SteelSeriesGg);
+        var sameFolderRaw = sameFolderStore.ProbeForRoutingActivation();
+        Assert(sameFolderLoaded.UploadedContentHashes.Contains(overlappingHash) &&
+               !sameFolderLoaded.LocalOnlyContentHashes.Contains(overlappingHash) &&
+               sameFolderRaw is
+               {
+                   Status: WatchStateRoutingProbeStatus.Loaded,
+                   State: not null
+               } &&
+               sameFolderRaw.State.UploadedContentHashes.Contains(overlappingHash) &&
+               !sameFolderRaw.State.LocalOnlyContentHashes.Contains(overlappingHash),
+            "A same-folder/source watcher load must persist Uploaded precedence without relying on the later Routing reconciler.");
+
+        var folderSwitchRoot = Path.Combine(root, "folder-only-switch");
+        var oldFolder = Directory.CreateDirectory(
+            Path.Combine(folderSwitchRoot, "old-clips")).FullName;
+        var newFolder = Directory.CreateDirectory(
+            Path.Combine(folderSwitchRoot, "new-clips")).FullName;
+        var oldFolderClip = Path.Combine(oldFolder, "old.mp4");
+        var newFolderClip = Path.Combine(newFolder, "new.mp4");
+        await File.WriteAllBytesAsync(oldFolderClip, [9, 8, 7]);
+        await File.WriteAllBytesAsync(newFolderClip, [6, 5, 4]);
+        var folderSwitchStore = Store(folderSwitchRoot);
+        var folderSwitchState = State(oldFolder);
+        folderSwitchState.IgnoredFileKeys.Add(
+            WatchStateStore.FileKey(new FileInfo(oldFolderClip)));
+        folderSwitchStore.Save(folderSwitchState);
+        var folderSwitched = await folderSwitchStore.LoadOrInitializeAsync(
+            newFolder,
+            _ => { },
+            CancellationToken.None,
+            ClipCaptureSource.SteelSeriesGg);
+        Assert(folderSwitched.ClipsFolder.Equals(newFolder, StringComparison.OrdinalIgnoreCase) &&
+               folderSwitched.CaptureSource == ClipCaptureSource.SteelSeriesGg &&
+               folderSwitched.IgnoredFileKeys.SetEquals([
+                   WatchStateStore.FileKey(new FileInfo(newFolderClip))
+               ]),
+            "Changing only the clips folder must replace exact ignored keys with the new folder baseline instead of retaining stale paths.");
+
+        var sourceSwitchRoot = Path.Combine(root, "source-only-switch");
+        var sharedSourceFolder = Directory.CreateDirectory(
+            Path.Combine(sourceSwitchRoot, "clips")).FullName;
+        var gameFolder = Directory.CreateDirectory(
+            Path.Combine(sharedSourceFolder, "Battlefield 6")).FullName;
+        var steelSeriesClip = Path.Combine(sharedSourceFolder, "steelseries.mp4");
+        var nvidiaClip = Path.Combine(gameFolder, "nvidia.mp4");
+        await File.WriteAllBytesAsync(steelSeriesClip, [5, 4, 3]);
+        await File.WriteAllBytesAsync(nvidiaClip, [2, 1, 0]);
+        var sourceSwitchStore = Store(sourceSwitchRoot);
+        var sourceSwitchState = State(sharedSourceFolder);
+        sourceSwitchState.IgnoredFileKeys.Add(
+            WatchStateStore.FileKey(new FileInfo(steelSeriesClip)));
+        sourceSwitchStore.Save(sourceSwitchState);
+        var sourceSwitched = await sourceSwitchStore.LoadOrInitializeAsync(
+            sharedSourceFolder,
+            _ => { },
+            CancellationToken.None,
+            ClipCaptureSource.Nvidia);
+        Assert(sourceSwitched.ClipsFolder.Equals(sharedSourceFolder, StringComparison.OrdinalIgnoreCase) &&
+               sourceSwitched.CaptureSource == ClipCaptureSource.Nvidia &&
+               sourceSwitched.IgnoredFileKeys.SetEquals([
+                   WatchStateStore.FileKey(new FileInfo(nvidiaClip))
+               ]),
+            "Changing only the capture source must replace exact ignored keys with the new source geometry instead of retaining stale paths.");
     }
 
     private static async Task AssertIgnoredBaselineReconciliationAsync(string root)
@@ -90,12 +225,17 @@ internal static class RoutingProductionRuntimeTests
         state = State(clips);
         state.IgnoredFileKeys.Add(WatchStateStore.FileKey(new FileInfo(outside)));
         store.Save(state);
-        var unsafeBytes = await File.ReadAllBytesAsync(store.StatePath);
-        await ExpectAsync<InvalidDataException>(() =>
-            new LegacyIgnoredBaselineReconciler(store).ReconcileAsync(
-                Settings(clips, upload: false), legacyWorkerQuiesced: true));
-        Assert(unsafeBytes.SequenceEqual(await File.ReadAllBytesAsync(store.StatePath)),
-            "Out-of-root ignored evidence must fail closed without rewriting watcher state.");
+        var outsideBytes = await File.ReadAllBytesAsync(outside);
+        var unusedAdapter = new FailIfUsedSourceAdapter();
+        result = await new LegacyIgnoredBaselineReconciler(
+                store,
+                _ => unusedAdapter)
+            .ReconcileAsync(Settings(clips, upload: false), legacyWorkerQuiesced: true);
+        Assert(result.Loaded && result.IgnoredFileKeys == 0 &&
+               result.State!.KnownContentHashes.Count == 0 &&
+               unusedAdapter.OpenCalls == 0 &&
+               outsideBytes.SequenceEqual(await File.ReadAllBytesAsync(outside)),
+            "A well-formed ignored key outside the active source must be drained without opening or changing the external file.");
 
         var malformedRoot = Path.Combine(root, "malformed");
         clips = Path.Combine(malformedRoot, "clips");
@@ -203,6 +343,42 @@ internal static class RoutingProductionRuntimeTests
                !durableRoutingText.Contains(discord.Clips, StringComparison.OrdinalIgnoreCase) &&
                !durableRoutingText.Contains(Environment.UserName, StringComparison.OrdinalIgnoreCase),
             "Migration persistence must contain neither webhook material nor watched/user paths.");
+
+        var liveShape = Fixture(Path.Combine(root, "live-shaped-history"), upload: true);
+        var currentClip = Path.Combine(liveShape.Clips, "current.mp4");
+        var staleRoot = Directory.CreateDirectory(
+            Path.Combine(liveShape.Root, "previous-clips-root")).FullName;
+        var staleClip = Path.Combine(staleRoot, "stale.mp4");
+        await File.WriteAllBytesAsync(currentClip, [4, 2, 4, 2]);
+        await File.WriteAllBytesAsync(staleClip, [8, 6, 8, 6]);
+        var overlap = new string('d', 64);
+        var liveState = State(liveShape.Clips);
+        liveState.KnownContentHashes.Add(overlap);
+        liveState.UploadedContentHashes.Add(overlap);
+        liveState.LocalOnlyContentHashes.Add(overlap);
+        liveState.IgnoredFileKeys.UnionWith([
+            WatchStateStore.FileKey(new FileInfo(currentClip)),
+            WatchStateStore.FileKey(new FileInfo(staleClip))
+        ]);
+        liveShape.WatchState.Save(liveState);
+        var liveMarker = await liveShape.Preparer.PrepareAsync(CancellationToken.None);
+        var repairedState = liveShape.WatchState.ProbeForRoutingActivation();
+        Assert(liveMarker.Phase == LegacyRoutingMigrationMarkerPhase.Committed &&
+               liveMarker.ContentHashExclusions.Uploaded.Contains(
+                   overlap, StringComparer.OrdinalIgnoreCase) &&
+               !liveMarker.ContentHashExclusions.LocalOnly.Contains(
+                   overlap, StringComparer.OrdinalIgnoreCase) &&
+               repairedState is
+               {
+                   Status: WatchStateRoutingProbeStatus.Loaded,
+                   IgnoredFileKeys: 0,
+                   State: not null
+               } &&
+               !repairedState.State.UploadedContentHashes.Intersect(
+                   repairedState.State.LocalOnlyContentHashes,
+                   StringComparer.OrdinalIgnoreCase).Any() &&
+               File.Exists(staleClip),
+            "Production activation must canonicalize live-shaped legacy history even when the background watcher never loaded it.");
     }
 
     private static async Task AssertPreparationAuthorityStatesAsync(string root)
@@ -636,6 +812,8 @@ internal static class RoutingProductionRuntimeTests
     {
         public ClipCaptureSource Source => ClipCaptureSource.SteelSeriesGg;
 
+        public string InspectRootIdentity(string clipsRoot) => new string('d', 64);
+
         public IReadOnlyList<string> EnumerateCandidates(
             string clipsRoot,
             CancellationToken cancellationToken = default) => [];
@@ -664,6 +842,41 @@ internal static class RoutingProductionRuntimeTests
             RoutingWatchedSourceFile prior,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class FailIfUsedSourceAdapter : IRoutingWatchedSourceAdapter
+    {
+        internal int OpenCalls { get; private set; }
+        public ClipCaptureSource Source => ClipCaptureSource.SteelSeriesGg;
+
+        public string InspectRootIdentity(string clipsRoot) =>
+            throw new InvalidOperationException(
+                "Out-of-scope evidence must not inspect the source root.");
+
+        public IReadOnlyList<string> EnumerateCandidates(
+            string clipsRoot,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Out-of-scope evidence must not enumerate files.");
+
+        public Task<RoutingWatchedSourceOccurrence> InspectOccurrenceAsync(
+            string clipsRoot,
+            string candidatePath,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Out-of-scope evidence must not inspect files.");
+
+        public Task<RoutingWatchedSourceFile> OpenAndFingerprintAsync(
+            string clipsRoot,
+            string candidatePath,
+            CancellationToken cancellationToken = default)
+        {
+            OpenCalls++;
+            throw new InvalidOperationException("Out-of-scope evidence must not open files.");
+        }
+
+        public Task<RoutingWatchedSourceFile> RevalidateAsync(
+            RoutingWatchedSourceFile prior,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Out-of-scope evidence must not revalidate files.");
     }
 
     private sealed class TestWebhookProtector : IDiscordWebhookProtector

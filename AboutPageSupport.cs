@@ -24,6 +24,76 @@ internal enum AboutInstallationType
     Portable
 }
 
+/// <summary>
+/// A deliberately small, privacy-safe projection of the routing runtime for Home and About.
+/// It cannot carry a path, clip name, connection name, webhook, or arbitrary status text.
+/// </summary>
+internal enum RoutingUiState
+{
+    Unavailable,
+    Inactive,
+    Active,
+    NeedsAttention
+}
+
+[Flags]
+internal enum RoutingUiDestinations
+{
+    None = 0,
+    Library = 1 << 0,
+    Discord = 1 << 1,
+    YouTube = 1 << 2,
+    TikTok = 1 << 3
+}
+
+internal readonly record struct RoutingUiPresentationSnapshot(
+    RoutingUiState State,
+    int ActiveRouteCount,
+    int WatchingSourceCount,
+    bool LocalOnlyModeEnabled,
+    int SpecificRouteCount = 0,
+    int FallbackRouteCount = 0,
+    int PausedRouteCount = 0,
+    int DestinationCount = 0,
+    RoutingUiDestinations Destinations = RoutingUiDestinations.None)
+{
+    private const int MaximumDisplayCount = 9999;
+    private const RoutingUiDestinations SupportedDestinations =
+        RoutingUiDestinations.Library |
+        RoutingUiDestinations.Discord |
+        RoutingUiDestinations.YouTube |
+        RoutingUiDestinations.TikTok;
+
+    internal RoutingUiPresentationSnapshot Normalize() => new(
+        Enum.IsDefined(State) ? State : RoutingUiState.Unavailable,
+        Math.Clamp(ActiveRouteCount, 0, MaximumDisplayCount),
+        Math.Clamp(WatchingSourceCount, 0, MaximumDisplayCount),
+        LocalOnlyModeEnabled,
+        Math.Clamp(SpecificRouteCount, 0, MaximumDisplayCount),
+        Math.Clamp(FallbackRouteCount, 0, MaximumDisplayCount),
+        Math.Clamp(PausedRouteCount, 0, MaximumDisplayCount),
+        Math.Clamp(DestinationCount, 0, MaximumDisplayCount),
+        Destinations & SupportedDestinations);
+
+    internal static RoutingUiPresentationSnapshot FromLegacySettings(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var configured = !string.IsNullOrWhiteSpace(settings.ClipsFolder);
+        return new RoutingUiPresentationSnapshot(
+            configured ? RoutingUiState.Active : RoutingUiState.Inactive,
+            configured ? 1 : 0,
+            configured ? 1 : 0,
+            !settings.UploadToDiscord,
+            SpecificRouteCount: 0,
+            FallbackRouteCount: configured ? 1 : 0,
+            PausedRouteCount: !settings.UploadToDiscord && configured ? 1 : 0,
+            DestinationCount: configured ? 1 : 0,
+            Destinations: settings.UploadToDiscord
+                ? RoutingUiDestinations.Discord
+                : RoutingUiDestinations.Library);
+    }
+}
+
 internal enum AboutLink
 {
     Repository,
@@ -81,6 +151,12 @@ internal sealed record AboutStatusSnapshot
         string watcherDetail,
         string routing,
         string routingDetail,
+        RoutingUiState routingState,
+        int activeRouteCount,
+        int watchingSourceCount,
+        bool localOnlyModeEnabled,
+        string localOnlyMode,
+        string localOnlyModeDetail,
         string startup,
         string startupDetail,
         string installation,
@@ -98,6 +174,12 @@ internal sealed record AboutStatusSnapshot
         WatcherDetail = watcherDetail;
         Routing = routing;
         RoutingDetail = routingDetail;
+        RoutingState = routingState;
+        ActiveRouteCount = activeRouteCount;
+        WatchingSourceCount = watchingSourceCount;
+        LocalOnlyModeEnabled = localOnlyModeEnabled;
+        LocalOnlyMode = localOnlyMode;
+        LocalOnlyModeDetail = localOnlyModeDetail;
         Startup = startup;
         StartupDetail = startupDetail;
         Installation = installation;
@@ -116,6 +198,12 @@ internal sealed record AboutStatusSnapshot
     internal string WatcherDetail { get; }
     internal string Routing { get; }
     internal string RoutingDetail { get; }
+    internal RoutingUiState RoutingState { get; }
+    internal int ActiveRouteCount { get; }
+    internal int WatchingSourceCount { get; }
+    internal bool LocalOnlyModeEnabled { get; }
+    internal string LocalOnlyMode { get; }
+    internal string LocalOnlyModeDetail { get; }
     internal string Startup { get; }
     internal string StartupDetail { get; }
     internal string Installation { get; }
@@ -130,7 +218,8 @@ internal sealed record AboutStatusSnapshot
     internal static AboutStatusSnapshot Create(
         AppSettings settings,
         string? rawWatcherStatus,
-        AboutRuntimeFacts facts)
+        AboutRuntimeFacts facts,
+        RoutingUiPresentationSnapshot? routingPresentation = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(facts);
@@ -142,14 +231,34 @@ internal sealed record AboutStatusSnapshot
         var installationType = AboutPageSupport.ClassifyInstallation(
             facts.ExecutablePath,
             facts.LocalAppDataRoot);
+        var routing = (routingPresentation ??
+                       RoutingUiPresentationSnapshot.FromLegacySettings(settings)).Normalize();
+        var watcherDetail = watcher.State == AboutWatcherState.Watching && routing.WatchingSourceCount > 0
+            ? $"{AboutPageSupport.FormatCount(routing.WatchingSourceCount, "source")} · Library always on"
+            : watcher.Detail;
+        var routingDetail = routing.State switch
+        {
+            RoutingUiState.Active => $"Active · {AboutPageSupport.FormatCount(routing.ActiveRouteCount, "route")}",
+            RoutingUiState.Inactive => "Inactive",
+            RoutingUiState.NeedsAttention => "Needs attention",
+            _ => "Status unavailable"
+        };
 
         return new AboutStatusSnapshot(
             AboutPageSupport.FormatApplicationVersion(facts.ApplicationVersion),
             watcher.State,
             watcher.Label,
-            watcher.Detail,
-            settings.UploadToDiscord ? "Discord uploads" : "Local only",
-            settings.UploadToDiscord ? "Automatic routing" : "Discord uploads are disabled",
+            watcherDetail,
+            "Routing",
+            routingDetail,
+            routing.State,
+            routing.ActiveRouteCount,
+            routing.WatchingSourceCount,
+            routing.LocalOnlyModeEnabled,
+            "Local-only mode",
+            routing.LocalOnlyModeEnabled
+                ? "On · future clips stay on this PC"
+                : "Off · future clips follow active Routes",
             "Start with Windows",
             settings.StartWithWindows ? "Enabled" : "Disabled",
             installationType == AboutInstallationType.Installed ? "Installed copy" : "Portable copy",
@@ -170,6 +279,9 @@ internal static class AboutPageSupport
     private const string RepositoryRoot = "https://github.com/malikpervez/clips-to-discord";
     private const string RepositoryPath = "/malikpervez/clips-to-discord";
 
+    internal static string FormatCount(int count, string singular) =>
+        $"{Math.Max(0, count):N0} {(count == 1 ? singular : singular + "s")}";
+
     internal static AboutWatcherPresentation NormalizeWatcherStatus(
         string? rawStatus,
         bool discordRunning)
@@ -182,6 +294,7 @@ internal static class AboutPageSupport
         if (StartsWithAny(
                 status,
                 "Watcher error",
+                "Routes need attention",
                 "Upload needs attention",
                 "Upload failed",
                 "Local-only save failed"))
@@ -210,7 +323,8 @@ internal static class AboutPageSupport
                     : discordRunning ? "Clip processing is paused" : "Discord is closed");
         }
 
-        if (status.StartsWith("Discord open — local-only mode", StringComparison.OrdinalIgnoreCase) ||
+        if (status.StartsWith("Local-only mode on · future clips stay here", StringComparison.OrdinalIgnoreCase) ||
+            status.StartsWith("Discord open — local-only mode", StringComparison.OrdinalIgnoreCase) ||
             status.StartsWith("Saved locally — local-only mode", StringComparison.OrdinalIgnoreCase) ||
             (status.StartsWith("Saving ", StringComparison.OrdinalIgnoreCase) &&
              status.EndsWith(" locally", StringComparison.OrdinalIgnoreCase)))
@@ -248,12 +362,26 @@ internal static class AboutPageSupport
                 "Preparing a completed clip");
         }
 
-        if (StartsWithAny(status, "Applying settings", "Starting", "Restarting"))
+        if (StartsWithAny(
+                status,
+                "Applying settings",
+                "Routes activating",
+                "Starting Routes",
+                "Starting",
+                "Restarting"))
         {
             return Presentation(
                 AboutWatcherState.Starting,
                 "Starting",
                 "Starting clip monitoring");
+        }
+
+        if (status.StartsWith("Routes active", StringComparison.OrdinalIgnoreCase))
+        {
+            return Presentation(
+                AboutWatcherState.Watching,
+                "Watching",
+                "Watching for new clips");
         }
 
         if (status.StartsWith("Discord open — watching for clips", StringComparison.OrdinalIgnoreCase) ||
@@ -322,7 +450,10 @@ internal static class AboutPageSupport
             $"Runtime: {snapshot.Runtime}",
             $"Install type: {snapshot.Installation}",
             $"Watcher: {snapshot.Watcher}",
-            $"Route: {snapshot.Routing}",
+            $"Watching sources: {snapshot.WatchingSourceCount}",
+            $"Routing: {snapshot.RoutingState}",
+            $"Active routes: {snapshot.ActiveRouteCount}",
+            $"Local-only mode: {(snapshot.LocalOnlyModeEnabled ? "On" : "Off")}",
             $"Discord: {snapshot.Discord}",
             $"Start with Windows: {snapshot.StartupDetail}",
             $"FFmpeg: {snapshot.Ffmpeg}",

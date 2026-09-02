@@ -19,7 +19,83 @@ internal static class DiscordConnectionCatalogTests
             Path.Combine(root, "local-only"));
         await AssertUnsafeCutoverLeavesLegacyAuthoritativeAsync(Path.Combine(root, "blocked"));
         await AssertCorruptCatalogFailsClosedAsync(Path.Combine(root, "corrupt"));
+        await AssertManualGalleryUsesCatalogConnectionAsync(Path.Combine(root, "manual-gallery"));
         AssertDormantLegacyWebhookIsNotStaged(root);
+    }
+
+    private static async Task AssertManualGalleryUsesCatalogConnectionAsync(string root)
+    {
+        Directory.CreateDirectory(root);
+        var fixture = Fixture(root, new Guid("d10c0a11-1111-2222-3333-444455556666"));
+        var added = await fixture.Catalog.AddAsync("Manual destination", Webhook, Now);
+        Assert(added is
+               {
+                   Status: DiscordConnectionMutationStatus.Added,
+                   Connection.Health: DiscordConnectionHealth.Ready
+               },
+            "The manual Gallery fixture must begin with one ready catalog destination.");
+
+        var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var noLegacyWebhook = Settings(clips, string.Empty) with { UploadToDiscord = false };
+        var staleLegacyWebhook = noLegacyWebhook with
+        {
+            WebhookUrl =
+                "https://discord.com/api/webhooks/987654321098765432/stale-legacy-token"
+        };
+        var authority = new RoutingExecutionAuthorityInspection(
+            RoutingExecutionAuthorityInspectionState.RoutingRequired,
+            RoutingDocumentLoadStatus.Loaded,
+            Document: null);
+        var catalogOnly = TrayManualDiscordConnection.Resolve(
+            authority, noLegacyWebhook, fixture.Catalog);
+        var staleLegacy = TrayManualDiscordConnection.Resolve(
+            authority, staleLegacyWebhook, fixture.Catalog);
+        Assert(catalogOnly.WebhookUrl == Webhook && staleLegacy.WebhookUrl == Webhook &&
+               catalogOnly.WebhookUrl != staleLegacyWebhook.WebhookUrl,
+            "Routing-owned manual sends must resolve a ready catalog secret when the legacy webhook is empty or stale.");
+
+        var localGame = Directory.CreateDirectory(Path.Combine(
+            UploadedFolder.GetOrCreateLocalOnly(clips),
+            "Manual Catalog Game")).FullName;
+        var original = Path.Combine(localGame, "source.mp4");
+        await File.WriteAllBytesAsync(original, [1, 2, 3, 4]);
+        var operationId = Guid.NewGuid();
+        var stageDirectory = Directory.CreateDirectory(Path.Combine(
+            clips, ".clipcord-editing", operationId.ToString("N"))).FullName;
+        var edited = Path.Combine(stageDirectory, "edited.mp4");
+        await File.WriteAllBytesAsync(edited, [5, 6, 7, 8, 9]);
+        var prepared = new PreparedClipEdit(
+            operationId,
+            clips,
+            original,
+            await ContentIdentity.ComputeSha256Async(original, CancellationToken.None),
+            edited,
+            await ContentIdentity.ComputeSha256Async(edited, CancellationToken.None),
+            "edited.mp4",
+            "Manual Catalog Game",
+            null,
+            KeepOriginal: true,
+            UsesOriginalAsArtifact: false,
+            OutputBytes: new FileInfo(edited).Length);
+        var uploader = new RecordingManualDiscordUploader();
+        var stateRoot = Directory.CreateDirectory(Path.Combine(root, "state")).FullName;
+        var service = new EditedClipUploadService(
+            new WatchStateStore(
+                Path.Combine(stateRoot, "state.json"),
+                Path.Combine(stateRoot, ".safe-baseline-required")),
+            () => uploader);
+
+        var result = await service.UploadAsync(
+            noLegacyWebhook,
+            catalogOnly,
+            prepared,
+            activityHistory: null,
+            progress: null,
+            CancellationToken.None);
+
+        Assert(uploader.UploadCount == 1 && uploader.LastWebhookUrl == Webhook &&
+               File.Exists(result.ArchivedPath) && File.Exists(original),
+            "A catalog-only manual Gallery send must post through the resolved connection and preserve Keep original behavior without a legacy webhook.");
     }
 
     private static void AssertDormantLegacyWebhookIsNotStaged(string root)

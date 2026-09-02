@@ -18,7 +18,8 @@ internal static class CaptureJournalCaptureCommit
         int width,
         int height,
         CaptureSettings settings,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        RoutingLocalOnlyAdmissionSnapshot? localOnlyOverride = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         var normalized = CaptureSettings.Normalize(settings);
@@ -27,6 +28,9 @@ internal static class CaptureJournalCaptureCommit
         var requestedRenditions = cameraRequested
             ? GetRequestedRenditions(normalized)
             : [];
+        var admission = localOnlyOverride ?? new RoutingLocalOnlyOverrideState()
+            .CaptureAdmissionSnapshot(cancellationToken);
+        RoutingLocalOnlyAdmissionSnapshot.Validate(admission);
         var intent = await CaptureJournalPromotionIntentStore.PrepareOriginalAsync(
                 libraryRoot,
                 stagedPath,
@@ -39,7 +43,8 @@ internal static class CaptureJournalCaptureCommit
                 height,
                 cameraRequested,
                 requestedRenditions,
-                cancellationToken)
+                cancellationToken,
+                localOnlyOverride: admission)
             .ConfigureAwait(false);
         var promoted = await CaptureJournalPromotionIntentStore.PromoteOriginalAsync(
                 libraryRoot,

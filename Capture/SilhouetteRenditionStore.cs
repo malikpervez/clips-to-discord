@@ -303,6 +303,8 @@ internal static class SilhouetteRenditionModel
                 output.MatteGeneration == document.Matte.AttemptGeneration,
             "The rendition is not bound to the current shared matte.");
         var finalArtifact = NormalizeFingerprint(verifiedFinalArtifact, "rendition artifact");
+        // Deliberate second check: the artifact store verifies promotion first, while the
+        // state model independently refuses to publish Ready against stale commit evidence.
         Require(FingerprintsEqual(output.ExpectedTemporaryArtifact, finalArtifact),
             "The committed rendition does not match the expected temporary artifact.");
         var generation = NextGeneration(document);

@@ -339,7 +339,7 @@ internal sealed class EditedClipUploadService(
     private readonly Func<IManualDiscordUploader> _uploaderFactory = uploaderFactory ?? (() => new ManualDiscordUploader());
     private readonly EditedClipDispositionProcessor _dispositionProcessor = dispositionProcessor ?? new EditedClipDispositionProcessor();
 
-    internal async Task<ManualClipEditResult> UploadAsync(
+    internal Task<ManualClipEditResult> UploadAsync(
         AppSettings settings,
         PreparedClipEdit prepared,
         ActivityHistoryStore? activityHistory,
@@ -347,12 +347,31 @@ internal sealed class EditedClipUploadService(
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        return UploadAsync(
+            settings,
+            new DiscordRoutingConnection(settings.WebhookUrl, settings),
+            prepared,
+            activityHistory,
+            progress,
+            cancellationToken);
+    }
+
+    internal async Task<ManualClipEditResult> UploadAsync(
+        AppSettings settings,
+        DiscordRoutingConnection connection,
+        PreparedClipEdit prepared,
+        ActivityHistoryStore? activityHistory,
+        IProgress<ManualClipEditProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(prepared);
-        if (!WebhookValidation.IsDiscordWebhook(settings.WebhookUrl))
+        if (!WebhookValidation.IsDiscordWebhook(connection.WebhookUrl))
         {
             ClipEditProcessor.CleanupPreparedArtifact(prepared);
             throw new InvalidOperationException(
-                "Add a valid Discord webhook in Settings before uploading a Local-only clip.");
+                "Connect a ready Discord destination before uploading a Local-only clip.");
         }
         if (!Path.GetFullPath(settings.ClipsFolder)
                 .Equals(Path.GetFullPath(prepared.ClipsFolder), StringComparison.OrdinalIgnoreCase))
@@ -454,14 +473,14 @@ internal sealed class EditedClipUploadService(
             // That avoids an ambiguous accepted-but-locally-cancelled result without
             // making FFmpeg work non-cancellable.
             await uploader.UploadAsync(
-                settings.WebhookUrl,
+                connection.WebhookUrl,
                 prepared.EditedPath,
                 new DiscordUploadPresentation(
                     prepared.OutputFileName,
                     prepared.GameName,
                     prepared.DiscordNote),
-                settings.CompressionTargetMb,
-                settings.UploaderName,
+                connection.CompressionTargetMb,
+                connection.UploaderName,
                 cancellationToken,
                 compression =>
                 {
@@ -494,6 +513,7 @@ internal sealed class EditedClipUploadService(
             // The recovery record is flushed before any archive move or original cleanup.
             state.KnownContentHashes.Add(prepared.EditedContentHash);
             state.UploadedContentHashes.Add(prepared.EditedContentHash);
+            state.LocalOnlyContentHashes.Remove(prepared.EditedContentHash);
             state.PendingEditedUploads.RemoveAll(item => item.Id == pending.Id);
             state.PendingEditedUploads.Add(pending);
             _stateStore.Save(state);

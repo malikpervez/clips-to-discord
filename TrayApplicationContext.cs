@@ -133,6 +133,60 @@ internal static class TrayRoutingExclusiveOperation
 }
 
 /// <summary>
+/// Resolves the destination for the explicit Gallery "Edit &amp; upload" escape. Once Routing
+/// owns delivery, the legacy webhook in AppSettings is no longer authoritative; select the first
+/// ready catalog connection in its durable order instead. Local-only mode deliberately does not
+/// participate here because this operation is an explicit user-requested send.
+/// </summary>
+internal static class TrayManualDiscordConnection
+{
+    internal static DiscordRoutingConnection Resolve(
+        RoutingExecutionAuthorityInspection authority,
+        AppSettings settings,
+        DiscordConnectionCatalog catalog,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(catalog);
+        TrayRoutingExclusiveOperation.RequireManualUploadAllowed(authority);
+
+        if (authority.LegacyPermitted)
+        {
+            if (!WebhookValidation.IsDiscordWebhook(settings.WebhookUrl))
+            {
+                throw new InvalidOperationException(
+                    "Add a valid Discord webhook in Settings before uploading a Local-only clip.");
+            }
+            return new DiscordRoutingConnection(settings.WebhookUrl.Trim(), settings);
+        }
+
+        var snapshot = catalog.Inspect(cancellationToken);
+        if (snapshot.IsUsable)
+        {
+            foreach (var summary in snapshot.Connections.Where(connection =>
+                         connection.Health == DiscordConnectionHealth.Ready))
+            {
+                var resolved = catalog.ResolveForRouting(
+                    summary.ConnectionId, settings, cancellationToken);
+                if (resolved is
+                    {
+                        Status: DiscordRoutingConnectionResolutionStatus.Resolved,
+                        Connection: not null
+                    })
+                {
+                    SensitiveDataRedactor.RegisterSecret(resolved.Connection.WebhookUrl);
+                    return resolved.Connection;
+                }
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Connect a ready Discord destination in Routes before uploading a Local-only clip.");
+    }
+}
+
+/// <summary>
 /// Extends the durable authority boundary across the short committed-migration recovery window.
 /// The execution-authority file is still missing there, but Lifecycle already holds the Routing
 /// fence, so legacy-only mutations must remain blocked until recovery commits exact authority.
@@ -197,6 +251,64 @@ internal static class TrayRoutingStartupSequence
         var activated = await activateRouting(cancellationToken).ConfigureAwait(false);
         return new(activated, ActivationAttempted: true);
     }
+}
+
+internal static class TrayRoutingRetrySequence
+{
+    internal static async Task<TrayRoutingStartupSequenceResult<T>> RunAsync<T>(
+        Func<CancellationToken, Task> recover,
+        Func<bool> legacyStartRequired,
+        Func<CancellationToken, Task<T>> startLegacy,
+        Func<T, bool> legacyStarted,
+        Func<CancellationToken, Task<T>> activateRouting,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(recover);
+        ArgumentNullException.ThrowIfNull(legacyStartRequired);
+        ArgumentNullException.ThrowIfNull(startLegacy);
+        ArgumentNullException.ThrowIfNull(legacyStarted);
+        ArgumentNullException.ThrowIfNull(activateRouting);
+
+        await recover(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (legacyStartRequired())
+        {
+            var legacy = await startLegacy(cancellationToken).ConfigureAwait(false);
+            if (!legacyStarted(legacy))
+            {
+                return new(legacy, ActivationAttempted: false);
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var activated = await activateRouting(cancellationToken).ConfigureAwait(false);
+        return new(activated, ActivationAttempted: true);
+    }
+}
+
+internal static class TrayRoutesRuntimePresentation
+{
+    internal static RoutesRuntimeViewState Map(
+        bool startupRunning,
+        RoutingApplicationLifecycleState lifecycleState)
+    {
+        if (startupRunning) return RoutesRuntimeViewState.Activating;
+        return lifecycleState switch
+        {
+            RoutingApplicationLifecycleState.RoutingRunning => RoutesRuntimeViewState.Active,
+            RoutingApplicationLifecycleState.LegacyRunning => RoutesRuntimeViewState.LegacyActive,
+            RoutingApplicationLifecycleState.LegacyReady =>
+                RoutesRuntimeViewState.LegacySetupNeeded,
+            RoutingApplicationLifecycleState.RoutingReady or
+                RoutingApplicationLifecycleState.RoutingQuiesced or
+                RoutingApplicationLifecycleState.RoutingRecoveryNeeded =>
+                RoutesRuntimeViewState.RecoveryNeeded,
+            _ => RoutesRuntimeViewState.Blocked
+        };
+    }
+
+    internal static bool IsActivationStatus(string? status) =>
+        status?.StartsWith("Routes activating", StringComparison.OrdinalIgnoreCase) == true;
 }
 
 /// <summary>
@@ -629,6 +741,166 @@ internal enum ModeHotkeyBlockReason
     ReconfigurationInProgress
 }
 
+internal sealed class RoutingLocalOnlyModeViewSource : IRoutingLocalOnlyModeViewSource
+{
+    private readonly RoutingLocalOnlyOverrideState _state;
+    private readonly GlobalHotkeyManager _hotkeys;
+    private readonly Action<RoutingLocalOnlyOverrideInspection, bool> _stateChanged;
+    private readonly SemaphoreSlim _enabledMutation = new(1, 1);
+    private readonly Func<bool, CancellationToken, Task> _beforeEnabledMutation;
+
+    internal RoutingLocalOnlyModeViewSource(
+        RoutingLocalOnlyOverrideState state,
+        GlobalHotkeyManager hotkeys,
+        Action<RoutingLocalOnlyOverrideInspection, bool> stateChanged,
+        Func<bool, CancellationToken, Task>? beforeEnabledMutation = null)
+    {
+        _state = state ?? throw new ArgumentNullException(nameof(state));
+        _hotkeys = hotkeys ?? throw new ArgumentNullException(nameof(hotkeys));
+        _stateChanged = stateChanged ?? throw new ArgumentNullException(nameof(stateChanged));
+        _beforeEnabledMutation = beforeEnabledMutation ??
+            (static (_, _) => Task.CompletedTask);
+    }
+
+    public RoutingLocalOnlyModeViewSnapshot Inspect() => ToView(_state.Inspect());
+
+    public async Task<RoutingLocalOnlyModeViewActionResult> SetEnabledAsync(
+        bool enabled,
+        CancellationToken cancellationToken = default) =>
+        await MutateEnabledAsync(_ => enabled, cancellationToken).ConfigureAwait(false);
+
+    internal async Task<RoutingLocalOnlyModeViewActionResult> ToggleEnabledAsync(
+        CancellationToken cancellationToken = default) =>
+        await MutateEnabledAsync(
+                before => !before.EffectiveEnabled,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    private async Task<RoutingLocalOnlyModeViewActionResult> MutateEnabledAsync(
+        Func<RoutingLocalOnlyOverrideInspection, bool> selectEnabled,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(selectEnabled);
+        await _enabledMutation.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var before = _state.Inspect(cancellationToken);
+            var enabled = selectEnabled(before);
+            await _beforeEnabledMutation(enabled, cancellationToken).ConfigureAwait(false);
+            var updated = await _state.SetEnabledAsync(enabled, cancellationToken)
+                .ConfigureAwait(false);
+            _stateChanged(updated, before.EffectiveEnabled != updated.EffectiveEnabled);
+            return Success(updated);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException or IOException or
+                UnauthorizedAccessException)
+        {
+            Log.Error("ClipCord could not persist the Routing Local-only override.", exception);
+            return Failure(
+                "ClipCord could not save Local-only mode. Existing routing is unchanged.");
+        }
+        finally
+        {
+            _enabledMutation.Release();
+        }
+    }
+
+    public async Task<RoutingLocalOnlyModeViewActionResult> SetHotkeyAsync(
+        string hotkeyDisplayText,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = AppSettings.NormalizeModeToggleHotkey(hotkeyDisplayText);
+        GlobalHotkeyBinding? candidate = null;
+        if (!string.IsNullOrWhiteSpace(normalized))
+        {
+            if (!GlobalHotkeyBinding.TryParse(normalized, out var parsed))
+            {
+                return Failure("Use Ctrl or Alt with a letter, number, or function key.");
+            }
+            candidate = parsed;
+        }
+
+        var previouslyRegistered = _hotkeys.RegisteredBinding;
+        if (!_hotkeys.TrySetBinding(candidate, out var errorCode))
+        {
+            return Failure(
+                errorCode == GlobalHotkeyManager.HotkeyConflictError
+                    ? $"{normalized} is already in use by another app. ClipCord kept " +
+                      $"{previouslyRegistered?.DisplayText ?? "the previous shortcut"}."
+                    : "Windows could not register that shortcut. ClipCord kept the previous shortcut.",
+                hotkeyConflict: errorCode == GlobalHotkeyManager.HotkeyConflictError);
+        }
+
+        try
+        {
+            var updated = await _state.SetHotkeyAsync(normalized, cancellationToken)
+                .ConfigureAwait(false);
+            _stateChanged(updated, false);
+            return Success(updated);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException or IOException or
+                UnauthorizedAccessException or OperationCanceledException)
+        {
+            if (!_hotkeys.TrySetBinding(previouslyRegistered, out var restoreError))
+            {
+                Log.Error(
+                    $"ClipCord could not restore the previous Local-only shortcut after a save failure. Windows error {restoreError}.");
+            }
+            if (exception is not OperationCanceledException)
+            {
+                Log.Error("ClipCord could not persist the Routing Local-only shortcut.", exception);
+            }
+            return Failure("ClipCord kept the previous Local-only mode shortcut.");
+        }
+    }
+
+    public async Task<RoutingLocalOnlyModeViewActionResult> DismissFirstRunNoticeAsync(
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var updated = await _state.DismissFirstRunNoticeAsync(cancellationToken)
+                .ConfigureAwait(false);
+            _stateChanged(updated, false);
+            return Success(updated);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException or IOException or
+                UnauthorizedAccessException)
+        {
+            Log.Error("ClipCord could not dismiss the Local-only shortcut notice.", exception);
+            return Failure("ClipCord could not dismiss this notice yet.");
+        }
+    }
+
+    private RoutingLocalOnlyModeViewActionResult Success(
+        RoutingLocalOnlyOverrideInspection inspection) => new(
+        inspection.LoadedFromDisk,
+        ToView(inspection),
+        inspection.LoadedFromDisk ? null :
+            "Saved Local-only mode needs attention. External delivery remains paused.");
+
+    private RoutingLocalOnlyModeViewActionResult Failure(
+        string error,
+        bool hotkeyConflict = false) => new(
+        false,
+        Inspect(),
+        error,
+        hotkeyConflict);
+
+    private static RoutingLocalOnlyModeViewSnapshot ToView(
+        RoutingLocalOnlyOverrideInspection inspection) => new(
+        IsAvailable: inspection.LoadedFromDisk,
+        inspection.EffectiveEnabled,
+        inspection.EffectiveHotkeyBinding,
+        inspection.Document?.FirstRunNoticeDismissed ?? false,
+        inspection.LoadedFromDisk
+            ? string.Empty
+            : "Saved Local-only mode needs attention. External delivery remains paused.");
+}
+
 internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly SynchronizationContext _uiContext;
@@ -657,6 +929,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly RoutingExecutionAuthorityStore _routingAuthorityStore;
     private readonly LegacyRoutingMigrationMarkerStore _routingMigrationMarkers;
     private readonly RoutingApplicationLifecycle _routingLifecycle;
+    private readonly RoutingLocalOnlyOverrideState _routingLocalOnlyState;
+    private readonly RoutingLocalOnlyModeViewSource _routingLocalOnlyViewSource;
     private RoutingCaptureLibraryPermit? _captureLibraryPermit;
     private RoutingWatchedRootHandle? _captureLibraryRootPin;
     private System.Threading.Timer? _captureLibraryPermitMonitor;
@@ -696,6 +970,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private RoutingActiveWorkSession? _routingSession;
     private Task? _routingSessionObserver;
     private Task? _processingStartupTask;
+    private int _routingRetryInProgress;
     private bool _settingsOpen;
     private bool _automaticUpdateCheckScheduled;
     private bool _updateDialogOpen;
@@ -743,6 +1018,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _globalHotkey.Pressed += ModeToggleHotkeyPressed;
         _globalHotkey.HotkeyPressed += GlobalHotkeyPressed;
         _modeFeedbackOverlay = new ModeFeedbackOverlay();
+        _routingLocalOnlyState = new RoutingLocalOnlyOverrideState();
+        _routingLocalOnlyViewSource = new RoutingLocalOnlyModeViewSource(
+            _routingLocalOnlyState,
+            _globalHotkey,
+            RoutingLocalOnlyStateChanged);
         _routingLifecycle = CreateRoutingApplicationLifecycle();
 
         _captureHostClient = null;
@@ -795,7 +1075,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         _updateTimer.Tick += UpdateTimerTick;
 
-        _statusItem = new ToolStripMenuItem("Starting…") { Enabled = false };
+        _statusItem = new ToolStripMenuItem("Starting…")
+        {
+            Name = "TrayStatusMenuItem",
+            Enabled = true
+        };
         _disableReactionCameraItem = new ToolStripMenuItem("Turn Reaction Camera off")
         {
             Name = "TurnReactionCameraOffMenuItem",
@@ -809,6 +1093,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var openFolderItem = new ToolStripMenuItem("Open clips folder", null, (_, _) => OpenClipsFolder());
         _uploadToDiscordItem = new ToolStripMenuItem("Upload new clips to Discord")
         {
+            Name = "ModeToggleMenuItem",
             CheckOnClick = true,
             Checked = _settings.UploadToDiscord,
             Enabled = _settings.IsValid
@@ -852,6 +1137,26 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         var startupAuthority = InspectOperationalRoutingAuthority();
+        if (!startupAuthority.LegacyPermitted)
+        {
+            try
+            {
+                _ = _routingLocalOnlyState.EnsureMigratedAsync(
+                        _settings.UploadToDiscord,
+                        _settings.ModeToggleHotkey,
+                        _lifetimeCancellation.Token)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            catch (Exception exception) when (
+                exception is InvalidDataException or InvalidOperationException or IOException or
+                    UnauthorizedAccessException)
+            {
+                Log.Error(
+                    "ClipCord could not initialize the Routing Local-only override; external delivery remains fail-safe paused.",
+                    exception);
+            }
+        }
 
         if (_settings.IsValid)
         {
@@ -860,7 +1165,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 Log.Error($"Could not register the global mode shortcut. Windows error {hotkeyError}.");
                 _uiContext.Post(_ => ShowHotkeyNotification(
                     "Shortcut unavailable",
-                    $"{AppSettings.NormalizeModeToggleHotkey(_settings.ModeToggleHotkey)} is already in use. Choose another shortcut in Settings.",
+                    $"{GetEffectiveModeToggleHotkey(_settings)} is already in use. Choose another shortcut in Routes.",
                     ToolTipIcon.Warning), null);
             }
             UpdateLegacyModeControl();
@@ -987,8 +1292,25 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (result.State == RoutingApplicationLifecycleState.RoutingRunning)
         {
-            SetStatus("Routes active — watching for new clips");
-            _uiContext.Post(_ => UpdateLegacyModeControl(), null);
+            var localOnly = _routingLocalOnlyState.Inspect();
+            SetStatus(localOnly.EffectiveEnabled
+                ? "Local-only mode on · future clips stay here"
+                : "Routes active — watching for new clips");
+            _uiContext.Post(_ =>
+            {
+                if (!TryApplyModeToggleHotkey(
+                        localOnly.EffectiveHotkeyBinding,
+                        out var hotkeyError))
+                {
+                    Log.Error(
+                        $"Could not register the Routing Local-only shortcut. Windows error {hotkeyError}.");
+                    ShowHotkeyNotification(
+                        "Shortcut unavailable",
+                        $"{localOnly.EffectiveHotkeyBinding} is already in use. Choose another shortcut in Routes.",
+                        ToolTipIcon.Warning);
+                }
+                UpdateLegacyModeControl();
+            }, null);
             return;
         }
         if (result.State == RoutingApplicationLifecycleState.LegacyRunning)
@@ -1029,7 +1351,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             routingOwnership,
             featureGate,
             captureLibraryPermit: RequireCaptureLibraryPermit(
-                "starting the Routing work session"));
+                "starting the Routing work session"),
+            activityHistory: _activityHistory);
         if (Interlocked.CompareExchange(ref _routingSession, session, null) is not null)
         {
             await session.DisposeAsync().ConfigureAwait(false);
@@ -1124,15 +1447,236 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }, null);
     }
 
-    private void ReportRoutingActivationDeferred(Exception exception)
+    private void ReportRoutingActivationDeferred(
+        Exception exception,
+        string? statusBeforeActivation = null)
     {
         Log.Error(
             "Routes were not activated because local recovery prerequisites did not finish; legacy clip processing remains active.",
             exception);
-        _uiContext.Post(_ => ShowHotkeyNotification(
-            "Routes not activated",
-            "Existing clip processing remains active. Open Routes after local recovery is resolved.",
-            ToolTipIcon.Warning), null);
+        _uiContext.Post(_ =>
+        {
+            if (!string.IsNullOrWhiteSpace(statusBeforeActivation) &&
+                TrayRoutesRuntimePresentation.IsActivationStatus(_baseTrayStatus))
+            {
+                _baseTrayStatus = statusBeforeActivation;
+                _statusItem.Text = statusBeforeActivation;
+                UpdateTrayCaptureIndicator();
+            }
+            UpdateLegacyModeControl();
+            ShowHotkeyNotification(
+                "Routes not activated",
+                "Existing clip processing remains active. Open Routes after local recovery is resolved.",
+                ToolTipIcon.Warning);
+        }, null);
+    }
+
+    private RoutesRuntimeViewState GetRoutesRuntimeViewState()
+    {
+        var transitionRunning = _processingStartupTask is { IsCompleted: false } ||
+                                Volatile.Read(ref _routingRetryInProgress) != 0;
+        return TrayRoutesRuntimePresentation.Map(
+            transitionRunning,
+            _routingLifecycle.State);
+    }
+
+    /// <summary>
+    /// Projects durable Routing state into the intentionally narrow model consumed by Home and
+    /// About. No path, route name, destination, webhook, clip name, or arbitrary runtime text can
+    /// cross this boundary.
+    /// </summary>
+    private RoutingUiPresentationSnapshot? GetRoutingUiPresentationSnapshot()
+    {
+        // Unknown state is fail-safe Local-only. This value is deliberately retained outside
+        // the inspection try/catch so an inspection failure never calls the same failing store
+        // a second time while constructing a privacy-safe fallback.
+        var localOnlyEnabled = true;
+        try
+        {
+            var authority = InspectOperationalRoutingAuthority();
+            if (authority.LegacyPermitted) return null;
+
+            var localOnly = _routingLocalOnlyState.Inspect();
+            localOnlyEnabled = localOnly.EffectiveEnabled;
+            var lifecycleState = _routingLifecycle.State;
+            if (!localOnly.LoadedFromDisk)
+            {
+                return new RoutingUiPresentationSnapshot(
+                    RoutingUiState.Unavailable,
+                    ActiveRouteCount: 0,
+                    WatchingSourceCount: 0,
+                    localOnlyEnabled);
+            }
+
+            var routes = new RoutingSnapshotStore().Load();
+            var inputs = new RoutingInputSourceCatalog().Inspect();
+            if (routes.Status is not (RoutingDocumentLoadStatus.Missing or
+                    RoutingDocumentLoadStatus.Loaded) ||
+                !inputs.IsUsable)
+            {
+                return new RoutingUiPresentationSnapshot(
+                    RoutingUiState.Unavailable,
+                    ActiveRouteCount: 0,
+                    WatchingSourceCount: 0,
+                    localOnlyEnabled);
+            }
+
+            var state = authority.Blocked ||
+                        lifecycleState is RoutingApplicationLifecycleState.NeedsAttention or
+                            RoutingApplicationLifecycleState.RoutingRecoveryNeeded
+                ? RoutingUiState.NeedsAttention
+                : lifecycleState == RoutingApplicationLifecycleState.RoutingRunning
+                    ? RoutingUiState.Active
+                    : RoutingUiState.Inactive;
+            var enabledRoutes = routes.Document?.Routes
+                .Where(route => route.Enabled)
+                .ToArray() ?? [];
+            var activeRoutes = enabledRoutes.Length;
+            var specificRoutes = enabledRoutes.Count(route => route.Kind == RoutingRouteKind.Specific);
+            var fallbackRoutes = enabledRoutes.Count(route => route.Kind == RoutingRouteKind.Fallback);
+            // Local-only is an overlay, not a disabled route. Count only routes the user has
+            // explicitly paused here; held Deliver actions remain active route definitions and
+            // are represented by LocalOnlyModeEnabled instead.
+            var pausedRoutes = routes.Document?.Routes.Count(route => !route.Enabled) ?? 0;
+
+            var legacySettings = CurrentAppSettings();
+            var watchingSources = !string.IsNullOrWhiteSpace(legacySettings.ClipsFolder) &&
+                                  Directory.Exists(legacySettings.ClipsFolder)
+                ? 1
+                : 0;
+            if (_captureSettings.InstantReplayEnabled && CaptureLibraryAccessAllowed())
+            {
+                watchingSources++;
+            }
+            watchingSources += inputs.Sources.Count(source =>
+                source.Enabled && !source.Retired &&
+                source.Health == RoutingInputSourceHealth.Ready);
+
+            var destinations = RoutingUiDestinations.Library;
+            foreach (var action in enabledRoutes.SelectMany(route => route.Actions)
+                         .Where(action => action.Enabled))
+            {
+                destinations |= action.Kind switch
+                {
+                    RoutingActionKind.FileIntoLibrary => RoutingUiDestinations.Library,
+                    RoutingActionKind.Deliver when action.Destination == RoutingDestinationKind.Discord =>
+                        RoutingUiDestinations.Discord,
+                    RoutingActionKind.Deliver when action.Destination == RoutingDestinationKind.YouTube =>
+                        RoutingUiDestinations.YouTube,
+                    RoutingActionKind.Deliver when action.Destination == RoutingDestinationKind.TikTok =>
+                        RoutingUiDestinations.TikTok,
+                    _ => RoutingUiDestinations.None
+                };
+            }
+            var destinationCount = 0;
+            foreach (var destination in new[]
+                     {
+                         RoutingUiDestinations.Library,
+                         RoutingUiDestinations.Discord,
+                         RoutingUiDestinations.YouTube,
+                         RoutingUiDestinations.TikTok
+                     })
+            {
+                if (destinations.HasFlag(destination)) destinationCount++;
+            }
+
+            return new RoutingUiPresentationSnapshot(
+                state,
+                activeRoutes,
+                watchingSources,
+                localOnlyEnabled,
+                specificRoutes,
+                fallbackRoutes,
+                pausedRoutes,
+                destinationCount,
+                destinations).Normalize();
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException or IOException or
+                UnauthorizedAccessException or ArgumentException or NotSupportedException or
+                PathTooLongException or System.Security.SecurityException)
+        {
+            Log.Error("Could not inspect the privacy-safe Routing presentation state.", exception);
+            return new RoutingUiPresentationSnapshot(
+                RoutingUiState.Unavailable,
+                ActiveRouteCount: 0,
+                WatchingSourceCount: 0,
+                localOnlyEnabled);
+        }
+    }
+
+    private async Task<bool> RetryRoutesRuntimeFromUiAsync()
+    {
+        using var processingMutation = await _processingOperationGate.EnterAsync(
+            _lifetimeCancellation.Token);
+        if (_shutdownScheduled) return false;
+        var statusBeforeActivation = _baseTrayStatus;
+        Interlocked.Exchange(ref _routingRetryInProgress, 1);
+        SetStatus("Routes activating — safely preparing existing clips");
+        try
+        {
+            var authority = InspectOperationalRoutingAuthority();
+            var sequence = await TrayRoutingRetrySequence.RunAsync(
+                    recoveryToken => RecoverRoutingPrerequisitesAsync(
+                        CurrentAppSettings(),
+                        recoverPendingEditedDispositions:
+                            authority.RoutingRequired ||
+                            _routingLifecycle.RoutingSelectedAtBootstrap,
+                        recoveryToken),
+                    () => _routingLifecycle.State ==
+                        RoutingApplicationLifecycleState.LegacyReady,
+                    _routingLifecycle.StartAsync,
+                    static result => result.State ==
+                        RoutingApplicationLifecycleState.LegacyRunning,
+                    _routingLifecycle.ActivateRoutingAsync,
+                    _lifetimeCancellation.Token)
+                .ConfigureAwait(false);
+            var result = sequence.Result;
+            HandleProcessingLifecycleResult(result);
+            if (result.State == RoutingApplicationLifecycleState.RoutingRunning)
+            {
+                _uiContext.Post(_ => ShowHotkeyNotification(
+                    "Routes active",
+                    "New clips now use your saved routes.",
+                    ToolTipIcon.Info), null);
+                return true;
+            }
+            if (result.State == RoutingApplicationLifecycleState.LegacyRunning)
+            {
+                ReportRoutingActivationDeferred(
+                    result.Error ?? result.RoutingTransition?.Error ??
+                    new InvalidOperationException(
+                        "The safe Routing migration did not finish."),
+                    statusBeforeActivation);
+            }
+            return false;
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception exception)
+        {
+            if (_routingLifecycle.State == RoutingApplicationLifecycleState.LegacyRunning)
+            {
+                ReportRoutingActivationDeferred(exception, statusBeforeActivation);
+            }
+            else
+            {
+                SetRoutingNeedsAttention(
+                    "Routes need attention — processing is paused",
+                    exception);
+            }
+            return false;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _routingRetryInProgress, 0);
+            _uiContext.Post(_ =>
+            {
+                UpdateLegacyModeControl();
+            }, null);
+        }
     }
 
     private static AppSettings CanonicalRoutingWatchedSettings(AppSettings settings) =>
@@ -1683,7 +2227,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 manualCaptureRecorder: _manualCaptureRecorder,
                 discordConnectionCatalog: _discordConnectionCatalog,
                 captureLibraryAccessAllowed: () => CaptureLibraryAccessAllowed(),
-                repairCaptureLibraryRoot: TryRepairCaptureLibraryRoot);
+                repairCaptureLibraryRoot: TryRepairCaptureLibraryRoot,
+                routesRuntimeStateProvider: GetRoutesRuntimeViewState,
+                retryRoutesRuntimeAsync: RetryRoutesRuntimeFromUiAsync,
+                localOnlyMode: _routingLocalOnlyViewSource,
+                routingPresentationProvider: GetRoutingUiPresentationSnapshot);
             form.GalleryRenditionRetryRequested += GalleryRenditionRetryRequested;
             _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
@@ -1797,7 +2345,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (!_shutdownScheduled)
             {
                 UpdateLegacyModeControl();
-                UpdateModeToggleHotkeyDisplay(_settings);
+                UpdateModeToggleHotkeyDisplay();
             }
             ScheduleDeferredExitIfRequested();
         }
@@ -1900,14 +2448,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             throw new InvalidOperationException("ClipCord is already applying another change.");
         }
-        if (!WebhookValidation.IsDiscordWebhook(_settings.WebhookUrl))
-        {
-            throw new InvalidOperationException(
-                "Add a valid Discord webhook in Settings before uploading a Local-only clip.");
-        }
-
         var authority = InspectOperationalRoutingAuthority();
         TrayRoutingExclusiveOperation.RequireManualUploadAllowed(authority);
+        var manualSettings = CurrentAppSettings();
+        var manualConnection = TrayManualDiscordConnection.Resolve(
+            authority,
+            manualSettings,
+            _discordConnectionCatalog,
+            operationCancellation.Token);
         _manualClipOperationCancellation = operationCancellation;
         _reconfigurationInProgress = true;
         _uploadToDiscordItem.Enabled = false;
@@ -1929,7 +2477,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 authority,
                 QuiesceRoutingAsync,
                 token => service.UploadAsync(
-                    CurrentAppSettings(),
+                    manualSettings,
+                    manualConnection,
                     prepared,
                     _activityHistory,
                     progress,
@@ -2129,7 +2678,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private async void ToggleUploadModeFromTray()
     {
-        if (RouteLegacyModeControlToRoutes()) return;
+        if (!InspectOperationalRoutingAuthority().LegacyPermitted)
+        {
+            await ChangeRoutingLocalOnlyModeAsync(_uploadToDiscordItem.Checked);
+            return;
+        }
         await ChangeUploadModeAsync(_uploadToDiscordItem.Checked, invokedByHotkey: false);
     }
 
@@ -2151,7 +2704,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 return;
         }
 
-        if (RouteLegacyModeControlToRoutes()) return;
+        if (!InspectOperationalRoutingAuthority().LegacyPermitted)
+        {
+            var result = await _routingLocalOnlyViewSource.ToggleEnabledAsync(
+                _lifetimeCancellation.Token);
+            if (!result.Succeeded)
+            {
+                _uploadToDiscordItem.Checked = result.Snapshot.EffectiveEnabled;
+                ShowModeFeedback(new ModeFeedbackPresentation(
+                    "Could not change Local-only mode",
+                    result.Error ?? "ClipCord kept the previous routing mode.",
+                    ModeFeedbackTone.Error));
+            }
+            return;
+        }
         await ChangeUploadModeAsync(!_settings.UploadToDiscord, invokedByHotkey: true);
     }
 
@@ -2170,7 +2736,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private async Task ChangeUploadModeAsync(bool uploadToDiscord, bool invokedByHotkey)
     {
-        if (RouteLegacyModeControlToRoutes()) return;
+        if (!InspectOperationalRoutingAuthority().LegacyPermitted) return;
         var previousSettings = _settings;
         var updated = previousSettings with { UploadToDiscord = uploadToDiscord };
         if (!updated.IsValid)
@@ -2227,7 +2793,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private bool TryApplyModeToggleHotkey(AppSettings settings, out int errorCode)
     {
-        var normalized = AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
+        return TryApplyModeToggleHotkey(GetEffectiveModeToggleHotkey(settings), out errorCode);
+    }
+
+    private bool TryApplyModeToggleHotkey(string hotkeyDisplayText, out int errorCode)
+    {
+        var normalized = AppSettings.NormalizeModeToggleHotkey(hotkeyDisplayText);
         GlobalHotkeyBinding? binding = null;
         if (!string.IsNullOrWhiteSpace(normalized))
         {
@@ -2240,23 +2811,30 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         var applied = _globalHotkey.TrySetBinding(binding, out errorCode);
-        if (applied) UpdateModeToggleHotkeyDisplay(settings);
+        if (applied) UpdateModeToggleHotkeyDisplay();
         return applied;
     }
 
-    private void UpdateModeToggleHotkeyDisplay(AppSettings settings)
+    private string GetEffectiveModeToggleHotkey(AppSettings settings)
     {
-        _uploadToDiscordItem.ShortcutKeyDisplayString =
-            AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
+        if (InspectOperationalRoutingAuthority().LegacyPermitted)
+            return AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey);
+        try
+        {
+            return _routingLocalOnlyState.Inspect().EffectiveHotkeyBinding;
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            Log.Error("ClipCord could not read the Routing Local-only shortcut.", exception);
+            return GlobalHotkeyBinding.DefaultDisplayText;
+        }
     }
 
-    private bool RouteLegacyModeControlToRoutes()
+    private void UpdateModeToggleHotkeyDisplay()
     {
-        var authority = InspectOperationalRoutingAuthority();
-        if (authority.LegacyPermitted) return false;
-        UpdateLegacyModeControl();
-        ShowSettings(initialPage: SettingsPage.Routes);
-        return true;
+        _uploadToDiscordItem.ShortcutKeyDisplayString =
+            GetEffectiveModeToggleHotkey(_settings);
     }
 
     private void UpdateLegacyModeControl()
@@ -2271,14 +2849,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         else
         {
-            _uploadToDiscordItem.Text = authority.RoutingRequired
-                ? "Manage destinations in Routes…"
-                : "Routes need attention…";
-            _uploadToDiscordItem.CheckOnClick = false;
-            _uploadToDiscordItem.Checked = false;
-            _uploadToDiscordItem.Enabled = !_shutdownScheduled;
+            var localOnly = _routingLocalOnlyState.Inspect();
+            _uploadToDiscordItem.Text = "Local-only mode";
+            _uploadToDiscordItem.CheckOnClick = true;
+            _uploadToDiscordItem.Checked = localOnly.EffectiveEnabled;
+            _uploadToDiscordItem.Enabled = !_shutdownScheduled &&
+                _routingLifecycle.State == RoutingApplicationLifecycleState.RoutingRunning &&
+                localOnly.LoadedFromDisk;
+            _uploadToDiscordItem.ToolTipText = localOnly.LoadedFromDisk
+                ? localOnly.EffectiveEnabled
+                    ? "Future clips stay on this PC. Existing deliveries are unchanged."
+                    : "Future clips follow your active Routes."
+                : "Saved Local-only mode needs attention. External delivery remains paused.";
         }
-        UpdateModeToggleHotkeyDisplay(_settings);
+        UpdateModeToggleHotkeyDisplay();
     }
 
     private void ShowHotkeyNotification(string title, string message, ToolTipIcon icon)
@@ -2574,6 +3158,38 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 "ClipCord could not initialize Capture after journal recovery.",
                 exception);
         }
+    }
+
+    private async Task ChangeRoutingLocalOnlyModeAsync(bool enabled)
+    {
+        var result = await _routingLocalOnlyViewSource.SetEnabledAsync(
+            enabled,
+            _lifetimeCancellation.Token);
+        if (result.Succeeded) return;
+        _uploadToDiscordItem.Checked = result.Snapshot.EffectiveEnabled;
+        ShowModeFeedback(new ModeFeedbackPresentation(
+            "Could not change Local-only mode",
+            result.Error ?? "ClipCord kept the previous routing mode.",
+            ModeFeedbackTone.Error));
+    }
+
+    private void RoutingLocalOnlyStateChanged(
+        RoutingLocalOnlyOverrideInspection inspection,
+        bool notifyTransition)
+    {
+        _uiContext.Post(_ =>
+        {
+            if (_shutdownScheduled) return;
+            UpdateLegacyModeControl();
+            _settingsForm?.RefreshRoutingPresentation();
+            if (!notifyTransition) return;
+            SetStatus(inspection.EffectiveEnabled
+                ? "Local-only mode on · future clips stay here"
+                : "Routes active — watching for new clips");
+            ShowModeFeedback(
+                ModeFeedbackPresentation.ForRoutingLocalOnlyMode(
+                    inspection.EffectiveEnabled));
+        }, null);
     }
 
     private async Task WarmCaptureHostAsync()

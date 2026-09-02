@@ -404,7 +404,7 @@ internal static partial class FfmpegCompressor
     private static partial Regex AudioStreamPattern();
 
     [GeneratedRegex(
-        @"Stream #0:\d+[^\r\n]*?:\s*Video:[^\r\n]*?,\s*(\d{2,5})x(\d{2,5})(?:\s|\[)[^\r\n]*?,\s*(\d+(?:\.\d+)?)\s+fps\b",
+        @"Stream #0:\d+[^\r\n]*?:\s*Video:[^\r\n]*?,\s*(\d{2,5})x(\d{2,5})(?:\s|\[|,)[^\r\n]*?,\s*(\d+(?:\.\d+)?)\s+fps\b",
         RegexOptions.CultureInvariant)]
     private static partial Regex VideoStreamPattern();
 

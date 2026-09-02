@@ -203,7 +203,11 @@ internal sealed record CaptureJournalOriginalPromotionIntent(
     string StagedRelativePath,
     string DestinationRelativePath,
     CaptureJournalFingerprint Fingerprint,
-    DateTimeOffset CreatedUtc);
+    DateTimeOffset CreatedUtc,
+    string? SourceConnectionId = null,
+    string? SourceOccurrenceId = null,
+    string? SourceRevisionId = null,
+    RoutingLocalOnlyAdmissionSnapshot? LocalOnlyOverride = null);
 
 internal sealed record CaptureJournalOriginalPromotionInspection(
     CaptureJournalPromotionStatus Status,
@@ -465,7 +469,11 @@ internal static class CaptureJournalPromotionIntentStore
         bool reactionCameraRequested,
         IReadOnlyList<string> requestedRenditions,
         CancellationToken cancellationToken = default,
-        DateTimeOffset? now = null)
+        DateTimeOffset? now = null,
+        string? sourceConnectionId = null,
+        string? sourceOccurrenceId = null,
+        string? sourceRevisionId = null,
+        RoutingLocalOnlyAdmissionSnapshot? localOnlyOverride = null)
     {
         ArgumentNullException.ThrowIfNull(requestedRenditions);
         cancellationToken.ThrowIfCancellationRequested();
@@ -507,7 +515,11 @@ internal static class CaptureJournalPromotionIntentStore
             ToRelative(root, staged),
             destinationRelative,
             fingerprint,
-            (now ?? DateTimeOffset.UtcNow).ToUniversalTime());
+            (now ?? DateTimeOffset.UtcNow).ToUniversalTime(),
+            sourceConnectionId?.Trim(),
+            sourceOccurrenceId?.Trim().ToLowerInvariant(),
+            sourceRevisionId?.Trim().ToLowerInvariant(),
+            localOnlyOverride);
         ValidateOriginalIntent(root, intent);
 
         using var mutex = new Mutex(false, SaveMutexPrefix + clipId + ".original");
@@ -694,7 +706,12 @@ internal static class CaptureJournalPromotionIntentStore
                 intent.RequestedRenditions,
                 cancellationToken,
                 now,
-                intent.Fingerprint)
+                intent.Fingerprint,
+                intent.SourceConnectionId,
+                intent.SourceOccurrenceId,
+                intent.SourceRevisionId,
+                RoutingLocalOnlyAdmissionSnapshot.PersistedOrFailSafe(
+                    intent.LocalOnlyOverride))
             .ConfigureAwait(false);
     }
 
@@ -1270,6 +1287,30 @@ internal static class CaptureJournalPromotionIntentStore
         {
             throw new InvalidDataException("The original promotion intent is invalid.");
         }
+        if (intent.LocalOnlyOverride is not null)
+            RoutingLocalOnlyAdmissionSnapshot.Validate(intent.LocalOnlyOverride);
+        if (intent.SourceKind == CaptureJournalSourceKind.XboxGameDvr)
+        {
+            RoutingValidation.RequireOpaqueId(
+                intent.SourceConnectionId, 128, "Xbox source connection id");
+            if (!CaptureJournalModel.IsSha256(intent.SourceOccurrenceId) ||
+                !intent.SourceOccurrenceId!.All(character =>
+                    character is >= '0' and <= '9' or >= 'a' and <= 'f') ||
+                !CaptureJournalModel.IsSha256(intent.SourceRevisionId) ||
+                !intent.SourceRevisionId!.All(character =>
+                    character is >= '0' and <= '9' or >= 'a' and <= 'f') ||
+                intent.ReactionCameraRequested)
+            {
+                throw new InvalidDataException("The Xbox promotion provenance is invalid.");
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(intent.SourceConnectionId) ||
+                 !string.IsNullOrWhiteSpace(intent.SourceOccurrenceId) ||
+                 !string.IsNullOrWhiteSpace(intent.SourceRevisionId))
+        {
+            throw new InvalidDataException(
+                "A ClipCord capture promotion cannot carry external-source provenance.");
+        }
         CaptureJournalModel.ValidateRelativePath(intent.DestinationRelativePath);
         var staged = ResolveRelative(root, intent.StagedRelativePath);
         var destination = ResolveRelative(root, intent.DestinationRelativePath);
@@ -1301,7 +1342,11 @@ internal static class CaptureJournalPromotionIntentStore
         left.StagedRelativePath.Equals(right.StagedRelativePath, StringComparison.Ordinal) &&
         left.DestinationRelativePath.Equals(right.DestinationRelativePath, StringComparison.Ordinal) &&
         left.Fingerprint == right.Fingerprint &&
-        left.CreatedUtc == right.CreatedUtc;
+        left.CreatedUtc == right.CreatedUtc &&
+        left.SourceConnectionId == right.SourceConnectionId &&
+        left.SourceOccurrenceId == right.SourceOccurrenceId &&
+        left.SourceRevisionId == right.SourceRevisionId &&
+        left.LocalOnlyOverride == right.LocalOnlyOverride;
 
     private static bool DocumentMatchesOriginalIntent(
         CaptureJournalDocument document,
@@ -1317,6 +1362,12 @@ internal static class CaptureJournalPromotionIntentStore
         document.Clip.RequestedRenditions.SequenceEqual(
             intent.RequestedRenditions,
             StringComparer.Ordinal) &&
+        document.Clip.SourceConnectionId == intent.SourceConnectionId &&
+        document.Clip.SourceOccurrenceId == intent.SourceOccurrenceId &&
+        document.Clip.SourceRevisionId == intent.SourceRevisionId &&
+        document.Clip.LocalOnlyOverride ==
+            RoutingLocalOnlyAdmissionSnapshot.PersistedOrFailSafe(
+                intent.LocalOnlyOverride) &&
         document.Clip.Original.RelativePath.Equals(
             intent.DestinationRelativePath,
             StringComparison.Ordinal) &&

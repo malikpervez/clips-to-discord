@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Globalization;
 
 namespace ClipsToDiscord;
 
@@ -138,11 +139,20 @@ internal sealed class WatchStateStore
             var sameSource = saved.CaptureSource == captureSource;
             if (sameFolder && sameSource)
             {
+                var repairedStaleIgnoredKeys = RemoveIgnoredKeysOutsideCurrentSource(
+                    saved,
+                    clipsFolder,
+                    captureSource);
                 if (needsLocalOnlyBaseline)
                 {
                     await AddLocalOnlyBaselineAsync(saved, clipsFolder, cancellationToken);
                 }
-                if (needsLocalOnlyBaseline || needsVersionUpgrade) Save(saved);
+                var repairedDeliveryClassifications = ApplyUploadedClassificationPrecedence(saved);
+                if (needsLocalOnlyBaseline || needsVersionUpgrade ||
+                    repairedStaleIgnoredKeys || repairedDeliveryClassifications)
+                {
+                    Save(saved);
+                }
                 return saved;
             }
 
@@ -154,7 +164,12 @@ internal sealed class WatchStateStore
                 : "Clips folder changed — building a safe baseline");
             saved.ClipsFolder = clipsFolder;
             saved.CaptureSource = captureSource;
+            // Exact file keys are meaningful only inside the source geometry that created
+            // them. Retaining keys from an older folder/source cannot protect any candidate
+            // in the new scan, and later makes a safe Routing cutover impossible to prove.
+            saved.IgnoredFileKeys.Clear();
             await AddSafeBaselineAsync(saved, clipsFolder, cancellationToken, captureSource);
+            ApplyUploadedClassificationPrecedence(saved);
             Save(saved);
             return saved;
         }
@@ -174,6 +189,7 @@ internal sealed class WatchStateStore
         };
         Normalize(state);
         await AddSafeBaselineAsync(state, clipsFolder, cancellationToken, captureSource);
+        ApplyUploadedClassificationPrecedence(state);
         Save(state);
         TryDeleteSafeBaselineMarker();
         Log.Info($"Initialized content-hash state with {state.KnownContentHashes.Count} existing clip(s); they will not be uploaded.");
@@ -369,6 +385,97 @@ internal sealed class WatchStateStore
         state.KnownSignatures = null;
     }
 
+    /// <summary>
+    /// A content hash can legitimately have both histories in legacy builds: it may have been
+    /// uploaded once and later encountered while Local-only mode was selected. Routing needs one
+    /// conservative duplicate classification, so Uploaded wins. This can never cause a repost;
+    /// the hash remains in KnownContentHashes and in the stronger Uploaded exclusion set.
+    /// </summary>
+    private static bool ApplyUploadedClassificationPrecedence(WatchState state) =>
+        state.LocalOnlyContentHashes.RemoveWhere(state.UploadedContentHashes.Contains) != 0;
+
+    /// <summary>
+    /// Removes only well-formed exact file keys that provably cannot belong to the currently
+    /// configured scanner. Older builds retained these after folder/source changes. Malformed or
+    /// ambiguous evidence is deliberately kept so the strict Routing probe still fails closed.
+    /// </summary>
+    private static bool RemoveIgnoredKeysOutsideCurrentSource(
+        WatchState state,
+        string clipsFolder,
+        ClipCaptureSource captureSource)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(clipsFolder));
+        return state.IgnoredFileKeys.RemoveWhere(key =>
+            TryParseIgnoredFileKeyPath(key, out var path) &&
+            !IsPathInCaptureSource(root, path!, captureSource)) != 0;
+    }
+
+    private static bool TryParseIgnoredFileKeyPath(string? key, out string? path)
+    {
+        path = null;
+        if (string.IsNullOrWhiteSpace(key)) return false;
+        var ticksSeparator = key.LastIndexOf('|');
+        var lengthSeparator = ticksSeparator <= 0
+            ? -1
+            : key.LastIndexOf('|', ticksSeparator - 1);
+        if (lengthSeparator <= 0 || ticksSeparator <= lengthSeparator + 1 ||
+            ticksSeparator == key.Length - 1 ||
+            !long.TryParse(key[(lengthSeparator + 1)..ticksSeparator],
+                NumberStyles.None, CultureInfo.InvariantCulture, out var length) ||
+            !long.TryParse(key[(ticksSeparator + 1)..],
+                NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) ||
+            length < 0 || ticks <= 0 || ticks > DateTime.MaxValue.Ticks)
+        {
+            return false;
+        }
+        var pathText = key[..lengthSeparator];
+        if (!Path.IsPathFullyQualified(pathText)) return false;
+        try
+        {
+            var canonical = Path.GetFullPath(pathText);
+            if (!pathText.Equals(canonical.ToLowerInvariant(), StringComparison.Ordinal))
+                return false;
+            path = canonical;
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsPathInCaptureSource(
+        string root,
+        string candidate,
+        ClipCaptureSource captureSource)
+    {
+        var relative = Path.GetRelativePath(root, candidate);
+        if (Path.IsPathRooted(relative) || relative.Equals("..", StringComparison.Ordinal) ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+            relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        var components = relative.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        if (components.Any(component => component is "." or "..") ||
+            components.Length == 0 ||
+            !Path.GetExtension(components[^1]).Equals(".mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        return AppSettings.NormalizeCaptureSource(captureSource) switch
+        {
+            ClipCaptureSource.SteelSeriesGg => components.Length == 1,
+            ClipCaptureSource.Nvidia => components.Length == 2 &&
+                                        !ManagedChildFolders.Contains(
+                                            components[0], StringComparer.OrdinalIgnoreCase),
+            _ => false
+        };
+    }
+
     private static WatchStateRoutingProbe Probe(WatchStateRoutingProbeStatus status) =>
         new(status, 0, 0, 0, 0, null);
 
@@ -391,9 +498,6 @@ internal sealed class WatchStateStore
         var known = state.KnownContentHashes.ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (!state.UploadedContentHashes.All(known.Contains) ||
             !state.LocalOnlyContentHashes.All(known.Contains) ||
-            state.UploadedContentHashes.Intersect(
-                state.LocalOnlyContentHashes,
-                StringComparer.OrdinalIgnoreCase).Any() ||
             state.IgnoredFileKeys.Any(string.IsNullOrWhiteSpace) ||
             state.PendingMoves.Any(path => string.IsNullOrWhiteSpace(path) ||
                                            !Path.IsPathFullyQualified(path)) ||
@@ -403,6 +507,9 @@ internal sealed class WatchStateStore
         {
             throw new InvalidDataException("The legacy watcher state is inconsistent.");
         }
+        // A hash can legitimately have both histories in legacy builds: uploaded once, then
+        // encountered again while Local-only mode was selected. The quiesced Routing migration
+        // canonicalizes that history with Uploaded precedence before committing its marker.
     }
 
     private static void ValidateHashes(IEnumerable<string> hashes)

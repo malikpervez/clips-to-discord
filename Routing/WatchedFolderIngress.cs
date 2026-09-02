@@ -161,6 +161,9 @@ internal sealed class RoutingWatchedFolderIngress
                 throw new InvalidDataException(
                     $"A watched source journal cannot be reconciled ({load.Status}).");
             }
+            // Additive named sources share the immutable journal store but own their own
+            // catalog authority and reconciliation loop.
+            if (load.Document.SourceConnectionId is not null) continue;
             Remember(load.Document);
             results.Add(await ReconcileJournalAsync(
                     load.Document,

@@ -18,8 +18,11 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
 - The chosen clips-folder path
 - The uploader name shown with clips in Discord
 - The start-with-Windows preference
-- Whether new clips should upload to Discord or remain local-only
-- The optional global shortcut used to switch between upload and local-only routing
+- The pre-2.0 upload/local-only preference and shortcut retained only for safe migration while
+  legacy clip processing still owns the watched folder
+- A Routing-owned Local-only override containing only its enabled state, normalized shortcut,
+  one-time migration-notice dismissal, revision, and timestamps. The override is sampled into each
+  new clip's durable plan; it contains no clip path, filename, destination secret, or media.
 - ClipCord Capture preferences, including the selected camera device and the locally stored record
   of one-time Reaction Camera consent
 - The Discord webhook URL encrypted with Windows DPAPI for the current user
@@ -41,6 +44,25 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
   parsed game, source kind, duration, dimensions, stable file identity, content hash, matched plan,
   and opaque source/migration identities. The configured absolute watched root is not copied into
   those journal entries.
+- Additional named SteelSeries GG and NVIDIA source settings containing the user-selected local
+  folder path, display name, enabled/health state, recorder kind, and a SHA-256 digest bound to that
+  folder's native Windows identity. Each newly added source also stores one immutable, bounded
+  metadata-only baseline of the MP4 occurrences already present (relative path plus native file
+  identity, size, and timestamps, hashed into opaque occurrence ids). Clip content is not read while
+  this baseline is created, and those pre-existing occurrences are not routed later.
+- Named Xbox Game DVR input-source settings containing the local OneDrive folder path, display name,
+  enabled/health state, a SHA-256 digest of the folder's native filesystem identity, and a reserved
+  Windows time-zone field. The digest is used only to detect a moved or replaced source and is not
+  displayed or copied into route definitions. Current modern Xbox filename timestamps are interpreted
+  as UTC. Xbox route definitions store the source's random opaque identifier, frozen
+  activation/cutoff times, and the SHA-256 occurrence/revision identities of the exact historical clips
+  the user approved—not the OneDrive path or filename.
+  A separate per-source occurrence journal freezes each admitted clip's leaf filename, parsed game,
+  capture time, logical size, local file identity, import state, and—after a successful Library
+  commit—the ClipCord clip identifier and content hash. A user-confirmed skip records only a bounded
+  non-secret reason code and prevents that source occurrence from being retried or routed. It does
+  not contain a Microsoft account,
+  OneDrive credential, Discord secret, or destination token.
 - In developer-enabled watched-folder Shadow mode only, a bounded local comparison document with
   opaque source/content digests, capture-source kind, parsed game name, duration and dimensions,
   matched route identifiers, and destination/output summaries. It contains no clip path or filename,
@@ -68,7 +90,10 @@ Unpackaged builds also make an anonymous HTTPS request to the fixed official `ma
 
 SHA-256 hashing and FFmpeg compression are performed locally. Clip content and hashes are not sent to a project-operated server. Operational log messages pass through a webhook-URL redactor before being written. Raw FFmpeg stderr is not written to the log. FFmpeg failures are reduced to bounded, allow-listed diagnostic categories and numeric error codes, so no file path, username, clip name, URL, token, or command fragment from the media tool's raw diagnostic reaches the log.
 
-The global mode shortcut is registered locally with Windows only while ClipCord is running. Pressing it uses the same persisted settings and watcher-reconfiguration path as the notification-area toggle; it does not create a network request by itself.
+The global mode shortcut is registered locally with Windows only while ClipCord is running. Before
+Routing activation it retains the legacy upload-mode behavior. After activation, the same saved
+binding controls Routing's Local-only override through the same durable state as the Routes and
+notification-area toggles; pressing it does not create a network request by itself.
 
 The Activity Center reads only the local bounded activity history. It never stores or displays the Discord webhook, and its text fields pass through the same webhook redactor before atomic persistence. Closing the Activity window does not affect clip watching or uploads.
 
@@ -88,8 +113,42 @@ The About page computes its status locally. **Copy diagnostics** places a fixed,
   the configured source root, recorded in the local write-ahead journal, planned before delivery,
   and moved only after its required actions reach a durable terminal state. On restart, ClipCord
   resumes those journal and outbox records rather than treating the clip as new work.
+- Routes can also connect additional SteelSeries GG or NVIDIA folders at user-selected locations,
+  including other local drives. A SteelSeries source scans only top-level `.mp4` files; an NVIDIA
+  source scans only `.mp4` files exactly one `<game>` folder below its selected root. Adding a source
+  establishes a content-free **from now on** baseline, so clips already present are left alone. Only
+  new, stable files are opened and hashed. After their frozen route actions complete, ClipCord moves
+  them into that same source root's `uploaded\<game>` or `local-only\<game>` archive, matching the
+  established watched-folder ownership model. A source folder that is missing, replaced, redirected,
+  or overlaps another source is isolated and cannot suppress processing for unrelated sources.
+- An enabled Xbox Game DVR Routing source scans only top-level `.mp4` names and Windows filesystem
+  metadata in its configured OneDrive folder. Route setup can preview **From now on**, **Last 24
+  hours**, or **Last 7 days** without opening clip content, so this preview does not ask OneDrive to
+  download cloud-only placeholders. A clip is opened only after its filename metadata can match an
+  enabled route bound to that exact source. Pre-activation history is eligible only when its exact
+  occurrence and source-revision identities were frozen at confirmation; new clips captured after
+  activation continue automatically. Opening an eligible cloud-only clip may then cause OneDrive to
+  download it. ClipCord imports admitted clips one at a time, hashes and
+  verifies a read-only source stream, and atomically publishes its own copy into
+  `Library\Game\<Game>`. It never moves, renames, deletes, or writes the OneDrive original. Durable
+  occurrence and Capture journals resume an interrupted import without turning the same source clip
+  into a new delivery. If a supported individual clip cannot be validated or conflicts with an
+  existing Library item, ClipCord pauses that Xbox source and requires an explicit **Skip blocked
+  clip** confirmation before future clips resume; skipping leaves the OneDrive original unchanged.
+  Source recheck, relocation, replacement, enable/disable, and removal controls operate only on the
+  local source catalog. SteelSeries GG and NVIDIA source identity is bound to the saved canonical path:
+  reconnecting that original path can restore the existing source, while selecting a different path
+  registers a separate replacement with its own opaque source id and from-now baseline. The replacement
+  does not inherit the old source's routes, baseline, or pending work; those references remain bound to
+  the retired source. Other folders with a different native identity likewise receive a new opaque source
+  id and do not inherit existing routes or approved history. Import work uses exact-owned partial files beneath
+  `.clipcord\Staging\Xbox\<source-id-hash>`; bounded startup cleanup removes only matching ordinary
+  partials older than 24 hours and leaves recent, unrelated, or redirected entries untouched.
 - Successfully uploaded originals move into local `uploaded\<game name>` subfolders; unrecognized filename formats use `uploaded\Uncategorized`.
-- In local-only mode, newly detected originals move into local `local-only\<game name>` subfolders without being sent to Discord.
+- In Local-only mode, the override is frozen when a new clip is admitted: external delivery actions
+  are suppressed and the source is filed into the local `local-only\<game name>` Library area.
+  Plans already admitted or in flight do not change, turning the mode off creates no catch-up
+  uploads, and explicitly sending an existing Gallery clip remains a separate user action.
 - User-requested Gallery edits stage beneath `.clipcord-editing` in the configured clips folder so the watcher ignores them and the final archive move stays on the same volume. Failed or cancelled pre-upload edits clean their stage and leave the original unchanged; confirmed uploads persist a recovery record before archive or Recycle Bin work.
 - Choosing **Play selection** in the editor renders only the selected range with the bundled FFmpeg into `%TEMP%\ClipsToDiscord\editor-playback`, and plays it in place. If in-editor playback is unavailable, ClipCord asks Windows to open that trimmed copy with the default video application; the untrimmed original is never handed to another program. Each trimmed preview is deleted when the next one starts, when playback stops, and when the editor closes.
 - Gallery thumbnail generation reads only cards that enter the visible Gallery viewport. Cached PNGs are invalidated when the source path, length, or write time changes; partial files older than one hour and thumbnails older than seven days are pruned, with an overall 128 MB cap. Opening ClipCord or leaving Always Watching enabled does not start thumbnail work.
