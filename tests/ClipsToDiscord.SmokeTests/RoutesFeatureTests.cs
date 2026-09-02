@@ -457,11 +457,12 @@ internal static class RoutesFeatureTests
             FirstRunNoticeDismissed: false,
             StatusDetail: "Local-only mode is ready."));
         var scale = dpi / 96d;
+        var requestedClientSize = new Size(
+            (int)Math.Round(984 * scale),
+            (int)Math.Round(696 * scale));
         using var form = new Form
         {
-            ClientSize = new Size(
-                (int)Math.Round(984 * scale),
-                (int)Math.Round(696 * scale)),
+            ClientSize = requestedClientSize,
             BackColor = ClipCordTheme.SurfaceBase,
             StartPosition = FormStartPosition.Manual,
             Location = new Point(-32000, -32000),
@@ -478,7 +479,15 @@ internal static class RoutesFeatureTests
         view.LocalOnlyModeChanged += (_, _) => changedEvents++;
         form.Controls.Add(view);
         form.Show();
+        // Windows clamps an opening form to the runner's working area. Restore the
+        // synthetic viewport after the handle exists so 144/192-DPI probes test
+        // the requested layout rather than the CI desktop's unrelated resolution.
+        form.ClientSize = requestedClientSize;
+        form.PerformLayout();
         Application.DoEvents();
+        Assert(form.ClientSize == requestedClientSize,
+            $"The Local-only DPI fixture must preserve its requested {dpi}-DPI viewport; " +
+            $"requested={requestedClientSize}, actual={form.ClientSize}.");
         view.ActivateView();
         Application.DoEvents();
 
