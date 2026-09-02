@@ -478,18 +478,24 @@ internal static class RoutesFeatureTests
         var changedEvents = 0;
         view.LocalOnlyModeChanged += (_, _) => changedEvents++;
         form.Controls.Add(view);
-        form.Show();
-        // Windows clamps an opening form to the runner's working area. Restore the
-        // synthetic viewport after the handle exists so 144/192-DPI probes test
-        // the requested layout rather than the CI desktop's unrelated resolution.
-        form.ClientSize = requestedClientSize;
-        form.PerformLayout();
-        Application.DoEvents();
+        if (dpi == 96)
+        {
+            form.Show();
+            Application.DoEvents();
+        }
+        else
+        {
+            // A shown top-level window is hard-clamped to the CI desktop. Keep the
+            // interaction probe real at 96 DPI and lay out synthetic DPI geometry
+            // headlessly at its exact requested viewport.
+            LayoutHeadlessly(form);
+        }
         Assert(form.ClientSize == requestedClientSize,
             $"The Local-only DPI fixture must preserve its requested {dpi}-DPI viewport; " +
             $"requested={requestedClientSize}, actual={form.ClientSize}.");
         view.ActivateView();
-        Application.DoEvents();
+        if (dpi == 96) Application.DoEvents();
+        else LayoutHeadlessly(form);
 
         AssertLocalOnlyModeLayout(view, dpi, expectEnabled: !verifyActions);
         var initial = Enumerate(view).ToArray();
@@ -503,11 +509,12 @@ internal static class RoutesFeatureTests
                    ReadOnly: true,
                    TabStop: false
                } &&
-               !initialShortcutField.Visible && initialKeycaps.Visible &&
+               !IsLocallyVisible(initialShortcutField) && IsLocallyVisible(initialKeycaps) &&
                initialKeycaps.Controls.OfType<RoundedPanel>()
                    .Select(keycap => keycap.AccessibleName)
                    .SequenceEqual(["Ctrl", "Shift", "U"]) &&
-               initial.Single(control => control.Name == "LocalOnlyShortcutMigrationNotice").Visible &&
+               IsLocallyVisible(initial.Single(control =>
+                   control.Name == "LocalOnlyShortcutMigrationNotice")) &&
                initial.Single(control => control.Name == "DismissLocalOnlyShortcutMigrationButton") is Button
                {
                    Enabled: true,
@@ -913,17 +920,28 @@ internal static class RoutesFeatureTests
             $"card={card.Size}, notice={notice.Size}, shield={shieldTile.Size}, toggle={toggle.Size}, change={change.Size}, dismiss={dismiss.Size}.");
         Assert(toggle.Checked == expectEnabled && toggle.Enabled && toggle.TabStop &&
                change.Enabled && change.TabStop && dismiss.Enabled && dismiss.TabStop &&
-               !shortcut.TabStop && !shortcut.Visible && keycaps.Visible && scrollHost.TabStop &&
-               headerPill.Visible == expectEnabled,
+               !shortcut.TabStop && !IsLocallyVisible(shortcut) &&
+               IsLocallyVisible(keycaps) && scrollHost.TabStop &&
+               IsLocallyVisible(headerPill) == expectEnabled,
             $"The Local-only actions and branded viewport must remain in a deliberate keyboard order at {dpi} DPI.");
         Assert(!controls.OfType<ScrollableControl>().Any(control =>
                    control.AutoScroll || control.HorizontalScroll.Visible ||
                    control.VerticalScroll.Visible),
             $"Routes must not introduce a native Windows scrollbar for Local-only mode at {dpi} DPI.");
-        AssertDescendantsContained(card, dpi);
-        AssertSiblingGeometry(card, dpi);
-        AssertDescendantsContained(notice, dpi);
-        AssertSiblingGeometry(notice, dpi);
+        if (dpi == 96)
+        {
+            AssertDescendantsContained(card, dpi);
+            AssertSiblingGeometry(card, dpi);
+            AssertDescendantsContained(notice, dpi);
+            AssertSiblingGeometry(notice, dpi);
+        }
+        else
+        {
+            AssertLocallyVisibleDescendantsContained(card, dpi);
+            AssertLocallyVisibleSiblingGeometry(card, dpi);
+            AssertLocallyVisibleDescendantsContained(notice, dpi);
+            AssertLocallyVisibleSiblingGeometry(notice, dpi);
+        }
 
         foreach (var label in controls.OfType<Label>().Where(label => label.Name is
                      "RoutingLocalOnlyModeTitleLabel" or
@@ -1676,10 +1694,15 @@ internal static class RoutesFeatureTests
             Location = new Point(-32000, -32000),
             Opacity = 0
         };
-        dialog.Show();
-        dialog.ClientSize = expectedClient;
-        dialog.PerformLayout();
-        Application.DoEvents();
+        if (dpi == 96)
+        {
+            dialog.Show();
+            Application.DoEvents();
+        }
+        else
+        {
+            LayoutHeadlessly(dialog);
+        }
 
         Assert(dialog.ClientSize == expectedClient,
             $"The route editor viewport must scale as one coherent surface at {dpi} DPI; expected={expectedClient}, actual={dialog.ClientSize}.");
@@ -1696,7 +1719,8 @@ internal static class RoutesFeatureTests
         var stageRoots = new List<Control>();
         for (var step = 0; step < stepsSeen.Length; step++)
         {
-            Application.DoEvents();
+            if (dpi == 96) Application.DoEvents();
+            else LayoutHeadlessly(dialog);
             var controls = Enumerate(dialog).Prepend<Control>(dialog).ToArray();
             var stageRoot = controls.SingleOrDefault(control => control.Name == stepsSeen[step]);
             Assert(stageRoot is not null,
@@ -1706,15 +1730,28 @@ internal static class RoutesFeatureTests
                    controls.Any(control => control.Name == "RouteEditorStageHost") &&
                    controls.Any(control => control.Name == "RouteDialogActions"),
                 "The route editor must retain the Figma summary, stage, and step-action hierarchy.");
-            AssertDescendantsContained(dialog, dpi);
-            AssertSiblingGeometry(dialog, dpi);
+            if (dpi == 96)
+            {
+                AssertDescendantsContained(dialog, dpi);
+                AssertSiblingGeometry(dialog, dpi);
+            }
+            else
+            {
+                AssertLocallyVisibleDescendantsContained(dialog, dpi);
+                AssertLocallyVisibleSiblingGeometry(dialog, dpi);
+            }
             AssertChoiceCards(controls, step + 1, dpi);
-            AssertRouteEditorText(controls, dpi);
+            AssertRouteEditorText(
+                controls,
+                dpi,
+                localVisibilityRoot: dpi == 96 ? null : dialog);
 
             if (step < stepsSeen.Length - 1)
             {
-                controls.OfType<Button>().Single(button =>
-                    button.Name == "NextRouteStepButton").PerformClick();
+                var next = controls.OfType<Button>().Single(button =>
+                    button.Name == "NextRouteStepButton");
+                if (dpi == 96) next.PerformClick();
+                else InvokeControlClick(next);
             }
         }
 
@@ -3734,11 +3771,13 @@ internal static class RoutesFeatureTests
     private static void AssertLocallyVisibleDescendantsContained(Control root, int dpi)
     {
         var tolerance = Math.Max(1, RouteEditorDialog.ScaleLogicalMetric(2, dpi));
-        foreach (var parent in Enumerate(root).Where(IsLocallyVisible))
+        foreach (var parent in Enumerate(root).Prepend(root).Where(parent =>
+                     IsLocallyVisibleWithin(parent, root)))
         {
             foreach (Control child in parent.Controls)
             {
-                if (!IsLocallyVisible(child) || child.Width <= 0 || child.Height <= 0) continue;
+                if (!IsLocallyVisibleWithin(child, root) ||
+                    child.Width <= 0 || child.Height <= 0) continue;
                 if (parent is BrandedScrollHost) continue;
                 var bounds = Rectangle.Inflate(parent.ClientRectangle, tolerance, tolerance);
                 Assert(bounds.Contains(child.Bounds),
@@ -3749,10 +3788,11 @@ internal static class RoutesFeatureTests
 
     private static void AssertLocallyVisibleSiblingGeometry(Control root, int dpi)
     {
-        foreach (var parent in Enumerate(root).Where(IsLocallyVisible))
+        foreach (var parent in Enumerate(root).Prepend(root).Where(parent =>
+                     IsLocallyVisibleWithin(parent, root)))
         {
             var children = parent.Controls.Cast<Control>()
-                .Where(control => IsLocallyVisible(control) &&
+                .Where(control => IsLocallyVisibleWithin(control, root) &&
                                   control.Width > 0 && control.Height > 0)
                 .ToArray();
             for (var left = 0; left < children.Length; left++)
@@ -3783,6 +3823,18 @@ internal static class RoutesFeatureTests
                        throw new InvalidOperationException("WinForms local state probe is unavailable.");
         var visible = Enum.Parse(states, "Visible");
         return (bool)getState.Invoke(control, [visible])!;
+    }
+
+    private static bool IsLocallyVisibleWithin(Control control, Control root)
+    {
+        Control? current = control;
+        while (current is not null && !ReferenceEquals(current, root))
+        {
+            if (!IsLocallyVisible(current)) return false;
+            current = current.Parent;
+        }
+
+        return ReferenceEquals(current, root);
     }
 
     private static Size PredictAtDpi(Size measured, int measuredDpi, int targetDpi)
@@ -3887,7 +3939,10 @@ internal static class RoutesFeatureTests
         }
     }
 
-    private static void AssertRouteEditorText(Control[] controls, int dpi)
+    private static void AssertRouteEditorText(
+        Control[] controls,
+        int dpi,
+        Control? localVisibilityRoot = null)
     {
         var title = controls.OfType<Label>().Single(label => label.Name == "RouteDialogTitle");
         var measuredTitle = TextRenderer.MeasureText(
@@ -3900,7 +3955,9 @@ internal static class RoutesFeatureTests
             $"The New route heading must not be clipped at {dpi} DPI; predicted={predictedTitle}, bounds={title.ClientSize}.");
 
         foreach (var label in controls.OfType<Label>().Where(label =>
-                     label.Visible &&
+                     (localVisibilityRoot is null
+                         ? label.Visible
+                         : IsLocallyVisibleWithin(label, localVisibilityRoot)) &&
                      label.Name.EndsWith("Title", StringComparison.Ordinal) &&
                      label.Name.StartsWith("Route", StringComparison.Ordinal) &&
                      label.Name != "RouteDialogTitle"))
@@ -3948,11 +4005,9 @@ internal static class RoutesFeatureTests
             isCutoverCommitted: () => true,
             layoutDpi: dpi);
         form.Controls.Add(view);
-        form.Show();
-        form.ClientSize = requestedClientSize;
-        form.PerformLayout();
+        LayoutHeadlessly(form);
         view.ActivateView();
-        Application.DoEvents();
+        LayoutHeadlessly(form);
         Assert(form.ClientSize == requestedClientSize,
             $"The Routes DPI fixture must preserve its requested {dpi}-DPI viewport; " +
             $"requested={requestedClientSize}, actual={form.ClientSize}.");
