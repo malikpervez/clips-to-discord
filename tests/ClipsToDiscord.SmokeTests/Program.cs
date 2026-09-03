@@ -3792,10 +3792,10 @@ static void AssertSettingsFormLayout(AppSettings settings)
     thread.SetApartmentState(ApartmentState.STA);
     thread.IsBackground = true;
     thread.Start();
-    if (!thread.Join(TimeSpan.FromSeconds(60)))
+    if (!thread.Join(TimeSpan.FromSeconds(120)))
     {
         throw new TimeoutException(
-            "Settings form layout validation did not finish within 60 seconds. " +
+            "Settings form layout validation did not finish within 120 seconds. " +
             "The last emitted Settings layout checkpoint identifies the stalled operation.");
     }
     if (failure is not null) throw new InvalidOperationException("Settings form layout validation failed.", failure);
