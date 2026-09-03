@@ -103,6 +103,73 @@ internal static class SettingsStore
     private static string SettingsPath => Path.Combine(DataDirectory, "settings.json");
     internal static string SafeBaselineMarkerPath => Path.Combine(DataDirectory, ".safe-baseline-required");
 
+    /// <summary>
+    /// Distinguishes a genuinely absent settings document from one whose presence cannot be
+    /// established safely. Admission may persist a fresh-profile decision only for Missing.
+    /// </summary>
+    internal static LegacyRoutingSettingsPresence InspectLegacySettingsPresence() =>
+        InspectLegacySettingsPresence(SettingsPath);
+
+    internal static LegacyRoutingSettingsPresence InspectLegacySettingsPresence(
+        string settingsPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(settingsPath);
+        var canonicalSettingsPath = Path.GetFullPath(settingsPath);
+        var settingsDirectory = Path.GetDirectoryName(canonicalSettingsPath) ??
+                                throw new ArgumentException(
+                                    "The settings path must have a parent directory.",
+                                    nameof(settingsPath));
+        try
+        {
+            var dataAttributes = File.GetAttributes(settingsDirectory);
+            if (!dataAttributes.HasFlag(FileAttributes.Directory) ||
+                dataAttributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                return LegacyRoutingSettingsPresence.Unavailable;
+            }
+        }
+        catch (Exception exception) when (
+            exception is DirectoryNotFoundException or FileNotFoundException)
+        {
+            return LegacyRoutingSettingsPresence.Missing;
+        }
+        catch (Exception)
+        {
+            return LegacyRoutingSettingsPresence.Unavailable;
+        }
+
+        try
+        {
+            var settingsAttributes = File.GetAttributes(canonicalSettingsPath);
+            if (settingsAttributes.HasFlag(FileAttributes.Directory) ||
+                settingsAttributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                return LegacyRoutingSettingsPresence.Unavailable;
+            }
+
+            // Attributes alone do not prove that SettingsStore.Load could read the document.
+            // In particular, an AV scan or another process can hold the file exclusively while
+            // still allowing GetAttributes to succeed. Probe one byte without denying ordinary
+            // readers/writers so that transient locks remain retryable admission evidence.
+            using var stream = new FileStream(
+                canonicalSettingsPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            _ = stream.ReadByte();
+            return LegacyRoutingSettingsPresence.Present;
+        }
+        catch (Exception exception) when (
+            exception is DirectoryNotFoundException or FileNotFoundException)
+        {
+            return LegacyRoutingSettingsPresence.Missing;
+        }
+        catch (Exception)
+        {
+            return LegacyRoutingSettingsPresence.Unavailable;
+        }
+    }
+
     public static AppSettings Load()
     {
         try

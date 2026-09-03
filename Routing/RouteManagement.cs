@@ -30,6 +30,10 @@ internal interface IRoutingConnectionMembership
         RoutingDestinationKind destination,
         string connectionId,
         CancellationToken cancellationToken = default);
+
+    ValueTask<IDisposable> EnterExecutionGateAsync(
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(RoutingConnectionExecutionGate.NoopLease);
 }
 
 /// <summary>
@@ -40,16 +44,48 @@ internal interface IRoutingConnectionMembership
 internal sealed class CommittedRoutingRouteMutationAuthority : IRoutingRouteMutationAuthority
 {
     private readonly LegacyRoutingMigrationMarkerStore _markers;
+    private readonly RoutingExecutionAuthorityStore _runtimeAuthority;
 
-    internal CommittedRoutingRouteMutationAuthority(LegacyRoutingMigrationMarkerStore markers)
+    internal CommittedRoutingRouteMutationAuthority(
+        LegacyRoutingMigrationMarkerStore markers,
+        RoutingExecutionAuthorityStore? runtimeAuthority = null)
     {
         _markers = markers ?? throw new ArgumentNullException(nameof(markers));
+        var directory = Path.GetDirectoryName(_markers.Path) ??
+                        throw new InvalidOperationException(
+                            "The routing marker directory is unavailable.");
+        _runtimeAuthority = runtimeAuthority ?? new RoutingExecutionAuthorityStore(
+            Path.Combine(directory, RoutingExecutionAuthorityStore.FileName));
     }
 
     public bool CanMutate(
         RoutingSnapshotDocument snapshot,
-        CancellationToken cancellationToken = default) =>
-        IsCutoverCommitted(_markers, snapshot, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var loaded = _markers.Load(cancellationToken);
+        if (!loaded.LoadedFromDisk || loaded.Document?.Phase !=
+            LegacyRoutingMigrationMarkerPhase.Committed)
+        {
+            return false;
+        }
+
+        if (loaded.Document.Origin != RoutingActivationOrigin.FreshSetup)
+            return HasExactLegacyMigrationRoute(loaded.Document, snapshot);
+
+        // A committed fresh marker precedes the irreversible runtime-authority write. Letting
+        // its frozen first route be edited in that crash window could make initial activation
+        // unrecoverable. Fresh routes become user-owned only after the exact authority is durable.
+        var authority = _runtimeAuthority.Inspect(cancellationToken);
+        return authority.RoutingRequired && authority.Document is { } document &&
+               document.MigrationId == loaded.Document.MigrationId &&
+               document.MigrationPayloadFingerprint.Equals(
+                   loaded.Document.PayloadFingerprint,
+                   StringComparison.Ordinal) &&
+               document.SourceFingerprint.Equals(
+                   loaded.Document.SourceFingerprint,
+                   StringComparison.Ordinal) &&
+               document.CaptureLibraryBinding == loaded.Document.CaptureLibraryBinding;
+    }
 
     internal static bool IsCutoverCommitted(
         LegacyRoutingMigrationMarkerStore markers,
@@ -65,11 +101,22 @@ internal sealed class CommittedRoutingRouteMutationAuthority : IRoutingRouteMuta
             return false;
         }
 
+        // A fresh marker alone is not route-mutation authority: it is written immediately before
+        // the sticky runtime-authority document. The instance gate above verifies both records.
+        if (loaded.Document.Origin == RoutingActivationOrigin.FreshSetup) return false;
+
+        return HasExactLegacyMigrationRoute(loaded.Document, snapshot);
+    }
+
+    private static bool HasExactLegacyMigrationRoute(
+        LegacyRoutingMigrationMarker marker,
+        RoutingSnapshotDocument snapshot)
+    {
         var migrationRoute = snapshot.Routes.SingleOrDefault(route =>
-            route.RouteId == loaded.Document.Route.RouteId);
+            route.RouteId == marker.Route.RouteId);
         return migrationRoute is not null &&
                LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
-                   migrationRoute, loaded.Document.Route);
+                   migrationRoute, marker.Route);
     }
 }
 
@@ -307,7 +354,7 @@ internal sealed class RoutingRouteManager
         return route.Source == RoutingRouteSource.User;
     }
 
-    private static RoutingRoute CreateRoute(
+    internal static RoutingRoute CreateRoute(
         RoutingRouteDraft draft,
         Guid routeId,
         IReadOnlyList<Guid> actionIds,
@@ -460,7 +507,7 @@ internal sealed class RoutingRouteManager
                 LegacyRoutingMigrationMarkerStore.FileName)));
     }
 
-    private static void ValidateDraft(RoutingRouteDraft draft)
+    internal static void ValidateDraft(RoutingRouteDraft draft)
     {
         ArgumentNullException.ThrowIfNull(draft);
         RoutingValidation.RequireText(draft.Name?.Trim(), 1, 80, "route name");

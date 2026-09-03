@@ -286,19 +286,47 @@ internal static class TrayRoutingRetrySequence
     }
 }
 
+/// <summary>
+/// Keeps fresh-profile prerequisite recovery on the same side of the irreversible authority
+/// boundary as route validation. A first route may not enter Lifecycle activation until every
+/// prerequisite needed by a later Routing-only cold start is durable and recoverable.
+/// </summary>
+internal static class TrayFreshRoutingActivationSequence
+{
+    internal static async Task<T> RunAsync<T>(
+        Func<CancellationToken, Task> recover,
+        Func<CancellationToken, Task<T>> activateRouting,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(recover);
+        ArgumentNullException.ThrowIfNull(activateRouting);
+
+        await recover(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return await activateRouting(cancellationToken).ConfigureAwait(false);
+    }
+}
+
 internal static class TrayRoutesRuntimePresentation
 {
     internal static RoutesRuntimeViewState Map(
         bool startupRunning,
-        RoutingApplicationLifecycleState lifecycleState)
+        RoutingApplicationLifecycleState lifecycleState,
+        LegacyRoutingMigrationAdmission admission)
     {
         if (startupRunning) return RoutesRuntimeViewState.Activating;
+        if (admission == LegacyRoutingMigrationAdmission.FreshOrInvalidProfile &&
+            lifecycleState is RoutingApplicationLifecycleState.SetupReady or
+                RoutingApplicationLifecycleState.LegacyReady)
+        {
+            return RoutesRuntimeViewState.LegacySetupNeeded;
+        }
         return lifecycleState switch
         {
             RoutingApplicationLifecycleState.RoutingRunning => RoutesRuntimeViewState.Active,
-            RoutingApplicationLifecycleState.LegacyRunning => RoutesRuntimeViewState.LegacyActive,
-            RoutingApplicationLifecycleState.LegacyReady =>
-                RoutesRuntimeViewState.LegacySetupNeeded,
+            RoutingApplicationLifecycleState.LegacyReady or
+                RoutingApplicationLifecycleState.LegacyRunning =>
+                RoutesRuntimeViewState.LegacyActive,
             RoutingApplicationLifecycleState.RoutingReady or
                 RoutingApplicationLifecycleState.RoutingQuiesced or
                 RoutingApplicationLifecycleState.RoutingRecoveryNeeded =>
@@ -309,6 +337,322 @@ internal static class TrayRoutesRuntimePresentation
 
     internal static bool IsActivationStatus(string? status) =>
         status?.StartsWith("Routes activating", StringComparison.OrdinalIgnoreCase) == true;
+}
+
+internal static class TrayRoutingAdmissionPolicy
+{
+    internal static bool AllowsLegacyRuntime(
+        LegacyRoutingMigrationAdmissionInspection inspection)
+    {
+        ArgumentNullException.ThrowIfNull(inspection);
+        return inspection.LegacyRuntimeAllowed;
+    }
+}
+
+/// <summary>
+/// Selects the irreversible activation transaction from the durable profile decision. Fresh
+/// setup is deliberately driven by an explicit route draft only while no marker exists; once a
+/// fresh marker has been written, its own frozen payload is sufficient to recover after restart.
+/// </summary>
+internal sealed class TrayRoutingActivationPreparer : IRoutingActivationPreparer
+{
+    private readonly IRoutingActivationPreparer _legacy;
+    private readonly FreshRoutingBaselinePreparer _freshBaseline;
+    private readonly LegacyRoutingMigrationCoordinator _migration;
+    private readonly LegacyRoutingMigrationMarkerStore _markers;
+    private readonly RoutingExecutionAuthorityStore _executionAuthority;
+    private readonly WatchStateStore _watchState;
+    private readonly Func<AppSettings> _settingsProvider;
+    private readonly Func<RoutingCaptureLibraryBinding> _captureLibraryBindingProvider;
+    private readonly Func<LegacyRoutingMigrationAdmission> _admissionProvider;
+    private readonly Func<RoutingRouteDraft?> _freshDraftProvider;
+    private readonly Func<DateTimeOffset> _utcNow;
+
+    internal TrayRoutingActivationPreparer(
+        IRoutingActivationPreparer legacy,
+        FreshRoutingBaselinePreparer freshBaseline,
+        LegacyRoutingMigrationCoordinator migration,
+        LegacyRoutingMigrationMarkerStore markers,
+        RoutingExecutionAuthorityStore executionAuthority,
+        WatchStateStore watchState,
+        Func<AppSettings> settingsProvider,
+        Func<RoutingCaptureLibraryBinding> captureLibraryBindingProvider,
+        Func<LegacyRoutingMigrationAdmission> admissionProvider,
+        Func<RoutingRouteDraft?> freshDraftProvider,
+        Func<DateTimeOffset>? utcNow = null)
+    {
+        _legacy = legacy ?? throw new ArgumentNullException(nameof(legacy));
+        _freshBaseline = freshBaseline ??
+                         throw new ArgumentNullException(nameof(freshBaseline));
+        _migration = migration ?? throw new ArgumentNullException(nameof(migration));
+        _markers = markers ?? throw new ArgumentNullException(nameof(markers));
+        _executionAuthority = executionAuthority ??
+                              throw new ArgumentNullException(nameof(executionAuthority));
+        _watchState = watchState ?? throw new ArgumentNullException(nameof(watchState));
+        _settingsProvider = settingsProvider ??
+                            throw new ArgumentNullException(nameof(settingsProvider));
+        _captureLibraryBindingProvider = captureLibraryBindingProvider ??
+                                         throw new ArgumentNullException(
+                                             nameof(captureLibraryBindingProvider));
+        _admissionProvider = admissionProvider ??
+                             throw new ArgumentNullException(nameof(admissionProvider));
+        _freshDraftProvider = freshDraftProvider ??
+                              throw new ArgumentNullException(nameof(freshDraftProvider));
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+    }
+
+    public async ValueTask<LegacyRoutingMigrationMarker> PrepareAsync(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var markerLoad = _markers.Load(cancellationToken);
+        if (markerLoad.Status is not (RoutingDocumentLoadStatus.Missing or
+            RoutingDocumentLoadStatus.Loaded))
+        {
+            throw new InvalidDataException(
+                $"Routing activation evidence cannot be used safely ({markerLoad.Status}).");
+        }
+        if (markerLoad.Document is { Origin: RoutingActivationOrigin.LegacyMigration })
+            return await _legacy.PrepareAsync(cancellationToken).ConfigureAwait(false);
+
+        var admission = _admissionProvider();
+        if (admission != LegacyRoutingMigrationAdmission.FreshOrInvalidProfile)
+        {
+            if (markerLoad.Document is not null)
+            {
+                throw new InvalidDataException(
+                    "Fresh Routing activation evidence conflicts with this profile decision.");
+            }
+            return await _legacy.PrepareAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var settings = _settingsProvider() ??
+                       throw new InvalidDataException(
+                           "The settings needed for fresh Routing setup are unavailable.");
+        if (!settings.IsValid)
+        {
+            throw new InvalidDataException(
+                "Fresh Routing setup requires a valid ClipCord configuration.");
+        }
+        var binding = _captureLibraryBindingProvider();
+        LegacyRoutingCutoverResult result;
+        if (markerLoad.Document is { Origin: RoutingActivationOrigin.FreshSetup })
+        {
+            var authority = _executionAuthority.Inspect(cancellationToken);
+            if (authority.Blocked)
+            {
+                throw new InvalidDataException(
+                    $"Routing execution authority cannot be trusted ({authority.LoadStatus}).");
+            }
+            // A prepared/aborting attempt has not crossed the user-visible activation boundary,
+            // so clips that arrived while it was abandoned join the baseline. Committed markers
+            // must stay frozen: files arriving after commit are legitimately new even when the
+            // separate execution-authority write was interrupted.
+            var reprepare = authority.LegacyPermitted &&
+                            markerLoad.Document.Phase is
+                                LegacyRoutingMigrationMarkerPhase.Prepared or
+                                LegacyRoutingMigrationMarkerPhase.Aborting;
+            WatchStateRoutingProbe state;
+            string watchedRootIdentitySha256;
+            if (reprepare)
+            {
+                var baseline = await _freshBaseline.PrepareAsync(
+                        settings,
+                        admission,
+                        legacyWorkerQuiesced: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                state = baseline.Probe;
+                watchedRootIdentitySha256 = baseline.WatchedRootIdentitySha256;
+            }
+            else
+            {
+                state = _watchState.ProbeForRoutingActivation(cancellationToken);
+                watchedRootIdentitySha256 = InspectFreshWatchedRootIdentity(settings);
+            }
+            if (!state.Loaded || state.State is null)
+            {
+                throw new InvalidDataException(
+                    $"The fresh Routing baseline cannot be recovered safely ({state.Status}).");
+            }
+            if (reprepare)
+            {
+                var draft = ReconstructFreshRouteDraft(markerLoad.Document.Route);
+                result = await _migration.ExecuteFreshAsync(
+                        new FreshRoutingSetupInput(
+                            settings,
+                            state.State,
+                            LegacyWorkerQuiesced: true,
+                            FirstRoute: draft,
+                            CaptureLibraryBinding: binding,
+                            WatchedRootIdentitySha256: watchedRootIdentitySha256,
+                            Admission: admission),
+                        RoutingValidation.Utc(_utcNow()),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                result = await _migration.ResumeFreshAsync(
+                        settings,
+                        state.State,
+                        binding,
+                        watchedRootIdentitySha256,
+                        RoutingValidation.Utc(_utcNow()),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            var draft = _freshDraftProvider() ?? throw new InvalidOperationException(
+                "Choose and confirm a first route before starting fresh Routing setup.");
+            RoutingRouteManager.ValidateDraft(draft);
+            var state = await _freshBaseline.PrepareAsync(
+                    settings,
+                    admission,
+                    legacyWorkerQuiesced: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            result = await _migration.ExecuteFreshAsync(
+                    new FreshRoutingSetupInput(
+                        settings,
+                        state.State!,
+                        LegacyWorkerQuiesced: true,
+                        FirstRoute: draft,
+                        CaptureLibraryBinding: binding,
+                        WatchedRootIdentitySha256: state.WatchedRootIdentitySha256,
+                        Admission: admission),
+                    RoutingValidation.Utc(_utcNow()),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (!result.IsCommitted || result.Marker is not
+            { Phase: LegacyRoutingMigrationMarkerPhase.Committed } marker)
+        {
+            throw new InvalidDataException(
+                $"The fresh Routing setup could not be committed safely ({result.Status}: {result.Reason}).");
+        }
+        return marker;
+    }
+
+    private static string InspectFreshWatchedRootIdentity(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var source = AppSettings.NormalizeCaptureSource(settings.CaptureSource);
+        if (!Enum.IsDefined(settings.CaptureSource) || source != settings.CaptureSource)
+        {
+            throw new InvalidDataException(
+                "The fresh watched-source type is invalid or non-canonical.");
+        }
+        var identity = RoutingWatchedSourceAdapters.Get(source)
+            .InspectRootIdentity(settings.ClipsFolder);
+        RoutingValidation.RequireSha256(identity, "fresh watched-source root identity");
+        return identity.ToLowerInvariant();
+    }
+
+    internal static RoutingRouteDraft ReconstructFreshRouteDraft(
+        RoutingRoute route,
+        Func<string, RoutingInputSourceKind?>? sourceKindResolver = null)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        var gameConditions = route.Conditions.Where(condition =>
+            condition.Field == RoutingConditionField.Game).ToArray();
+        var sourceConditions = route.Conditions.Where(condition =>
+            condition.Field == RoutingConditionField.SourceConnection).ToArray();
+        var capturedAtConditions = route.Conditions.Where(condition =>
+            condition.Field == RoutingConditionField.CapturedAt).ToArray();
+        if (gameConditions.Length > 1 || sourceConditions.Length > 1 ||
+            capturedAtConditions.Length > 1 ||
+            route.Conditions.Count != gameConditions.Length + sourceConditions.Length +
+            capturedAtConditions.Length)
+        {
+            throw new InvalidDataException(
+                "The prepared fresh route has unsupported or ambiguous conditions.");
+        }
+
+        DateTimeOffset? earliestCapturedUtc = null;
+        if (capturedAtConditions.SingleOrDefault() is { } capturedAt)
+        {
+            if (!DateTimeOffset.TryParseExact(
+                    capturedAt.Value,
+                    "O",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind,
+                    out var parsed))
+            {
+                throw new InvalidDataException(
+                    "The prepared fresh route has an invalid captured-at boundary.");
+            }
+            earliestCapturedUtc = RoutingValidation.Utc(parsed);
+        }
+
+        var deliveries = route.Actions.Where(action =>
+            action.Kind == RoutingActionKind.Deliver).ToArray();
+        var libraryActions = route.Actions.Where(action =>
+            action.Kind == RoutingActionKind.FileIntoLibrary).ToArray();
+        if (deliveries.Length > 1 || libraryActions.Length != 1 ||
+            route.Actions.Count != deliveries.Length + libraryActions.Length)
+        {
+            throw new InvalidDataException(
+                "The prepared fresh route has unsupported or ambiguous actions.");
+        }
+        var delivery = deliveries.SingleOrDefault();
+        var output = delivery?.OutputRef ?? (route.Prepare switch
+        {
+            { Landscape: true, Portrait: false } => RoutingOutputKind.Landscape,
+            { Landscape: false, Portrait: true } => RoutingOutputKind.Portrait,
+            { Landscape: false, Portrait: false } => RoutingOutputKind.Original,
+            _ => throw new InvalidDataException(
+                "The prepared fresh route has ambiguous prepared outputs.")
+        });
+        var sourceId = sourceConditions.SingleOrDefault()?.Value;
+        RoutingInputSourceKind? sourceKind = null;
+        if (sourceId is not null)
+        {
+            if (route.XboxHistorySelection is not null)
+            {
+                sourceKind = RoutingInputSourceKind.XboxGameDvrOneDrive;
+            }
+            else
+            {
+                sourceKind = sourceKindResolver?.Invoke(sourceId) ??
+                             ResolveSavedSourceKind(sourceId);
+                if (sourceKind is null)
+                {
+                    throw new InvalidDataException(
+                        "The prepared fresh route's named source cannot be resolved.");
+                }
+            }
+        }
+
+        var draft = new RoutingRouteDraft(
+            route.Name,
+            route.Trigger,
+            gameConditions.SingleOrDefault()?.Value,
+            delivery?.Destination,
+            delivery?.ConnectionId,
+            output,
+            delivery?.Mode ?? RoutingDeliveryMode.Automatic,
+            delivery?.OnMissingOutput ?? route.Prepare.DefaultOnMissing,
+            FileIntoLibrary: true,
+            WatchedSourceId: sourceId,
+            EarliestCapturedUtc: earliestCapturedUtc,
+            XboxHistorySelection: route.XboxHistorySelection,
+            WatchedSourceKind: sourceKind);
+        RoutingRouteManager.ValidateDraft(draft);
+        return draft;
+    }
+
+    private static RoutingInputSourceKind? ResolveSavedSourceKind(string sourceId)
+    {
+        var sources = new RoutingInputSourceCatalog().Inspect();
+        return sources.IsUsable
+            ? sources.Sources.SingleOrDefault(source =>
+                source.SourceId.Equals(sourceId, StringComparison.Ordinal))?.Kind
+            : null;
+    }
 }
 
 /// <summary>
@@ -527,6 +871,65 @@ internal sealed class TrayPendingEditedDispositionRecovery(
         {
             return false;
         }
+    }
+}
+
+/// <summary>
+/// Owns the local recovery contract shared by tray startup, retry, and fresh first-route
+/// activation. Fresh activation creates and verifies the Routing-only manual-edit journal before
+/// authority commits, so the next cold Routing startup cannot interpret its absence as an
+/// ambiguous loss of durable disposition evidence.
+/// </summary>
+internal sealed class TrayRoutingPrerequisiteRecovery(
+    Func<CancellationToken, Task> requireCurrentCaptureRecovery,
+    TrayPendingEditedDispositionRecovery pendingEditedRecovery,
+    WatchStateStore routingManualEditStateStore,
+    TrayPendingEditedDispositionRecovery routingManualEditRecovery)
+{
+    private readonly Func<CancellationToken, Task> _requireCurrentCaptureRecovery =
+        requireCurrentCaptureRecovery ??
+        throw new ArgumentNullException(nameof(requireCurrentCaptureRecovery));
+    private readonly TrayPendingEditedDispositionRecovery _pendingEditedRecovery =
+        pendingEditedRecovery ?? throw new ArgumentNullException(nameof(pendingEditedRecovery));
+    private readonly WatchStateStore _routingManualEditStateStore =
+        routingManualEditStateStore ??
+        throw new ArgumentNullException(nameof(routingManualEditStateStore));
+    private readonly TrayPendingEditedDispositionRecovery _routingManualEditRecovery =
+        routingManualEditRecovery ??
+        throw new ArgumentNullException(nameof(routingManualEditRecovery));
+
+    internal async Task RecoverAsync(
+        AppSettings settings,
+        bool recoverPendingEditedDispositions,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        await _requireCurrentCaptureRecovery(cancellationToken).ConfigureAwait(false);
+        if (recoverPendingEditedDispositions)
+        {
+            await _pendingEditedRecovery.RecoverAsync(settings, cancellationToken)
+                .ConfigureAwait(false);
+            await _routingManualEditRecovery.RecoverAsync(
+                    settings,
+                    cancellationToken,
+                    allowMissing: false)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        _ = await _routingManualEditStateStore.LoadOrInitializeAsync(
+                settings.ClipsFolder,
+                _ => { },
+                cancellationToken,
+                settings.CaptureSource)
+            .ConfigureAwait(false);
+        // Loading initializes a missing journal, but a pre-existing journal may contain an
+        // interrupted local disposition. Finish that local-only recovery before authority moves.
+        _ = await _routingManualEditRecovery.RecoverAsync(
+                settings,
+                cancellationToken,
+                allowMissing: false)
+            .ConfigureAwait(false);
     }
 }
 
@@ -928,6 +1331,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly DiscordConnectionCatalog _discordConnectionCatalog = new();
     private readonly RoutingExecutionAuthorityStore _routingAuthorityStore;
     private readonly LegacyRoutingMigrationMarkerStore _routingMigrationMarkers;
+    private readonly LegacyRoutingMigrationAdmissionInspection _routingMigrationAdmission;
     private readonly RoutingApplicationLifecycle _routingLifecycle;
     private readonly RoutingLocalOnlyOverrideState _routingLocalOnlyState;
     private readonly RoutingLocalOnlyModeViewSource _routingLocalOnlyViewSource;
@@ -942,6 +1346,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly TrayPendingEditedDispositionRecovery _pendingEditedRecovery;
     private readonly WatchStateStore _routingManualEditStateStore;
     private readonly TrayPendingEditedDispositionRecovery _routingManualEditRecovery;
+    private readonly TrayRoutingPrerequisiteRecovery _routingPrerequisiteRecovery;
     // Anything created at or after this process boundary may still be completing in the
     // isolated capture host while startup reconciliation scans the shared library.
     private readonly DateTimeOffset _captureRecoveryCutoffUtc = DateTimeOffset.UtcNow;
@@ -971,6 +1376,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private Task? _routingSessionObserver;
     private Task? _processingStartupTask;
     private int _routingRetryInProgress;
+    private RoutingRouteDraft? _pendingFreshRouteDraft;
     private bool _settingsOpen;
     private bool _automaticUpdateCheckScheduled;
     private bool _updateDialogOpen;
@@ -993,6 +1399,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _reactionCameraAttentionIcon = ReactionCameraTrayIconFactory.Create(
             ReactionCameraRuntimeState.ReleaseNeedsAttention);
         _settings = SettingsStore.Load();
+        _routingMigrationMarkers = new LegacyRoutingMigrationMarkerStore();
+        var existingMigration = _routingMigrationMarkers.Load();
+        _routingMigrationAdmission = new LegacyRoutingMigrationAdmissionStore().Resolve(
+            _settings,
+            new WatchStateStore().ProbeForLegacyMigrationAdmission(),
+            SettingsStore.InspectLegacySettingsPresence(),
+            preserveExistingMigrationLabel: existingMigration.LoadedFromDisk);
         var captureSettingsInspection = CaptureSettingsStore.Inspect();
         _captureSettings = captureSettingsInspection.Settings ?? CaptureSettings.Default;
         if (captureSettingsInspection.Error is not null)
@@ -1002,7 +1415,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 captureSettingsInspection.Error);
         }
         _routingAuthorityStore = new RoutingExecutionAuthorityStore();
-        _routingMigrationMarkers = new LegacyRoutingMigrationMarkerStore();
         _activityHistory = new ActivityHistoryStore();
         _favorites = new FavoritesService();
         _pendingEditedRecovery = new TrayPendingEditedDispositionRecovery(
@@ -1014,6 +1426,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _routingManualEditRecovery = new TrayPendingEditedDispositionRecovery(
             _routingManualEditStateStore,
             new EditedClipDispositionProcessor(favorites: _favorites));
+        _routingPrerequisiteRecovery = new TrayRoutingPrerequisiteRecovery(
+            RequireCurrentCaptureRecoveryAsync,
+            _pendingEditedRecovery,
+            _routingManualEditStateStore,
+            _routingManualEditRecovery);
         _globalHotkey = new GlobalHotkeyManager();
         _globalHotkey.Pressed += ModeToggleHotkeyPressed;
         _globalHotkey.HotkeyPressed += GlobalHotkeyPressed;
@@ -1137,6 +1554,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         var startupAuthority = InspectOperationalRoutingAuthority();
+        var freshSetupPending = IsFreshSetupPending();
         if (!startupAuthority.LegacyPermitted)
         {
             try
@@ -1169,18 +1587,32 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     ToolTipIcon.Warning), null);
             }
             UpdateLegacyModeControl();
-            _processingStartupTask = StartClipProcessingAsync();
-            _processingOperationGate.SetStartup(_processingStartupTask);
+            if (freshSetupPending)
+            {
+                SetStatus("Setup required — create your first route");
+                Application.Idle += ShowFirstRunRoutes;
+            }
+            else
+            {
+                _processingStartupTask = StartClipProcessingAsync();
+                _processingOperationGate.SetStartup(_processingStartupTask);
+            }
             _ = ApplyInitialStartupPreferenceAsync(_settings.StartWithWindows);
             StartUpdateChecks();
         }
         else
         {
-            SetStatus(startupAuthority.Blocked || startupAuthority.RoutingRequired
+            SetStatus(_routingMigrationAdmission.EffectiveAdmission ==
+                      LegacyRoutingMigrationAdmission.Deferred
+                ? "Routes need attention — migration evidence is unavailable; processing is paused"
+                : freshSetupPending
+                ? "Setup required"
+                : startupAuthority.Blocked || startupAuthority.RoutingRequired
                 ? "Routes need attention — open Settings"
                 : "Setup required");
             UpdateLegacyModeControl();
-            if (startupAuthority.RoutingRequired)
+            if (startupAuthority.RoutingRequired ||
+                _routingLifecycle.RoutingSelectedAtBootstrap)
             {
                 // Sticky authority never falls back to Legacy just because the mutable settings
                 // document needs attention. Attempt the cold Routing start so its exact marker
@@ -1219,21 +1651,44 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var watchState = new WatchStateStore();
         var snapshots = new RoutingSnapshotStore();
         var markers = _routingMigrationMarkers;
+        var inputSources = new RoutingInputSourceCatalog();
         var evidence = new LegacyRoutingActivationEvidenceSource(
             watchState,
             CurrentAppSettings,
             () => _discordConnectionCatalog.GetLegacyConnectionIds(
                 CurrentAppSettings()),
-            RequireCurrentCaptureLibraryBinding);
+            RequireCurrentCaptureLibraryBinding,
+            () => _routingMigrationAdmission.EffectiveAdmission,
+            () => _routingMigrationAdmission.ImportedRouteLabelVersion);
+        var migration = new LegacyRoutingMigrationCoordinator(snapshots, markers);
         var cutover = new LegacyDiscordConnectionCutoverAdapter(
             _discordConnectionCatalog,
-            new LegacyRoutingMigrationCoordinator(snapshots, markers));
+            migration);
+        var legacyPreparer = new LegacyRoutingActivationPreparer(
+            CurrentAppSettings,
+            watchState,
+            cutover,
+            RequireCurrentCaptureLibraryBinding,
+            admissionProvider: () => _routingMigrationAdmission.EffectiveAdmission,
+            importedRouteLabelVersionProvider: () =>
+                _routingMigrationAdmission.ImportedRouteLabelVersion);
+        var preparer = new TrayRoutingActivationPreparer(
+            legacyPreparer,
+            new FreshRoutingBaselinePreparer(watchState),
+            migration,
+            markers,
+            _routingAuthorityStore,
+            watchState,
+            CurrentAppSettings,
+            RequireCurrentCaptureLibraryBinding,
+            () => _routingMigrationAdmission.EffectiveAdmission,
+            () => Volatile.Read(ref _pendingFreshRouteDraft));
+        var freshEvidence = new FreshRoutingActivationEvidenceSource(
+            watchState,
+            CurrentAppSettings,
+            RequireCurrentCaptureLibraryBinding);
         var productionRuntime = new RoutingProductionRuntime(
-            new LegacyRoutingActivationPreparer(
-                CurrentAppSettings,
-                watchState,
-                cutover,
-                RequireCurrentCaptureLibraryBinding),
+            preparer,
             markers,
             snapshots,
             evidence,
@@ -1241,14 +1696,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
             RoutingWatchedSourceAdapters.CoveredSources,
             StartRoutingWorkSessionAsync,
             StopRoutingWorkSessionAsync,
-            PreflightRoutingWorkSessionAsync);
+            PreflightRoutingWorkSessionAsync,
+            freshActivationEvidence: freshEvidence,
+            connectionMembership: _discordConnectionCatalog,
+            inputSourceMembership: inputSources);
         return RoutingApplicationLifecycle.Create(
             _routingAuthorityStore,
             _processingOwnership,
             new TrayLegacyClipProcessingRuntime(this),
             productionRuntime,
             migrationMarkers: markers,
-            currentCaptureLibraryBinding: RequireCurrentCaptureLibraryBinding);
+            currentCaptureLibraryBinding: RequireCurrentCaptureLibraryBinding,
+            legacyRuntimeAllowed: TrayRoutingAdmissionPolicy.AllowsLegacyRuntime(
+                _routingMigrationAdmission));
     }
 
     private async Task StartClipProcessingAsync()
@@ -1290,6 +1750,26 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void HandleProcessingLifecycleResult(RoutingApplicationLifecycleResult result)
     {
+        if (result is
+            {
+                State: RoutingApplicationLifecycleState.SetupReady,
+                Status: RoutingApplicationLifecycleStatus.SetupRequired
+            })
+        {
+            if (_routingMigrationAdmission.EffectiveAdmission ==
+                LegacyRoutingMigrationAdmission.FreshOrInvalidProfile)
+            {
+                SetStatus("Setup required — create your first route");
+                _uiContext.Post(_ => UpdateLegacyModeControl(), null);
+            }
+            else
+            {
+                SetRoutingNeedsAttention(
+                    "Routes need attention — migration evidence is unavailable; processing is paused",
+                    result.Error ?? result.RoutingTransition?.Error);
+            }
+            return;
+        }
         if (result.State == RoutingApplicationLifecycleState.RoutingRunning)
         {
             var localOnly = _routingLocalOnlyState.Inspect();
@@ -1451,6 +1931,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         Exception exception,
         string? statusBeforeActivation = null)
     {
+        if (_routingMigrationAdmission.EffectiveAdmission ==
+            LegacyRoutingMigrationAdmission.FreshOrInvalidProfile)
+        {
+            SetRoutingNeedsAttention(
+                "Routes need attention — automatic processing did not start",
+                exception);
+            return;
+        }
+        if (!TrayRoutingAdmissionPolicy.AllowsLegacyRuntime(_routingMigrationAdmission))
+        {
+            SetRoutingNeedsAttention(
+                "Routes need attention — migration evidence is unavailable; processing is paused",
+                exception);
+            return;
+        }
         Log.Error(
             "Routes were not activated because local recovery prerequisites did not finish; legacy clip processing remains active.",
             exception);
@@ -1477,7 +1972,171 @@ internal sealed class TrayApplicationContext : ApplicationContext
                                 Volatile.Read(ref _routingRetryInProgress) != 0;
         return TrayRoutesRuntimePresentation.Map(
             transitionRunning,
-            _routingLifecycle.State);
+            _routingLifecycle.State,
+            _routingMigrationAdmission.EffectiveAdmission);
+    }
+
+    private async Task<bool> ActivateFreshRouteAsync(RoutingRouteDraft draft)
+    {
+        ArgumentNullException.ThrowIfNull(draft);
+        using var processingMutation = await _processingOperationGate.EnterAsync(
+            _lifetimeCancellation.Token);
+        if (_shutdownScheduled) return false;
+
+        Interlocked.Exchange(ref _routingRetryInProgress, 1);
+        SetStatus("Routes activating — preparing your first route");
+        try
+        {
+            RequireFreshSetupReady();
+            var settings = CurrentAppSettings();
+            RoutingRouteManager.ValidateDraft(draft);
+            await RequireFreshRouteDependenciesAsync(
+                    draft,
+                    _lifetimeCancellation.Token)
+                .ConfigureAwait(false);
+            // Source enabling is a durable, worker-free prerequisite. Recheck the authority fence
+            // after that write before exposing the draft to the activation transaction.
+            RequireFreshSetupReady();
+            if (Interlocked.CompareExchange(
+                    ref _pendingFreshRouteDraft,
+                    draft,
+                    comparand: null) is not null)
+            {
+                throw new InvalidOperationException(
+                    "Another first-route activation is already in progress.");
+            }
+
+            var result = await TrayFreshRoutingActivationSequence.RunAsync(
+                    recoveryToken => RecoverRoutingPrerequisitesAsync(
+                        settings,
+                        recoverPendingEditedDispositions: false,
+                        recoveryToken),
+                    activationToken =>
+                    {
+                        // Recovery can involve local I/O. Revalidate the fresh authority fence at
+                        // the last boundary before Lifecycle is allowed to prepare and commit.
+                        RequireFreshSetupReady();
+                        return _routingLifecycle.ActivateRoutingAsync(activationToken);
+                    },
+                    _lifetimeCancellation.Token)
+                .ConfigureAwait(false);
+            if (result.State == RoutingApplicationLifecycleState.RoutingRunning)
+            {
+                HandleProcessingLifecycleResult(result);
+                _uiContext.Post(_ => ShowHotkeyNotification(
+                    "Routes active",
+                    "Your first route is active. New clips now use your saved routes.",
+                    ToolTipIcon.Info), null);
+                return true;
+            }
+
+            var error = result.Error ?? result.RoutingTransition?.Error ??
+                new InvalidOperationException("The first route was not activated.");
+            if (result.State == RoutingApplicationLifecycleState.SetupReady)
+                ReportFreshRoutingSetupDeferred(error);
+            else
+                HandleProcessingLifecycleResult(result);
+            return false;
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException or IOException or
+                UnauthorizedAccessException or ArgumentException or NotSupportedException or
+                PathTooLongException or System.Security.SecurityException)
+        {
+            if (_routingLifecycle.State == RoutingApplicationLifecycleState.SetupReady)
+                ReportFreshRoutingSetupDeferred(exception);
+            else
+                SetRoutingNeedsAttention(
+                    "Routes need attention — first-route recovery is paused",
+                    exception);
+            return false;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _pendingFreshRouteDraft, null);
+            Interlocked.Exchange(ref _routingRetryInProgress, 0);
+            _uiContext.Post(_ => UpdateLegacyModeControl(), null);
+        }
+    }
+
+    private void RequireFreshSetupReady()
+    {
+        if (_routingMigrationAdmission.EffectiveAdmission !=
+                LegacyRoutingMigrationAdmission.FreshOrInvalidProfile ||
+            _routingLifecycle.State != RoutingApplicationLifecycleState.SetupReady)
+        {
+            throw new InvalidOperationException(
+                "This profile is not waiting for a fresh first route.");
+        }
+        var authority = _routingAuthorityStore.Inspect(_lifetimeCancellation.Token);
+        if (!authority.LegacyPermitted)
+        {
+            throw new InvalidDataException(
+                "Routing authority changed before the first route could be activated.");
+        }
+        var marker = _routingMigrationMarkers.Load(_lifetimeCancellation.Token);
+        if (marker.Status != RoutingDocumentLoadStatus.Missing)
+        {
+            throw new InvalidDataException(
+                $"Fresh Routing activation evidence already exists ({marker.Status}).");
+        }
+    }
+
+    private async Task RequireFreshRouteDependenciesAsync(
+        RoutingRouteDraft draft,
+        CancellationToken cancellationToken)
+    {
+        if (draft.Destination is { } destination &&
+            !((IRoutingConnectionMembership)_discordConnectionCatalog).IsReady(
+                destination,
+                draft.ConnectionId!,
+                cancellationToken))
+        {
+            throw new InvalidOperationException(
+                "The selected destination connection is missing or needs attention.");
+        }
+        if (draft.WatchedSourceId is not { } sourceId) return;
+
+        var sourceKind = draft.WatchedSourceKind ??
+                         (draft.XboxHistorySelection is not null
+                             ? RoutingInputSourceKind.XboxGameDvrOneDrive
+                             : throw new InvalidDataException(
+                                 "The selected watched source kind is missing."));
+        var catalog = new RoutingInputSourceCatalog();
+        var membership = (IRoutingInputSourceMembership)catalog;
+        if (!membership.IsRouteBindable(sourceId, sourceKind, cancellationToken))
+        {
+            throw new InvalidOperationException(
+                "The selected input source is missing, replaced, retired, or needs attention.");
+        }
+
+        var viewSource = new RoutingInputSourceCatalogViewSource(
+            catalog,
+            new WindowsXboxDvrMetadataFileSystem(),
+            libraryRoot: _captureSettings.LibraryRoot,
+            legacyWatchedRoot: CurrentAppSettings().ClipsFolder);
+        if (!await viewSource.EnableAsync(sourceId, cancellationToken).ConfigureAwait(false) ||
+            !membership.IsReady(sourceId, sourceKind, CancellationToken.None))
+        {
+            throw new InvalidOperationException(
+                "The selected input source could not be enabled with its verified baseline.");
+        }
+    }
+
+    private void ReportFreshRoutingSetupDeferred(Exception exception)
+    {
+        Log.Error(
+            "The first route was not activated; no automatic clip processing was started.",
+            exception);
+        SetStatus("Setup required — first route was not activated");
+        _uiContext.Post(_ => ShowHotkeyNotification(
+            "Routes setup not finished",
+            "No automatic clip processing started. Review the first route and try again.",
+            ToolTipIcon.Warning), null);
     }
 
     /// <summary>
@@ -2142,25 +2801,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         bool recoverPendingEditedDispositions,
         CancellationToken cancellationToken)
     {
-        await RequireCurrentCaptureRecoveryAsync(cancellationToken).ConfigureAwait(false);
-        if (recoverPendingEditedDispositions)
-        {
-            await _pendingEditedRecovery.RecoverAsync(settings, cancellationToken)
-                .ConfigureAwait(false);
-            await _routingManualEditRecovery.RecoverAsync(
-                    settings,
-                    cancellationToken,
-                    allowMissing: false)
-                .ConfigureAwait(false);
-            return;
-        }
-        // Create the Routing-owned manual-edit journal before the first authority commit. A
-        // later missing file is therefore ambiguous and must fail closed on cold Routing start.
-        _ = await _routingManualEditStateStore.LoadOrInitializeAsync(
-                settings.ClipsFolder,
-                _ => { },
-                cancellationToken,
-                settings.CaptureSource)
+        await _routingPrerequisiteRecovery.RecoverAsync(
+                settings,
+                recoverPendingEditedDispositions,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -2172,10 +2816,28 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _routingAuthorityStore.Inspect(),
             _routingLifecycle.LegacyOperationsPermitted);
 
+    private bool IsFreshSetupPending()
+    {
+        if (_routingMigrationAdmission.EffectiveAdmission !=
+                LegacyRoutingMigrationAdmission.FreshOrInvalidProfile ||
+            _routingLifecycle.State != RoutingApplicationLifecycleState.SetupReady ||
+            !_routingAuthorityStore.Inspect().LegacyPermitted)
+        {
+            return false;
+        }
+        return _routingMigrationMarkers.Load().Status == RoutingDocumentLoadStatus.Missing;
+    }
+
     private void ShowFirstRunSettings(object? sender, EventArgs eventArgs)
     {
         Application.Idle -= ShowFirstRunSettings;
         ShowSettings(exitIfCancelled: true);
+    }
+
+    private void ShowFirstRunRoutes(object? sender, EventArgs eventArgs)
+    {
+        Application.Idle -= ShowFirstRunRoutes;
+        ShowSettings(initialPage: SettingsPage.Routes);
     }
 
     private async void ShowSettings(
@@ -2195,10 +2857,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
             return;
         }
+        var reopenRoutesAfterSave = false;
         _settingsOpen = true;
         try
         {
-            if (InspectOperationalRoutingAuthority().LegacyPermitted &&
+            if (_routingMigrationAdmission.AllowsLegacyImport &&
+                InspectOperationalRoutingAuthority().LegacyPermitted &&
                 ShouldStageLegacyDiscordConnection(_settings))
             {
                 var imported = await _discordConnectionCatalog.EnsureLegacyConnectionAsync(
@@ -2231,7 +2895,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 routesRuntimeStateProvider: GetRoutesRuntimeViewState,
                 retryRoutesRuntimeAsync: RetryRoutesRuntimeFromUiAsync,
                 localOnlyMode: _routingLocalOnlyViewSource,
-                routingPresentationProvider: GetRoutingUiPresentationSnapshot);
+                routingPresentationProvider: GetRoutingUiPresentationSnapshot,
+                showMigratedInputSource: HasCommittedLegacyMigrationRoute(),
+                setupFirstRouteAsync: _settings.IsValid ? ActivateFreshRouteAsync : null,
+                showMigratedInputSourceProvider: HasCommittedLegacyMigrationRoute);
             form.GalleryRenditionRetryRequested += GalleryRenditionRetryRequested;
             _settingsForm = form;
             if (form.ShowDialog() == DialogResult.OK &&
@@ -2240,6 +2907,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             {
                 await PersistAndApplySettingsAsync(form.SavedSettings);
                 if (_shutdownScheduled) return;
+                reopenRoutesAfterSave = IsFreshSetupPending();
                 _trayIcon.ShowBalloonTip(
                     2500,
                     "ClipCord",
@@ -2263,12 +2931,35 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _settingsForm = null;
             _settingsOpen = false;
+            if (reopenRoutesAfterSave && !_shutdownScheduled)
+            {
+                _uiContext.Post(
+                    _ => ShowSettings(initialPage: SettingsPage.Routes),
+                    null);
+            }
         }
     }
 
     internal static bool ShouldStageLegacyDiscordConnection(AppSettings settings) =>
         settings is { UploadToDiscord: true } &&
         WebhookValidation.IsDiscordWebhook(settings.WebhookUrl);
+
+    private bool HasCommittedLegacyMigrationRoute()
+    {
+        var marker = _routingMigrationMarkers.Load();
+        if (!marker.LoadedFromDisk || marker.Document is not
+            {
+                Phase: LegacyRoutingMigrationMarkerPhase.Committed,
+                Origin: RoutingActivationOrigin.LegacyMigration
+            } committed)
+        {
+            return false;
+        }
+        var routes = new RoutingSnapshotStore().Load();
+        return routes.LoadedFromDisk && routes.Document?.Routes.Count(route =>
+            route.RouteId == committed.Route.RouteId &&
+            route.Source == RoutingRouteSource.Migration) == 1;
+    }
 
     private async Task PersistAndApplySettingsAsync(AppSettings updated)
     {
@@ -2285,7 +2976,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
 
         var previous = _settings;
-        var authorityBefore = InspectOperationalRoutingAuthority();
+        // A durable fresh-profile decision fences the legacy worker, but it must not make the
+        // ordinary first-run settings form read-only before the user can choose a watched folder.
+        var authorityBefore = IsFreshSetupPending()
+            ? _routingAuthorityStore.Inspect()
+            : InspectOperationalRoutingAuthority();
         var settingsGuard = RoutingSettingsAuthorityGuard.Evaluate(
             authorityBefore,
             previous,
@@ -2359,6 +3054,16 @@ internal sealed class TrayApplicationContext : ApplicationContext
             throw new InvalidOperationException(
                 $"Windows could not register {AppSettings.NormalizeModeToggleHotkey(settings.ModeToggleHotkey)}. " +
                 "It may already be used by another application. Choose a different shortcut.");
+        }
+
+        if (IsFreshSetupPending())
+        {
+            // Fresh profiles have no compatibility watcher to restart. Persist safe shell
+            // preferences, then leave processing ownerless until an explicit first route commits.
+            await StartupManager.ApplyAsync(settings.StartWithWindows);
+            SetStatus("Setup required — create your first route");
+            _uiContext.Post(_ => UpdateLegacyModeControl(), null);
+            return;
         }
 
         var authority = InspectOperationalRoutingAuthority();
@@ -4331,6 +5036,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RoutingApplicationLifecycleState lifecycleState,
         bool uploadToDiscord)
     {
+        if (lifecycleState == RoutingApplicationLifecycleState.SetupReady)
+            return "Settings saved. Create your first route to start clip processing.";
         if (routingRequired)
         {
             return lifecycleState == RoutingApplicationLifecycleState.RoutingRunning

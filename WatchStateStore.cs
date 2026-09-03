@@ -9,6 +9,7 @@ internal enum WatchStateRoutingProbeStatus
 {
     Missing,
     Loaded,
+    ReleasedUnversioned,
     Corrupt,
     UnsupportedVersion,
     Invalid,
@@ -28,9 +29,9 @@ internal sealed record WatchStateRoutingProbe(
 
 internal sealed class WatchStateStore
 {
-    private const int CurrentVersion = 4;
-    private const int MinimumCompatibleVersion = 2;
-    private const int MaximumStateBytes = 8 * 1024 * 1024;
+    internal const int CurrentVersion = 4;
+    internal const int MinimumCompatibleVersion = 2;
+    internal const int MaximumStateBytes = 8 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _statePath;
     private readonly string _safeBaselineMarkerPath;
@@ -56,7 +57,22 @@ internal sealed class WatchStateStore
     /// future-version state must pause cutover rather than being interpreted as empty queues.
     /// </summary>
     internal WatchStateRoutingProbe ProbeForRoutingActivation(
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        ProbeReadOnlyState(allowCompatibleLegacyVersion: false, cancellationToken);
+
+    /// <summary>
+    /// Strict, read-only evidence used only to decide whether a profile already belonged to a
+    /// 1.x install. The exact unversioned v1.0-v1.1 schema and versions 2 and 3 were emitted by
+    /// released 1.x builds and are accepted here; the legacy runtime upgrades them to version 4
+    /// before Routing can commit.
+    /// </summary>
+    internal WatchStateRoutingProbe ProbeForLegacyMigrationAdmission(
+        CancellationToken cancellationToken = default) =>
+        ProbeReadOnlyState(allowCompatibleLegacyVersion: true, cancellationToken);
+
+    private WatchStateRoutingProbe ProbeReadOnlyState(
+        bool allowCompatibleLegacyVersion,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         try
@@ -77,13 +93,35 @@ internal sealed class WatchStateStore
                 return Probe(WatchStateRoutingProbeStatus.Invalid);
             }
 
+            using var parsed = JsonDocument.Parse(bytes);
             var state = JsonSerializer.Deserialize<WatchState>(bytes, JsonOptions);
             if (state is null) return Probe(WatchStateRoutingProbeStatus.Corrupt);
-            if (state.Version != CurrentVersion)
+            if (allowCompatibleLegacyVersion && state.Version == 0 &&
+                IsReleasedUnversionedLegacyState(parsed.RootElement, state))
+            {
+                return new WatchStateRoutingProbe(
+                    WatchStateRoutingProbeStatus.ReleasedUnversioned,
+                    state.PendingMoves.Count,
+                    state.PendingLocalOnlyMoves.Count,
+                    state.PendingEditedUploads.Count,
+                    state.IgnoredFileKeys.Count,
+                    state);
+            }
+            var versionSupported = allowCompatibleLegacyVersion
+                ? state.Version is >= MinimumCompatibleVersion and <= CurrentVersion
+                : state.Version == CurrentVersion;
+            if (!versionSupported)
             {
                 return Probe(WatchStateRoutingProbeStatus.UnsupportedVersion);
             }
+            if (allowCompatibleLegacyVersion)
+                ValidateLegacyAdmissionDocument(parsed.RootElement, state.Version);
             ValidateRoutingProbeState(state);
+            if (state.Version < CurrentVersion &&
+                state.CaptureSource != ClipCaptureSource.SteelSeriesGg)
+            {
+                return Probe(WatchStateRoutingProbeStatus.Invalid);
+            }
             return new WatchStateRoutingProbe(
                 WatchStateRoutingProbeStatus.Loaded,
                 state.PendingMoves.Count,
@@ -118,11 +156,25 @@ internal sealed class WatchStateStore
         captureSource = AppSettings.NormalizeCaptureSource(captureSource);
         var forceSafeBaseline = File.Exists(_safeBaselineMarkerPath);
         WatchState? saved = null;
+        var unsupportedFutureVersion = false;
         try
         {
             if (File.Exists(_statePath))
             {
-                saved = JsonSerializer.Deserialize<WatchState>(File.ReadAllText(_statePath), JsonOptions);
+                var serialized = File.ReadAllText(_statePath);
+                using var parsed = JsonDocument.Parse(serialized);
+                if (parsed.RootElement.ValueKind == JsonValueKind.Object &&
+                    parsed.RootElement.TryGetProperty(nameof(WatchState.Version), out var version) &&
+                    version.ValueKind == JsonValueKind.Number &&
+                    (!version.TryGetInt32(out var persistedVersion) ||
+                     persistedVersion > CurrentVersion))
+                {
+                    unsupportedFutureVersion = true;
+                }
+                else
+                {
+                    saved = JsonSerializer.Deserialize<WatchState>(serialized, JsonOptions);
+                }
             }
         }
         catch (Exception exception)
@@ -130,7 +182,15 @@ internal sealed class WatchStateStore
             Log.Error("Could not read uploader state; creating a safe baseline.", exception);
         }
 
-        if (!forceSafeBaseline && saved is not null && saved.Version >= MinimumCompatibleVersion)
+        if (unsupportedFutureVersion)
+        {
+            reportStatus("Watcher state is from a newer ClipCord version — processing is paused");
+            throw new InvalidDataException(
+                "The uploader state belongs to a newer ClipCord version and cannot be downgraded safely.");
+        }
+
+        if (!forceSafeBaseline && saved is not null &&
+            saved.Version is >= MinimumCompatibleVersion and <= CurrentVersion)
         {
             var needsLocalOnlyBaseline = saved.Version < 3;
             var needsVersionUpgrade = saved.Version < CurrentVersion;
@@ -198,11 +258,15 @@ internal sealed class WatchStateStore
 
     public void Save(WatchState state)
     {
+        var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(state, JsonOptions));
+        if (payload.Length is <= 0 or > MaximumStateBytes)
+        {
+            throw new InvalidDataException("The uploader state is too large.");
+        }
         var stateDirectory = Path.GetDirectoryName(_statePath)
             ?? throw new InvalidOperationException("The state directory could not be determined.");
         Directory.CreateDirectory(stateDirectory);
         var temporaryPath = _statePath + ".tmp";
-        var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(state, JsonOptions));
         using (var stream = new FileStream(
                    temporaryPath,
                    FileMode.Create,
@@ -510,6 +574,75 @@ internal sealed class WatchStateStore
         // A hash can legitimately have both histories in legacy builds: uploaded once, then
         // encountered again while Local-only mode was selected. The quiesced Routing migration
         // canonicalizes that history with Uploaded precedence before committing its marker.
+    }
+
+    private static void ValidateLegacyAdmissionDocument(JsonElement root, int version)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException("The legacy watcher state is not a JSON object.");
+
+        var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in root.EnumerateObject())
+        {
+            if (!propertyNames.Add(property.Name))
+                throw new InvalidDataException("The legacy watcher state contains duplicate fields.");
+        }
+
+        var required = version switch
+        {
+            2 => new[]
+            {
+                "Version", "ClipsFolder", "KnownContentHashes", "UploadedContentHashes",
+                "IgnoredFileKeys", "PendingMoves"
+            },
+            3 => new[]
+            {
+                "Version", "ClipsFolder", "KnownContentHashes", "UploadedContentHashes",
+                "LocalOnlyContentHashes", "IgnoredFileKeys", "PendingMoves",
+                "PendingLocalOnlyMoves"
+            },
+            4 => new[]
+            {
+                "Version", "ClipsFolder", "KnownContentHashes", "UploadedContentHashes",
+                "LocalOnlyContentHashes", "IgnoredFileKeys", "PendingMoves",
+                "PendingLocalOnlyMoves", "PendingEditedUploads"
+            },
+            _ => throw new InvalidDataException(
+                "The legacy watcher state version is not admission-compatible.")
+        };
+        if (required.Any(property => !propertyNames.Contains(property)))
+            throw new InvalidDataException("The legacy watcher state is missing required fields.");
+    }
+
+    private static bool IsReleasedUnversionedLegacyState(
+        JsonElement root,
+        WatchState state)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return false;
+        var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in root.EnumerateObject())
+        {
+            if (!propertyNames.Add(property.Name))
+                throw new InvalidDataException(
+                    "The unversioned legacy watcher state contains duplicate fields.");
+        }
+        if (!propertyNames.SetEquals(
+                ["ClipsFolder", "KnownSignatures", "PendingMoves"]))
+        {
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(state.ClipsFolder) ||
+            !Path.IsPathFullyQualified(state.ClipsFolder) ||
+            state.KnownSignatures is null ||
+            state.KnownSignatures.Any(string.IsNullOrWhiteSpace) ||
+            state.PendingMoves is null ||
+            state.PendingMoves.Any(path => string.IsNullOrWhiteSpace(path) ||
+                                           !Path.IsPathFullyQualified(path)))
+        {
+            throw new InvalidDataException(
+                "The unversioned legacy watcher state is incomplete or inconsistent.");
+        }
+        return true;
     }
 
     private static void ValidateHashes(IEnumerable<string> hashes)

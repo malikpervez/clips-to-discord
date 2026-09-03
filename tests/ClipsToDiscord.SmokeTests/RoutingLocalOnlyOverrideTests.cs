@@ -238,7 +238,8 @@ internal static class RoutingLocalOnlyOverrideTests
                 state,
                 LegacyWorkerQuiesced: true,
                 DiscordConnectionIds: [],
-                RoutingCaptureLibraryBindingModel.Create(captureLibrary)),
+                RoutingCaptureLibraryBindingModel.Create(captureLibrary),
+                LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
             StartedUtc).Plan ?? throw new InvalidOperationException(
                 "The watched Local-only fixture could not create its migration route.");
         var marker = LegacyRoutingMigrationMarkerModel.Commit(
@@ -286,7 +287,19 @@ internal static class RoutingLocalOnlyOverrideTests
             source,
             new RevalidatingWatchedAdapter(source.Source),
             marker,
-            routingSnapshot);
+            routingSnapshot,
+            new RoutingRuntimeGateInspection(
+                RoutingRuntimeGateState.Enabled,
+                0,
+                0,
+                0,
+                0,
+                routingSnapshot.Generation,
+                marker.PayloadFingerprint,
+                OwnershipEpoch: 1,
+                source.Source,
+                new HashSet<ClipCaptureSource> { source.Source },
+                Guid.NewGuid()));
         admission = new RoutingLocalOnlyAdmissionSnapshot(
             Enabled: false,
             StateRevision: 9,

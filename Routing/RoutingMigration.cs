@@ -18,6 +18,8 @@ internal enum LegacyRoutingCutoverScope
 internal enum LegacyRoutingCutoverReadinessStatus
 {
     Ready,
+    NoLegacyUpgradeEvidence,
+    NoFreshProfileEvidence,
     LegacyWorkerActive,
     PendingLegacyWork,
     UnreconciledIgnoredFiles,
@@ -25,7 +27,8 @@ internal enum LegacyRoutingCutoverReadinessStatus
     InvalidWatchState,
     MissingDiscordConnection,
     AmbiguousDiscordConnection,
-    InvalidDiscordConnection
+    InvalidDiscordConnection,
+    InvalidFreshRoute
 }
 
 internal enum LegacyRoutingCutoverResultStatus
@@ -46,6 +49,17 @@ internal enum LegacyRoutingMigrationMarkerPhase
 }
 
 /// <summary>
+/// Persisted discriminator for the two ways Routing can acquire initial authority. Legacy is
+/// deliberately zero so markers written before this field existed deserialize to their original
+/// meaning without changing their schema or payload fingerprint.
+/// </summary>
+internal enum RoutingActivationOrigin
+{
+    LegacyMigration = 0,
+    FreshSetup = 1
+}
+
+/// <summary>
 /// The connector slice supplies opaque ids. Migration never derives an id from, nor persists,
 /// the legacy webhook URL or token.
 /// </summary>
@@ -54,7 +68,24 @@ internal sealed record LegacyRoutingMigrationInput(
     WatchState WatchState,
     bool LegacyWorkerQuiesced,
     IReadOnlyList<string> DiscordConnectionIds,
-    RoutingCaptureLibraryBinding CaptureLibraryBinding);
+    RoutingCaptureLibraryBinding CaptureLibraryBinding,
+    LegacyRoutingMigrationAdmission Admission,
+    int ImportedRouteLabelVersion =
+        LegacyRoutingMigrationPlanner.CurrentImportedRouteLabelVersion);
+
+/// <summary>
+/// Explicit new-profile setup input. Unlike legacy migration, the route is supplied by the user
+/// and no legacy destination is inferred or imported. The root identity must come from the same
+/// stable native-source inspection that produced the supplied watcher baseline.
+/// </summary>
+internal sealed record FreshRoutingSetupInput(
+    AppSettings Settings,
+    WatchState WatchState,
+    bool LegacyWorkerQuiesced,
+    RoutingRouteDraft FirstRoute,
+    RoutingCaptureLibraryBinding CaptureLibraryBinding,
+    string WatchedRootIdentitySha256,
+    LegacyRoutingMigrationAdmission Admission);
 
 internal sealed record LegacyContentHashExclusions(
     IReadOnlyList<string> Known,
@@ -78,7 +109,9 @@ internal sealed record LegacyRoutingMigrationPlan(
     string SourceFingerprint,
     RoutingCaptureLibraryBinding CaptureLibraryBinding,
     RoutingRoute Route,
-    LegacyContentHashExclusions ContentHashExclusions);
+    LegacyContentHashExclusions ContentHashExclusions,
+    RoutingActivationOrigin Origin = RoutingActivationOrigin.LegacyMigration,
+    int? ImportedRouteLabelVersion = null);
 
 internal sealed record LegacyRoutingCutoverReadiness(
     LegacyRoutingCutoverReadinessStatus Status,
@@ -111,7 +144,9 @@ internal sealed record LegacyRoutingMigrationMarker(
     RoutingRoute Route,
     LegacyContentHashExclusions ContentHashExclusions,
     DateTimeOffset CreatedUtc,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc,
+    RoutingActivationOrigin Origin = RoutingActivationOrigin.LegacyMigration,
+    int? ImportedRouteLabelVersion = null);
 
 /// <summary>
 /// Pure translation of the 1.x settings and exclusion state. It describes only future clips;
@@ -119,6 +154,9 @@ internal sealed record LegacyRoutingMigrationMarker(
 /// </summary>
 internal static class LegacyRoutingMigrationPlanner
 {
+    internal const string ImportedRouteLabel = "Imported from ClipCord 1.x";
+    internal const int LegacyImportedRouteLabelVersion = 1;
+    internal const int CurrentImportedRouteLabelVersion = 2;
     private const string DiscordRouteName = "Everything else → Friends server";
     private const string LocalRouteName = "Everything else → Local only";
     internal const int MaximumPersistedHashOccurrences = 90_000;
@@ -133,6 +171,17 @@ internal static class LegacyRoutingMigrationPlanner
         {
             return Blocked(LegacyRoutingCutoverReadinessStatus.InvalidLegacySettings,
                 "The legacy migration input is incomplete.");
+        }
+        if (input.Admission != LegacyRoutingMigrationAdmission.ValidLegacyUpgrade)
+        {
+            return Blocked(LegacyRoutingCutoverReadinessStatus.NoLegacyUpgradeEvidence,
+                "No valid pre-2.0 ClipCord settings and watcher state were found. Set up Routes as a new profile.");
+        }
+        if (input.ImportedRouteLabelVersion is not
+            (LegacyImportedRouteLabelVersion or CurrentImportedRouteLabelVersion))
+        {
+            return Blocked(LegacyRoutingCutoverReadinessStatus.InvalidLegacySettings,
+                "The imported route label version is unsupported.");
         }
         if (!input.LegacyWorkerQuiesced)
         {
@@ -227,7 +276,8 @@ internal static class LegacyRoutingMigrationPlanner
             input.Settings.CaptureSource,
             connectionId,
             input.CaptureLibraryBinding,
-            exclusions!);
+            exclusions!,
+            input.ImportedRouteLabelVersion);
         var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
         var routeId = DeterministicGuid(fingerprint, "route");
         var actions = mode == LegacyRoutingMode.DiscordUpload
@@ -257,7 +307,9 @@ internal static class LegacyRoutingMigrationPlanner
             ];
         var route = new RoutingRoute(
             routeId,
-            mode == LegacyRoutingMode.DiscordUpload ? DiscordRouteName : LocalRouteName,
+            input.ImportedRouteLabelVersion == CurrentImportedRouteLabelVersion
+                ? ImportedRouteLabel
+                : mode == LegacyRoutingMode.DiscordUpload ? DiscordRouteName : LocalRouteName,
             Enabled: true,
             Priority: 0,
             Revision: 1,
@@ -294,7 +346,9 @@ internal static class LegacyRoutingMigrationPlanner
             fingerprint,
             input.CaptureLibraryBinding,
             route,
-            exclusions!);
+            exclusions!,
+            RoutingActivationOrigin.LegacyMigration,
+            input.ImportedRouteLabelVersion);
         return new LegacyRoutingCutoverReadiness(
             LegacyRoutingCutoverReadinessStatus.Ready,
             "The legacy queues are drained and the cutover plan is ready.",
@@ -334,7 +388,7 @@ internal static class LegacyRoutingMigrationPlanner
         LegacyRoutingCutoverReadinessStatus status,
         string reason) => new(status, reason, Plan: null);
 
-    private static bool TryValidateSettingsAndState(
+    internal static bool TryValidateSettingsAndState(
         AppSettings settings,
         WatchState state,
         out string reason)
@@ -366,7 +420,7 @@ internal static class LegacyRoutingMigrationPlanner
         return true;
     }
 
-    private static bool TryCreateExclusions(
+    internal static bool TryCreateExclusions(
         WatchState state,
         out LegacyContentHashExclusions? exclusions,
         out string reason)
@@ -417,7 +471,8 @@ internal static class LegacyRoutingMigrationPlanner
         ClipCaptureSource captureSource,
         string? connectionId,
         RoutingCaptureLibraryBinding captureLibraryBinding,
-        LegacyContentHashExclusions exclusions)
+        LegacyContentHashExclusions exclusions,
+        int importedRouteLabelVersion = LegacyImportedRouteLabelVersion)
     {
         RoutingCaptureLibraryBindingModel.Validate(captureLibraryBinding);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -430,6 +485,8 @@ internal static class LegacyRoutingMigrationPlanner
         Append(hash, connectionId ?? string.Empty);
         Append(hash, captureLibraryBinding.CanonicalPathFingerprint);
         Append(hash, captureLibraryBinding.NativeDirectoryIdentityFingerprint);
+        if (importedRouteLabelVersion == CurrentImportedRouteLabelVersion)
+            Append(hash, "imported-route-label-v2");
         foreach (var value in exclusions.Known) Append(hash, "known:" + value);
         foreach (var value in exclusions.Uploaded) Append(hash, "uploaded:" + value);
         foreach (var value in exclusions.LocalOnly) Append(hash, "local:" + value);
@@ -460,7 +517,8 @@ internal static class LegacyRoutingMigrationPlanner
         LegacyRoutingCutoverScope scope,
         RoutingCaptureLibraryBinding captureLibraryBinding,
         RoutingRoute route,
-        LegacyContentHashExclusions exclusions)
+        LegacyContentHashExclusions exclusions,
+        int? importedRouteLabelVersion = null)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Append(hash, "clipcord-legacy-marker-payload-v2");
@@ -520,6 +578,10 @@ internal static class LegacyRoutingMigrationPlanner
         foreach (var value in exclusions.Known) Append(hash, "known:" + value);
         foreach (var value in exclusions.Uploaded) Append(hash, "uploaded:" + value);
         foreach (var value in exclusions.LocalOnly) Append(hash, "local:" + value);
+        // Null and v1 deliberately append nothing: markers written before this field existed
+        // retain their exact payload digest. New imported-label markers bind the persisted choice.
+        if (importedRouteLabelVersion == CurrentImportedRouteLabelVersion)
+            Append(hash, "imported-route-label-version:2");
         return Convert.ToHexString(hash.GetHashAndReset());
     }
 
@@ -539,6 +601,556 @@ internal static class LegacyRoutingMigrationPlanner
     }
 }
 
+/// <summary>
+/// Pure planner for an explicitly submitted first route on a durably fresh profile. It reuses
+/// the legacy watch-state baseline only as safety evidence; it never creates a migration route,
+/// imports a destination, or assigns an imported-route label.
+/// </summary>
+internal static class FreshRoutingSetupPlanner
+{
+    private const string SourceFingerprintDomain = "clipcord-fresh-routing-source-v2";
+    private const string RouteDefinitionFingerprintDomain =
+        "clipcord-fresh-routing-route-definition-v1";
+    private const string SetupFingerprintDomain = "clipcord-fresh-routing-setup-v1";
+    private const string PayloadFingerprintDomain = "clipcord-fresh-routing-payload-v1";
+
+    internal static LegacyRoutingCutoverReadiness Evaluate(
+        FreshRoutingSetupInput input,
+        DateTimeOffset? now = null)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (input.Settings is null || input.WatchState is null || input.FirstRoute is null ||
+            input.CaptureLibraryBinding is null)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidFreshRoute,
+                "The fresh Routing setup input is incomplete.");
+        }
+        if (input.Admission != LegacyRoutingMigrationAdmission.FreshOrInvalidProfile)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.NoFreshProfileEvidence,
+                "Fresh Routing setup requires a durable negative legacy-migration decision.");
+        }
+        if (!input.LegacyWorkerQuiesced)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.LegacyWorkerActive,
+                "The compatibility watcher must be stopped before fresh Routing setup commits.");
+        }
+
+        try
+        {
+            RoutingCaptureLibraryBindingModel.Validate(input.CaptureLibraryBinding);
+        }
+        catch (InvalidDataException)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidLegacySettings,
+                "The Capture library identity required for fresh Routing setup is invalid.");
+        }
+        try
+        {
+            RoutingValidation.RequireSha256(
+                input.WatchedRootIdentitySha256,
+                "fresh watched-source root identity");
+        }
+        catch (InvalidDataException)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidWatchState,
+                "The native watched-source identity required for fresh Routing setup is invalid.");
+        }
+
+        var state = input.WatchState;
+        if (state.PendingMoves is null || state.PendingLocalOnlyMoves is null ||
+            state.PendingEditedUploads is null || state.IgnoredFileKeys is null ||
+            state.KnownContentHashes is null || state.UploadedContentHashes is null ||
+            state.LocalOnlyContentHashes is null)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidWatchState,
+                "The compatibility watcher state is incomplete.");
+        }
+        if (state.PendingMoves.Count != 0 || state.PendingLocalOnlyMoves.Count != 0 ||
+            state.PendingEditedUploads.Count != 0)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.PendingLegacyWork,
+                "All compatibility-watcher queues must drain before fresh Routing setup.");
+        }
+        if (state.IgnoredFileKeys.Count != 0)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.UnreconciledIgnoredFiles,
+                "Every compatibility-watcher baseline file must be reconciled before fresh Routing setup.");
+        }
+        if (!LegacyRoutingMigrationPlanner.TryValidateSettingsAndState(
+                input.Settings,
+                state,
+                out var settingsReason))
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidLegacySettings,
+                settingsReason);
+        }
+        if (!LegacyRoutingMigrationPlanner.TryCreateExclusions(
+                state,
+                out var exclusions,
+                out var exclusionReason))
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidWatchState,
+                exclusionReason);
+        }
+        if (exclusions!.Known.Count + exclusions.Uploaded.Count + exclusions.LocalOnly.Count >
+            LegacyRoutingMigrationPlanner.MaximumPersistedHashOccurrences)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidWatchState,
+                "The fresh baseline exclusion set is too large for the bounded activation marker.");
+        }
+
+        try
+        {
+            RoutingRouteManager.ValidateDraft(input.FirstRoute);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or ArgumentException or OverflowException)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidFreshRoute,
+                $"The first route is invalid: {exception.Message}");
+        }
+
+        var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
+        var sourceFingerprint = CreateSourceFingerprint(
+            input.Settings,
+            input.CaptureLibraryBinding,
+            exclusions,
+            input.WatchedRootIdentitySha256);
+        var routeDefinitionFingerprint = CreateRouteDefinitionFingerprint(input.FirstRoute);
+        var setupFingerprint = CreateSetupFingerprint(
+            sourceFingerprint,
+            routeDefinitionFingerprint);
+        var actionCount = (input.FirstRoute.Destination is null ? 0 : 1) +
+                          (input.FirstRoute.FileIntoLibrary ? 1 : 0);
+        var conditionCount = (string.IsNullOrWhiteSpace(input.FirstRoute.Game) ? 0 : 1) +
+                             (input.FirstRoute.WatchedSourceId is null ? 0 : 1) +
+                             (input.FirstRoute.EarliestCapturedUtc is null ? 0 : 1);
+        var route = RoutingRouteManager.CreateRoute(
+            input.FirstRoute,
+            LegacyRoutingMigrationPlanner.DeterministicGuid(
+                setupFingerprint,
+                "fresh-route"),
+            Enumerable.Range(0, actionCount)
+                .Select(index => LegacyRoutingMigrationPlanner.DeterministicGuid(
+                    setupFingerprint,
+                    $"fresh-action-{index}"))
+                .ToArray(),
+            Enumerable.Range(0, conditionCount)
+                .Select(index => LegacyRoutingMigrationPlanner.DeterministicGuid(
+                    setupFingerprint,
+                    $"fresh-condition-{index}"))
+                .ToArray(),
+            priority: 0,
+            timestamp);
+        try
+        {
+            ValidateFreshRoute(route, sourceFingerprint);
+        }
+        catch (InvalidDataException exception)
+        {
+            return Blocked(
+                LegacyRoutingCutoverReadinessStatus.InvalidFreshRoute,
+                $"The first route could not be represented safely: {exception.Message}");
+        }
+
+        var plan = new LegacyRoutingMigrationPlan(
+            LegacyRoutingMigrationPlanner.DeterministicGuid(
+                setupFingerprint,
+                "fresh-setup"),
+            // This legacy-shaped field is a compatibility placeholder only. Fresh marker
+            // semantics are selected exclusively by Origin and the user-authored route.
+            LegacyRoutingMode.LocalOnly,
+            LegacyRoutingCutoverScope.FutureClipsOnly,
+            sourceFingerprint,
+            input.CaptureLibraryBinding,
+            route,
+            exclusions,
+            RoutingActivationOrigin.FreshSetup,
+            ImportedRouteLabelVersion: null);
+        return new LegacyRoutingCutoverReadiness(
+            LegacyRoutingCutoverReadinessStatus.Ready,
+            "The fresh first-route plan is ready.",
+            plan);
+    }
+
+    internal static LegacyRoutingMigrationPlan ReconstructPlan(
+        LegacyRoutingMigrationMarker marker)
+    {
+        LegacyRoutingMigrationMarkerModel.Validate(marker);
+        RoutingValidation.Require(
+            marker.Origin == RoutingActivationOrigin.FreshSetup,
+            "Only a fresh setup marker can reconstruct a fresh plan.");
+        return new LegacyRoutingMigrationPlan(
+            marker.MigrationId,
+            marker.Mode,
+            marker.Scope,
+            marker.SourceFingerprint,
+            marker.CaptureLibraryBinding,
+            marker.Route,
+            marker.ContentHashExclusions,
+            marker.Origin,
+            marker.ImportedRouteLabelVersion);
+    }
+
+    /// <summary>
+    /// Revalidates the durable, route-independent evidence for a fresh activation after restart.
+    /// The marker's frozen first route remains payload-bound proof of what was initially created,
+    /// but it is intentionally not compared with the live route snapshot: after authority commits,
+    /// ordinary user edits and deletion are legitimate.
+    /// </summary>
+    internal static LegacyRoutingMigrationPlan ReconstructCurrentPlan(
+        LegacyRoutingMigrationMarker marker,
+        AppSettings settings,
+        WatchState watchState,
+        RoutingCaptureLibraryBinding captureLibraryBinding,
+        string watchedRootIdentitySha256)
+    {
+        LegacyRoutingMigrationMarkerModel.Validate(marker);
+        RoutingValidation.Require(
+            marker.Origin == RoutingActivationOrigin.FreshSetup,
+            "Only a fresh setup marker can be revalidated as fresh evidence.");
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(watchState);
+        RoutingCaptureLibraryBindingModel.RequireExact(
+            marker.CaptureLibraryBinding,
+            captureLibraryBinding);
+        var pendingMoves = watchState.PendingMoves ?? throw new InvalidDataException(
+            "The compatibility watcher state is incomplete.");
+        var pendingLocalOnlyMoves = watchState.PendingLocalOnlyMoves ??
+                                    throw new InvalidDataException(
+                                        "The compatibility watcher state is incomplete.");
+        var pendingEditedUploads = watchState.PendingEditedUploads ??
+                                   throw new InvalidDataException(
+                                       "The compatibility watcher state is incomplete.");
+        var ignoredFileKeys = watchState.IgnoredFileKeys ?? throw new InvalidDataException(
+            "The compatibility watcher state is incomplete.");
+        RoutingValidation.Require(
+            watchState.KnownContentHashes is not null &&
+            watchState.UploadedContentHashes is not null &&
+            watchState.LocalOnlyContentHashes is not null,
+            "The compatibility watcher state is incomplete.");
+        RoutingValidation.Require(
+            pendingMoves.Count == 0 &&
+            pendingLocalOnlyMoves.Count == 0 &&
+            pendingEditedUploads.Count == 0,
+            "Fresh Routing evidence cannot retain compatibility-watcher work.");
+        RoutingValidation.Require(
+            ignoredFileKeys.Count == 0,
+            "Fresh Routing evidence cannot retain an unreconciled compatibility baseline.");
+        RoutingValidation.Require(
+            LegacyRoutingMigrationPlanner.TryValidateSettingsAndState(
+                settings,
+                watchState,
+                out var settingsReason),
+            settingsReason);
+        RoutingValidation.Require(
+            LegacyRoutingMigrationPlanner.TryCreateExclusions(
+                watchState,
+                out var exclusions,
+                out var exclusionReason),
+            exclusionReason);
+        RoutingValidation.Require(
+            exclusions == marker.ContentHashExclusions,
+            "The current compatibility exclusions do not match the fresh activation marker.");
+        RoutingValidation.Require(
+            CreateSourceFingerprint(
+                settings,
+                captureLibraryBinding,
+                exclusions!,
+                watchedRootIdentitySha256) ==
+            marker.SourceFingerprint,
+            "The current settings, watched source, or compatibility state do not match the fresh activation marker.");
+        return ReconstructPlan(marker);
+    }
+
+    internal static string CreatePayloadFingerprint(
+        string sourceFingerprint,
+        RoutingCaptureLibraryBinding captureLibraryBinding,
+        RoutingRoute route,
+        LegacyContentHashExclusions exclusions)
+    {
+        RoutingValidation.RequireSha256(
+            sourceFingerprint,
+            "fresh Routing source fingerprint");
+        RoutingCaptureLibraryBindingModel.Validate(captureLibraryBinding);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Append(hash, PayloadFingerprintDomain);
+        Append(hash, RoutingActivationOrigin.FreshSetup.ToString());
+        Append(hash, sourceFingerprint);
+        Append(hash, captureLibraryBinding.CanonicalPathFingerprint);
+        Append(hash, captureLibraryBinding.NativeDirectoryIdentityFingerprint);
+        AppendRoute(hash, route);
+        AppendExclusions(hash, exclusions);
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    internal static void ValidateFreshRoute(RoutingRoute route, string sourceFingerprint)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        RoutingValidation.RequireSha256(
+            sourceFingerprint,
+            "fresh Routing source fingerprint");
+        RoutingSnapshotModel.Validate(new RoutingSnapshotDocument(
+            RoutingSnapshotStore.CurrentSchemaVersion,
+            Generation: 1,
+            Routes: [route],
+            route.CreatedUtc,
+            route.ModifiedUtc));
+        var setupFingerprint = CreateSetupFingerprint(
+            sourceFingerprint,
+            CreateRouteDefinitionFingerprint(route));
+        RoutingValidation.Require(
+            route.Source == RoutingRouteSource.User && route.Enabled &&
+            route.Priority == 0 && route.Revision == 1 &&
+            route.CreatedUtc == route.ModifiedUtc &&
+            route.RouteId == LegacyRoutingMigrationPlanner.DeterministicGuid(
+                setupFingerprint,
+                "fresh-route") &&
+            route.Actions.Select((action, index) => action.ActionId ==
+                    LegacyRoutingMigrationPlanner.DeterministicGuid(
+                        setupFingerprint,
+                        $"fresh-action-{index}"))
+                .All(matches => matches) &&
+            route.Conditions.Select((condition, index) => condition.ConditionId ==
+                    LegacyRoutingMigrationPlanner.DeterministicGuid(
+                        setupFingerprint,
+                        $"fresh-condition-{index}"))
+                .All(matches => matches),
+            "A fresh setup marker requires one exact deterministic user route.");
+    }
+
+    internal static Guid CreateSetupId(
+        string sourceFingerprint,
+        RoutingRoute route) => LegacyRoutingMigrationPlanner.DeterministicGuid(
+            CreateSetupFingerprint(
+                sourceFingerprint,
+                CreateRouteDefinitionFingerprint(route)),
+            "fresh-setup");
+
+    internal static string CreateSourceFingerprint(
+        AppSettings settings,
+        RoutingCaptureLibraryBinding captureLibraryBinding,
+        LegacyContentHashExclusions exclusions,
+        string watchedRootIdentitySha256)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        RoutingCaptureLibraryBindingModel.Validate(captureLibraryBinding);
+        RoutingValidation.RequireSha256(
+            watchedRootIdentitySha256,
+            "fresh watched-source root identity");
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Append(hash, SourceFingerprintDomain);
+        Append(hash, Path.TrimEndingDirectorySeparator(Path.GetFullPath(settings.ClipsFolder))
+            .ToUpperInvariant());
+        Append(hash, AppSettings.NormalizeCaptureSource(settings.CaptureSource).ToString());
+        Append(hash, watchedRootIdentitySha256.ToLowerInvariant());
+        Append(hash, captureLibraryBinding.CanonicalPathFingerprint);
+        Append(hash, captureLibraryBinding.NativeDirectoryIdentityFingerprint);
+        AppendExclusions(hash, exclusions);
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static string CreateRouteDefinitionFingerprint(RoutingRouteDraft draft)
+    {
+        var actionCount = (draft.Destination is null ? 0 : 1) +
+                          (draft.FileIntoLibrary ? 1 : 0);
+        var conditionCount = (string.IsNullOrWhiteSpace(draft.Game) ? 0 : 1) +
+                             (draft.WatchedSourceId is null ? 0 : 1) +
+                             (draft.EarliestCapturedUtc is null ? 0 : 1);
+        var canonical = RoutingRouteManager.CreateRoute(
+            draft,
+            Guid.Empty,
+            Enumerable.Repeat(Guid.Empty, actionCount).ToArray(),
+            Enumerable.Repeat(Guid.Empty, conditionCount).ToArray(),
+            priority: 0,
+            DateTimeOffset.UnixEpoch);
+        return CreateRouteDefinitionFingerprint(canonical);
+    }
+
+    private static string CreateRouteDefinitionFingerprint(RoutingRoute route)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Append(hash, RouteDefinitionFingerprintDomain);
+        Append(hash, route.Name);
+        Append(hash, route.Kind.ToString());
+        Append(hash, route.Trigger.ToString());
+        Append(hash, route.Prepare.Landscape.ToString(CultureInfo.InvariantCulture));
+        Append(hash, route.Prepare.Portrait.ToString(CultureInfo.InvariantCulture));
+        Append(hash, route.Prepare.DefaultOnMissing.ToString());
+        Append(hash, route.Conditions.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var condition in route.Conditions)
+        {
+            Append(hash, condition.Field.ToString());
+            Append(hash, condition.Operator.ToString());
+            Append(hash, condition.Value);
+        }
+        Append(hash, route.Actions.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var action in route.Actions)
+        {
+            Append(hash, action.Enabled.ToString(CultureInfo.InvariantCulture));
+            Append(hash, action.Kind.ToString());
+            AppendNullable(hash, action.Destination?.ToString());
+            AppendNullable(hash, action.ConnectionId);
+            AppendNullable(hash, action.OutputRef?.ToString());
+            AppendNullable(hash, action.OnMissingOutput?.ToString());
+            Append(hash, action.Mode.ToString());
+            AppendNullable(hash, action.LibraryArea?.ToString());
+            if (action.DeliverySettings is null)
+            {
+                Append(hash, "settings:<null>");
+            }
+            else
+            {
+                Append(hash, "settings:present");
+                AppendNullable(hash, action.DeliverySettings.Message);
+                AppendNullable(hash, action.DeliverySettings.Title);
+                AppendNullable(hash, action.DeliverySettings.Caption);
+                Append(hash, action.DeliverySettings.Visibility.ToString());
+                Append(hash, action.DeliverySettings.NotifyFollowers.ToString(
+                    CultureInfo.InvariantCulture));
+            }
+        }
+        if (route.XboxHistorySelection is null)
+        {
+            Append(hash, "route-xbox-history:absent");
+        }
+        else
+        {
+            Append(hash, "route-xbox-history:present");
+            Append(hash, route.XboxHistorySelection.ActivationUtc.ToString(
+                "O",
+                CultureInfo.InvariantCulture));
+            foreach (var occurrence in route.XboxHistorySelection.HistoricalOccurrences)
+            {
+                Append(hash, occurrence.OccurrenceId);
+                Append(hash, occurrence.RevisionId);
+            }
+        }
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static string CreateSetupFingerprint(
+        string sourceFingerprint,
+        string routeDefinitionFingerprint)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Append(hash, SetupFingerprintDomain);
+        Append(hash, sourceFingerprint);
+        Append(hash, routeDefinitionFingerprint);
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static void AppendRoute(IncrementalHash hash, RoutingRoute route)
+    {
+        Append(hash, route.RouteId.ToString("N"));
+        Append(hash, route.Name);
+        Append(hash, route.Enabled.ToString(CultureInfo.InvariantCulture));
+        Append(hash, route.Priority.ToString(CultureInfo.InvariantCulture));
+        Append(hash, route.Revision.ToString(CultureInfo.InvariantCulture));
+        Append(hash, route.Source.ToString());
+        Append(hash, route.Kind.ToString());
+        Append(hash, route.Trigger.ToString());
+        Append(hash, route.Prepare.Landscape.ToString(CultureInfo.InvariantCulture));
+        Append(hash, route.Prepare.Portrait.ToString(CultureInfo.InvariantCulture));
+        Append(hash, route.Prepare.DefaultOnMissing.ToString());
+        Append(hash, route.CreatedUtc.ToString("O", CultureInfo.InvariantCulture));
+        Append(hash, route.ModifiedUtc.ToString("O", CultureInfo.InvariantCulture));
+        Append(hash, route.Conditions.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var condition in route.Conditions)
+        {
+            Append(hash, condition.ConditionId.ToString("N"));
+            Append(hash, condition.Field.ToString());
+            Append(hash, condition.Operator.ToString());
+            Append(hash, condition.Value);
+        }
+        Append(hash, route.Actions.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var action in route.Actions)
+        {
+            Append(hash, action.ActionId.ToString("N"));
+            Append(hash, action.Enabled.ToString(CultureInfo.InvariantCulture));
+            Append(hash, action.Kind.ToString());
+            AppendNullable(hash, action.Destination?.ToString());
+            AppendNullable(hash, action.ConnectionId);
+            AppendNullable(hash, action.OutputRef?.ToString());
+            AppendNullable(hash, action.OnMissingOutput?.ToString());
+            Append(hash, action.Mode.ToString());
+            AppendNullable(hash, action.LibraryArea?.ToString());
+            if (action.DeliverySettings is null)
+            {
+                Append(hash, "settings:<null>");
+            }
+            else
+            {
+                Append(hash, "settings:present");
+                AppendNullable(hash, action.DeliverySettings.Message);
+                AppendNullable(hash, action.DeliverySettings.Title);
+                AppendNullable(hash, action.DeliverySettings.Caption);
+                Append(hash, action.DeliverySettings.Visibility.ToString());
+                Append(hash, action.DeliverySettings.NotifyFollowers.ToString(
+                    CultureInfo.InvariantCulture));
+            }
+        }
+        if (route.XboxHistorySelection is null)
+        {
+            Append(hash, "route-xbox-history:absent");
+        }
+        else
+        {
+            Append(hash, "route-xbox-history:present");
+            Append(hash, route.XboxHistorySelection.ActivationUtc.ToString(
+                "O",
+                CultureInfo.InvariantCulture));
+            foreach (var occurrence in route.XboxHistorySelection.HistoricalOccurrences)
+            {
+                Append(hash, occurrence.OccurrenceId);
+                Append(hash, occurrence.RevisionId);
+            }
+        }
+    }
+
+    private static void AppendExclusions(
+        IncrementalHash hash,
+        LegacyContentHashExclusions exclusions)
+    {
+        ArgumentNullException.ThrowIfNull(exclusions);
+        foreach (var value in exclusions.Known) Append(hash, "known:" + value);
+        foreach (var value in exclusions.Uploaded) Append(hash, "uploaded:" + value);
+        foreach (var value in exclusions.LocalOnly) Append(hash, "local:" + value);
+    }
+
+    private static void AppendNullable(IncrementalHash hash, string? value)
+    {
+        Append(hash, value is null ? "nullable:absent" : "nullable:present");
+        if (value is not null) Append(hash, value);
+    }
+
+    private static void Append(IncrementalHash hash, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        Span<byte> length = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(length, bytes.Length);
+        hash.AppendData(length);
+        hash.AppendData(bytes);
+    }
+
+    private static LegacyRoutingCutoverReadiness Blocked(
+        LegacyRoutingCutoverReadinessStatus status,
+        string reason) => new(status, reason, Plan: null);
+}
+
 internal static class LegacyRoutingMigrationMarkerModel
 {
     internal static LegacyRoutingMigrationMarker CreatePrepared(
@@ -546,6 +1158,8 @@ internal static class LegacyRoutingMigrationMarkerModel
         DateTimeOffset? now = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        RoutingValidation.Require(Enum.IsDefined(plan.Origin),
+            "The Routing activation origin is unsupported.");
         var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
         var marker = new LegacyRoutingMigrationMarker(
             LegacyRoutingMigrationMarkerStore.CurrentSchemaVersion,
@@ -555,21 +1169,39 @@ internal static class LegacyRoutingMigrationMarkerModel
             plan.Mode,
             plan.Scope,
             plan.SourceFingerprint,
-            LegacyRoutingMigrationPlanner.CreatePayloadFingerprint(
-                plan.SourceFingerprint,
-                plan.Mode,
-                plan.Scope,
-                plan.CaptureLibraryBinding,
-                plan.Route,
-                plan.ContentHashExclusions),
+            CreatePayloadFingerprint(plan),
             plan.CaptureLibraryBinding,
             plan.Route,
             plan.ContentHashExclusions,
             CreatedUtc: timestamp,
-            UpdatedUtc: timestamp);
+            UpdatedUtc: timestamp,
+            plan.Origin,
+            plan.ImportedRouteLabelVersion);
         Validate(marker);
         return marker;
     }
+
+    private static string CreatePayloadFingerprint(LegacyRoutingMigrationPlan plan) =>
+        plan.Origin switch
+        {
+            RoutingActivationOrigin.LegacyMigration =>
+                LegacyRoutingMigrationPlanner.CreatePayloadFingerprint(
+                    plan.SourceFingerprint,
+                    plan.Mode,
+                    plan.Scope,
+                    plan.CaptureLibraryBinding,
+                    plan.Route,
+                    plan.ContentHashExclusions,
+                    plan.ImportedRouteLabelVersion),
+            RoutingActivationOrigin.FreshSetup =>
+                FreshRoutingSetupPlanner.CreatePayloadFingerprint(
+                    plan.SourceFingerprint,
+                    plan.CaptureLibraryBinding,
+                    plan.Route,
+                    plan.ContentHashExclusions),
+            _ => throw new InvalidDataException(
+                "The Routing activation plan origin is unsupported.")
+        };
 
     internal static LegacyRoutingMigrationMarker Commit(
         LegacyRoutingMigrationMarker prepared,
@@ -623,18 +1255,14 @@ internal static class LegacyRoutingMigrationMarkerModel
             plan.Mode,
             plan.Scope,
             plan.SourceFingerprint,
-            LegacyRoutingMigrationPlanner.CreatePayloadFingerprint(
-                plan.SourceFingerprint,
-                plan.Mode,
-                plan.Scope,
-                plan.CaptureLibraryBinding,
-                plan.Route,
-                plan.ContentHashExclusions),
+            CreatePayloadFingerprint(plan),
             plan.CaptureLibraryBinding,
             plan.Route,
             plan.ContentHashExclusions,
             aborting.CreatedUtc,
-            timestamp);
+            timestamp,
+            plan.Origin,
+            plan.ImportedRouteLabelVersion);
         ValidateSuccessor(aborting, prepared);
         return prepared;
     }
@@ -647,9 +1275,10 @@ internal static class LegacyRoutingMigrationMarkerModel
             "The legacy routing marker schema is unsupported.");
         RoutingValidation.Require(marker.Generation > 0 && marker.MigrationId != Guid.Empty,
             "The legacy routing marker identity is invalid.");
-        RoutingValidation.Require(Enum.IsDefined(marker.Phase) && Enum.IsDefined(marker.Mode) &&
+        RoutingValidation.Require(Enum.IsDefined(marker.Origin) &&
+                                  Enum.IsDefined(marker.Phase) && Enum.IsDefined(marker.Mode) &&
                                   marker.Scope == LegacyRoutingCutoverScope.FutureClipsOnly,
-            "The legacy routing marker state is unsupported.");
+            "The Routing activation marker state is unsupported.");
         RoutingValidation.RequireSha256(marker.SourceFingerprint,
             "legacy routing source fingerprint");
         RoutingValidation.RequireSha256(marker.PayloadFingerprint,
@@ -665,27 +1294,59 @@ internal static class LegacyRoutingMigrationMarkerModel
             marker.Phase == LegacyRoutingMigrationMarkerPhase.Committed && marker.Generation >= 2,
             "The legacy routing marker phase and generation are inconsistent.");
         ValidateExclusions(marker.ContentHashExclusions);
-        ValidateMigrationRoute(marker.Route, marker.Mode);
+        if (marker.Origin == RoutingActivationOrigin.LegacyMigration)
+        {
+            var importedRouteLabelVersion = marker.ImportedRouteLabelVersion ??
+                                            LegacyRoutingMigrationPlanner
+                                                .LegacyImportedRouteLabelVersion;
+            RoutingValidation.Require(importedRouteLabelVersion is
+                    LegacyRoutingMigrationPlanner.LegacyImportedRouteLabelVersion or
+                    LegacyRoutingMigrationPlanner.CurrentImportedRouteLabelVersion,
+                "The persisted imported-route label version is unsupported.");
+            ValidateMigrationRoute(marker.Route, marker.Mode, importedRouteLabelVersion);
+            RoutingValidation.Require(
+                marker.PayloadFingerprint ==
+                LegacyRoutingMigrationPlanner.CreatePayloadFingerprint(
+                    marker.SourceFingerprint,
+                    marker.Mode,
+                    marker.Scope,
+                    marker.CaptureLibraryBinding,
+                    marker.Route,
+                    marker.ContentHashExclusions,
+                    marker.ImportedRouteLabelVersion),
+                "The legacy routing marker payload fingerprint does not match its durable plan.");
+            RoutingValidation.Require(
+                marker.MigrationId == LegacyRoutingMigrationPlanner.DeterministicGuid(
+                    marker.SourceFingerprint, "migration") &&
+                marker.Route.RouteId == LegacyRoutingMigrationPlanner.DeterministicGuid(
+                    marker.SourceFingerprint, "route") &&
+                marker.Route.Actions[^1].ActionId ==
+                LegacyRoutingMigrationPlanner.DeterministicGuid(
+                    marker.SourceFingerprint, "file-action") &&
+                (marker.Mode != LegacyRoutingMode.DiscordUpload ||
+                 marker.Route.Actions[0].ActionId ==
+                 LegacyRoutingMigrationPlanner.DeterministicGuid(
+                     marker.SourceFingerprint, "discord-action")),
+                "The legacy routing marker ids are not bound to its exact migration plan.");
+            return;
+        }
+
         RoutingValidation.Require(
-            marker.PayloadFingerprint == LegacyRoutingMigrationPlanner.CreatePayloadFingerprint(
+            marker.ImportedRouteLabelVersion is null && marker.Mode == LegacyRoutingMode.LocalOnly,
+            "Fresh setup cannot carry legacy import presentation or mode evidence.");
+        FreshRoutingSetupPlanner.ValidateFreshRoute(marker.Route, marker.SourceFingerprint);
+        RoutingValidation.Require(
+            marker.PayloadFingerprint == FreshRoutingSetupPlanner.CreatePayloadFingerprint(
                 marker.SourceFingerprint,
-                marker.Mode,
-                marker.Scope,
                 marker.CaptureLibraryBinding,
                 marker.Route,
                 marker.ContentHashExclusions),
-            "The legacy routing marker payload fingerprint does not match its durable plan.");
+            "The fresh Routing marker payload fingerprint does not match its durable plan.");
         RoutingValidation.Require(
-            marker.MigrationId == LegacyRoutingMigrationPlanner.DeterministicGuid(
-                marker.SourceFingerprint, "migration") &&
-            marker.Route.RouteId == LegacyRoutingMigrationPlanner.DeterministicGuid(
-                marker.SourceFingerprint, "route") &&
-            marker.Route.Actions[^1].ActionId == LegacyRoutingMigrationPlanner.DeterministicGuid(
-                marker.SourceFingerprint, "file-action") &&
-            (marker.Mode != LegacyRoutingMode.DiscordUpload ||
-             marker.Route.Actions[0].ActionId == LegacyRoutingMigrationPlanner.DeterministicGuid(
-                 marker.SourceFingerprint, "discord-action")),
-            "The legacy routing marker ids are not bound to its exact migration plan.");
+            marker.MigrationId == FreshRoutingSetupPlanner.CreateSetupId(
+                marker.SourceFingerprint,
+                marker.Route),
+            "The fresh Routing marker id is not bound to its exact setup plan.");
     }
 
     internal static void ValidateSuccessor(
@@ -699,6 +1360,8 @@ internal static class LegacyRoutingMigrationMarkerModel
             candidate.Phase == LegacyRoutingMigrationMarkerPhase.Committed &&
             candidate.Generation == current.Generation + 1 &&
             candidate.MigrationId == current.MigrationId &&
+            candidate.Origin == current.Origin &&
+            candidate.ImportedRouteLabelVersion == current.ImportedRouteLabelVersion &&
             candidate.Mode == current.Mode && candidate.Scope == current.Scope &&
             candidate.SourceFingerprint == current.SourceFingerprint &&
             candidate.PayloadFingerprint == current.PayloadFingerprint &&
@@ -711,6 +1374,8 @@ internal static class LegacyRoutingMigrationMarkerModel
             candidate.Phase == LegacyRoutingMigrationMarkerPhase.Aborting &&
             candidate.Generation == current.Generation + 1 &&
             candidate.MigrationId == current.MigrationId &&
+            candidate.Origin == current.Origin &&
+            candidate.ImportedRouteLabelVersion == current.ImportedRouteLabelVersion &&
             candidate.Mode == current.Mode && candidate.Scope == current.Scope &&
             candidate.SourceFingerprint == current.SourceFingerprint &&
             candidate.PayloadFingerprint == current.PayloadFingerprint &&
@@ -722,6 +1387,7 @@ internal static class LegacyRoutingMigrationMarkerModel
             current.Phase == LegacyRoutingMigrationMarkerPhase.Aborting &&
             candidate.Phase == LegacyRoutingMigrationMarkerPhase.Prepared &&
             candidate.Generation == current.Generation + 1 &&
+            candidate.Origin == current.Origin &&
             candidate.CreatedUtc == current.CreatedUtc && candidate.UpdatedUtc >= current.UpdatedUtc;
         RoutingValidation.Require(
             committing || beginningAbort || restartingPrepared,
@@ -776,7 +1442,10 @@ internal static class LegacyRoutingMigrationMarkerModel
         }
     }
 
-    private static void ValidateMigrationRoute(RoutingRoute route, LegacyRoutingMode mode)
+    private static void ValidateMigrationRoute(
+        RoutingRoute route,
+        LegacyRoutingMode mode,
+        int importedRouteLabelVersion)
     {
         if (route is null) throw new InvalidDataException("The migrated fallback route is missing.");
         var timestamp = route.CreatedUtc;
@@ -797,6 +1466,14 @@ internal static class LegacyRoutingMigrationMarkerModel
                                       DefaultOnMissing: RoutingMissingOutputBehavior.UseOriginal
                                   },
             "The legacy migration must create one unconditional migration fallback route.");
+        var expectedName = importedRouteLabelVersion ==
+                           LegacyRoutingMigrationPlanner.CurrentImportedRouteLabelVersion
+            ? LegacyRoutingMigrationPlanner.ImportedRouteLabel
+            : mode == LegacyRoutingMode.DiscordUpload
+                ? "Everything else → Friends server"
+                : "Everything else → Local only";
+        RoutingValidation.Require(route.Name.Equals(expectedName, StringComparison.Ordinal),
+            "The legacy migration route label does not match its persisted label version.");
         if (mode == LegacyRoutingMode.DiscordUpload)
         {
             RoutingValidation.Require(route.Actions.Count == 2 &&
@@ -896,6 +1573,110 @@ internal sealed class LegacyRoutingMigrationCoordinator
     {
         var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
         var readiness = LegacyRoutingMigrationPlanner.Evaluate(input, timestamp);
+        return await ExecuteAsync(
+                readiness,
+                RoutingActivationOrigin.LegacyMigration,
+                timestamp,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<LegacyRoutingCutoverResult> ExecuteFreshAsync(
+        FreshRoutingSetupInput input,
+        DateTimeOffset? now = null,
+        CancellationToken cancellationToken = default)
+    {
+        var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
+        var readiness = FreshRoutingSetupPlanner.Evaluate(input, timestamp);
+        return await ExecuteAsync(
+                readiness,
+                RoutingActivationOrigin.FreshSetup,
+                timestamp,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resumes a durably fenced fresh-profile activation after process restart. The original
+    /// editor draft is intentionally not required: the marker owns the exact first route, while
+    /// the current settings, watcher baseline, native watched-root identity, and Capture library
+    /// identity must still reproduce its route-independent source evidence before any prepared
+    /// transaction can continue.
+    /// </summary>
+    internal async Task<LegacyRoutingCutoverResult> ResumeFreshAsync(
+        AppSettings settings,
+        WatchState watchState,
+        RoutingCaptureLibraryBinding captureLibraryBinding,
+        string watchedRootIdentitySha256,
+        DateTimeOffset? now = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(watchState);
+        ArgumentNullException.ThrowIfNull(captureLibraryBinding);
+        var timestamp = RoutingValidation.Utc(now ?? DateTimeOffset.UtcNow);
+        var loadedMarker = _markers.Load(cancellationToken);
+        if (!loadedMarker.LoadedFromDisk || loadedMarker.Document is not
+            { Origin: RoutingActivationOrigin.FreshSetup } marker)
+        {
+            var reason = loadedMarker.Status == RoutingDocumentLoadStatus.Missing
+                ? "No durable fresh activation marker is available to resume."
+                : $"The durable fresh activation marker cannot be used safely ({loadedMarker.Status}).";
+            var blocked = new LegacyRoutingCutoverReadiness(
+                LegacyRoutingCutoverReadinessStatus.NoFreshProfileEvidence,
+                reason,
+                null);
+            return Result(
+                loadedMarker.Status == RoutingDocumentLoadStatus.Missing
+                    ? LegacyRoutingCutoverResultStatus.StateConflict
+                    : LegacyRoutingCutoverResultStatus.MarkerUnavailable,
+                reason,
+                blocked,
+                loadedMarker.Document);
+        }
+
+        LegacyRoutingMigrationPlan plan;
+        try
+        {
+            plan = FreshRoutingSetupPlanner.ReconstructCurrentPlan(
+                marker,
+                settings,
+                watchState,
+                captureLibraryBinding,
+                watchedRootIdentitySha256);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or ArgumentException or OverflowException)
+        {
+            var blocked = new LegacyRoutingCutoverReadiness(
+                LegacyRoutingCutoverReadinessStatus.NoFreshProfileEvidence,
+                exception.Message,
+                null);
+            return Result(
+                LegacyRoutingCutoverResultStatus.Blocked,
+                exception.Message,
+                blocked,
+                marker);
+        }
+
+        var readiness = new LegacyRoutingCutoverReadiness(
+            LegacyRoutingCutoverReadinessStatus.Ready,
+            "The durable fresh activation evidence is ready to resume.",
+            plan);
+        return await ExecuteAsync(
+                readiness,
+                RoutingActivationOrigin.FreshSetup,
+                timestamp,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<LegacyRoutingCutoverResult> ExecuteAsync(
+        LegacyRoutingCutoverReadiness readiness,
+        RoutingActivationOrigin requestedOrigin,
+        DateTimeOffset timestamp,
+        CancellationToken cancellationToken)
+    {
         for (var attempt = 0; attempt < 8; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -903,12 +1684,23 @@ internal sealed class LegacyRoutingMigrationCoordinator
             if (loadedMarker.LoadedFromDisk)
             {
                 var marker = loadedMarker.Document!;
+                if (marker.Origin != requestedOrigin)
+                {
+                    return Result(
+                        LegacyRoutingCutoverResultStatus.StateConflict,
+                        "The durable activation marker belongs to a different setup origin.",
+                        readiness,
+                        marker);
+                }
                 if (marker.Phase == LegacyRoutingMigrationMarkerPhase.Committed)
                 {
                     return VerifyCommitted(marker, readiness, cancellationToken);
                 }
                 if (marker.Phase == LegacyRoutingMigrationMarkerPhase.Aborting ||
                     !readiness.CanCommit ||
+                    readiness.Plan!.Origin != marker.Origin ||
+                    readiness.Plan.ImportedRouteLabelVersion !=
+                    marker.ImportedRouteLabelVersion ||
                     readiness.Plan!.SourceFingerprint != marker.SourceFingerprint ||
                     readiness.Plan.MigrationId != marker.MigrationId)
                 {
@@ -980,7 +1772,9 @@ internal sealed class LegacyRoutingMigrationCoordinator
                     durablePrepared.Generation,
                     cancellationToken);
                 return Result(LegacyRoutingCutoverResultStatus.Committed,
-                    "The legacy fallback route and cutover marker are durable.",
+                    durablePrepared.Origin == RoutingActivationOrigin.FreshSetup
+                        ? "The explicit first route and fresh activation marker are durable."
+                        : "The legacy fallback route and cutover marker are durable.",
                     readiness, committed);
             }
             catch (RoutingConcurrencyException) when (attempt < 7)
@@ -990,7 +1784,7 @@ internal sealed class LegacyRoutingMigrationCoordinator
         }
 
         return Result(LegacyRoutingCutoverResultStatus.StateConflict,
-            "The migration state kept changing during cutover.", readiness, null);
+            "The Routing activation state kept changing during cutover.", readiness, null);
     }
 
     /// <summary>
@@ -1073,9 +1867,9 @@ internal sealed class LegacyRoutingMigrationCoordinator
             var document = loaded.Document!;
             if (document.Routes.Count == 0) return null;
             if (document.Routes.Count != 1 ||
-                !LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
-                    document.Routes[0],
-                    abortingMarker.Route))
+                !IsEquivalentPreparedRoute(
+                    abortingMarker,
+                    document.Routes[0]))
             {
                 return (
                     LegacyRoutingCutoverResultStatus.StateConflict,
@@ -1119,6 +1913,18 @@ internal sealed class LegacyRoutingMigrationCoordinator
                 $"The committed route snapshot is unavailable ({routes.Status}).",
                 readiness, marker);
         }
+        if (marker.Origin == RoutingActivationOrigin.FreshSetup)
+        {
+            // The marker proves the exact first route that established authority. Once committed,
+            // the live snapshot is user-owned and may legitimately contain revisions, replacement
+            // routes, or no routes at all. Loading a structurally valid snapshot is therefore the
+            // only route-store invariant that remains here.
+            return Result(
+                LegacyRoutingCutoverResultStatus.AlreadyCommitted,
+                "The fresh first-route activation is already committed.",
+                readiness,
+                marker);
+        }
         var migrationRoute = routes.Document!.Routes.SingleOrDefault(route =>
             route.RouteId == marker.Route.RouteId);
         if (migrationRoute is null ||
@@ -1130,7 +1936,9 @@ internal sealed class LegacyRoutingMigrationCoordinator
                 readiness, marker);
         }
         return Result(LegacyRoutingCutoverResultStatus.AlreadyCommitted,
-            "The equivalent legacy cutover is already committed.", readiness, marker);
+            "The equivalent legacy cutover is already committed.",
+            readiness,
+            marker);
     }
 
     private async Task<(LegacyRoutingCutoverResultStatus Status, string Reason)?> EnsureRouteAsync(
@@ -1174,7 +1982,7 @@ internal sealed class LegacyRoutingMigrationCoordinator
 
             var document = loaded.Document!;
             if (document.Routes.Count == 1 &&
-                LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(document.Routes[0], planned))
+                IsEquivalentPreparedRoute(preparedMarker, document.Routes[0]))
                 return null;
             if (document.Routes.Count != 0)
             {
@@ -1202,6 +2010,12 @@ internal sealed class LegacyRoutingMigrationCoordinator
             "The route snapshot kept changing during cutover.");
     }
 
+    private static bool IsEquivalentPreparedRoute(
+        LegacyRoutingMigrationMarker marker,
+        RoutingRoute candidate) => marker.Origin == RoutingActivationOrigin.FreshSetup
+        ? candidate == marker.Route
+        : LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(candidate, marker.Route);
+
     private void RequireMarkerCurrent(
         LegacyRoutingMigrationMarker expected,
         LegacyRoutingMigrationMarkerPhase phase)
@@ -1212,11 +2026,13 @@ internal sealed class LegacyRoutingMigrationCoordinator
                 Phase: var currentPhase,
                 Generation: var currentGeneration,
                 MigrationId: var currentMigrationId,
+                Origin: var currentOrigin,
                 PayloadFingerprint: var currentPayload
             } ||
             currentPhase != phase ||
             currentGeneration != expected.Generation ||
             currentMigrationId != expected.MigrationId ||
+            currentOrigin != expected.Origin ||
             !currentPayload.Equals(expected.PayloadFingerprint, StringComparison.Ordinal))
         {
             throw new RoutingConcurrencyException(

@@ -116,6 +116,12 @@ internal static class RoutesFeatureTests
         RunOnSta(() =>
         {
             AssertRoutesView(manager, connectionId);
+            AssertImportedRouteDisplayAccessibility(
+                Path.Combine(root, "migration-display-accessibility"),
+                fallback,
+                specific,
+                now,
+                connectionId);
             AssertRoutingLocalOnlyModeView(
                 Path.Combine(root, "local-only-view-96"), connectionId, 96, verifyActions: true);
             AssertRoutingLocalOnlyModeView(
@@ -129,11 +135,14 @@ internal static class RoutesFeatureTests
             AssertConstrainedHeightLayouts(
                 Path.Combine(root, "constrained-height"), manager);
             AssertRoutesRuntimeStateMatrix(manager, connectionId);
+            AssertFirstRouteSetupFlow(manager, connectionId);
+            AssertMigratedInputSourceRefreshesLive(manager, connectionId);
             AssertRuntimeStateChangesBlockCommandAdmission(manager, connectionId);
             AssertRouteEditorDialogLayout(connectionId, 96);
             AssertRouteEditorDialogLayout(connectionId, 144);
             AssertRouteEditorDialogLayout(connectionId, 192);
             AssertRouteEditorSaveGuardsAreInjectable(connectionId);
+            AssertWatchedFolderRequiresRealSource();
             AssertXboxRouteEditorFlowAndLayout(96, verifyDraft: true);
             AssertXboxRouteEditorFlowAndLayout(144, verifyDraft: false);
             AssertXboxRouteEditorFlowAndLayout(192, verifyDraft: false);
@@ -155,6 +164,42 @@ internal static class RoutesFeatureTests
             AssertRoutesScaledLayout(root, manager, connectionId, 144);
             AssertRoutesScaledLayout(root, manager, connectionId, 192);
         });
+    }
+
+    private static void AssertMigratedInputSourceRefreshesLive(
+        RoutingRouteManager manager,
+        string connectionId)
+    {
+        var visible = false;
+        var migrated = new RoutingMigratedInputSourceDisplay(
+            "SteelSeries GG · migrated source",
+            "Existing 1.x folder · locked to migration",
+            ClipCaptureSource.SteelSeriesGg);
+        using var view = new RoutesView(
+            manager,
+            new FixedConnections(connectionId),
+            isCutoverCommitted: () => true,
+            runtimeStateProvider: () => RoutesRuntimeViewState.Active,
+            inputSources: MutableInputSourceViewSource.Empty(),
+            migratedInputSourceProvider: () => visible ? migrated : null);
+        view.HeaderActionButton.Visible = true;
+        Enumerate(view).OfType<Button>().Single(button =>
+            button.Name == "ConnectionsRouteTab").PerformClick();
+        Assert(!Enumerate(view).Any(control =>
+                control.Name == "MigratedInputSourceCard"),
+            "A missing migration source must not manufacture a locked source card.");
+
+        visible = true;
+        view.ActivateView();
+        Assert(Enumerate(view).Count(control =>
+                   control.Name == "MigratedInputSourceCard") == 1,
+            "A migration committed while Settings is open must surface its source card on the next live refresh.");
+
+        visible = false;
+        view.ActivateView();
+        Assert(!Enumerate(view).Any(control =>
+                control.Name == "MigratedInputSourceCard"),
+            "An unavailable migration source must fail closed instead of retaining stale UI state.");
     }
 
     private static void AssertMigrationFallbackIsImmutable(
@@ -208,6 +253,90 @@ internal static class RoutesFeatureTests
             "Rejected fallback mutations must leave the route snapshot unchanged.");
     }
 
+    private static void AssertImportedRouteDisplayAccessibility(
+        string root,
+        RoutingRoute fallback,
+        RoutingRoute specific,
+        DateTimeOffset now,
+        string connectionId)
+    {
+        Directory.CreateDirectory(root);
+        var migrationRoute = fallback with
+        {
+            Name = "Everything else → Local only",
+            Source = RoutingRouteSource.Migration,
+            Priority = 0,
+            Revision = 1,
+            CreatedUtc = now,
+            ModifiedUtc = now
+        };
+        var userRoute = specific with
+        {
+            Source = RoutingRouteSource.User,
+            Priority = 1,
+            Revision = 1,
+            CreatedUtc = now,
+            ModifiedUtc = now
+        };
+        var store = new RoutingSnapshotStore(Path.Combine(root, RoutingSnapshotStore.FileName));
+        _ = store.SaveAsync(
+                new RoutingSnapshotDocument(
+                    RoutingSnapshotStore.CurrentSchemaVersion,
+                    Generation: 1,
+                    [migrationRoute, userRoute],
+                    now,
+                    now),
+                expectedGeneration: 0)
+            .GetAwaiter().GetResult();
+        var manager = new RoutingRouteManager(
+            store,
+            mutationAuthority: TestRouteMutationAuthority.Allowed,
+            connectionMembership: TestRoutingConnectionMembership.AllowAll);
+        using var form = new Form
+        {
+            ClientSize = new Size(984, 696),
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-32000, -32000),
+            ShowInTaskbar = false
+        };
+        using var view = new RoutesView(
+            manager,
+            new FixedConnections(connectionId),
+            isCutoverCommitted: () => true);
+        form.Controls.Add(view);
+        form.Show();
+        Application.DoEvents();
+        view.ActivateView();
+        Application.DoEvents();
+
+        var card = Enumerate(view).Single(control =>
+            control.Name == $"RouteCard_{migrationRoute.RouteId:N}");
+        var controls = Enumerate(card).ToArray();
+        var displayName = LegacyRoutingMigrationPlanner.ImportedRouteLabel;
+        Assert(card.AccessibleName == displayName &&
+               controls.Single(control =>
+                       control.Name == $"RouteActionRows_{migrationRoute.RouteId:N}")
+                   .AccessibleName == $"{displayName} actions" &&
+               controls.Single(control =>
+                       control.Name == $"RouteEnabled_{migrationRoute.RouteId:N}")
+                   .AccessibleName == $"Disable {displayName}" &&
+               controls.Single(control =>
+                       control.Name == $"DeleteRoute_{migrationRoute.RouteId:N}")
+                   .AccessibleName == $"Delete {displayName}" &&
+               controls.Single(control =>
+                       control.Name == $"MoveRouteDown_{migrationRoute.RouteId:N}")
+                   .AccessibleName == $"Move {displayName} down" &&
+               controls.Single(control =>
+                       control.Name == $"MoveRouteUp_{migrationRoute.RouteId:N}")
+                   .AccessibleName == $"Move {displayName} up" &&
+               controls.All(control =>
+                   control.AccessibleName?.Contains(
+                       migrationRoute.Name,
+                       StringComparison.Ordinal) != true),
+            "Imported-route controls must announce the same current display label shown on the card, never the stale durable preview name.");
+        form.Close();
+    }
+
     private static void AssertCutoverGateAndDomainMutationAuthority(
         string root,
         DateTimeOffset now)
@@ -238,7 +367,8 @@ internal static class RoutesFeatureTests
                 state,
                 LegacyWorkerQuiesced: true,
                 DiscordConnectionIds: [],
-                CaptureLibraryBinding: captureLibraryBinding),
+                CaptureLibraryBinding: captureLibraryBinding,
+                Admission: LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
             now);
         var plan = readiness.Plan ?? throw new InvalidOperationException(
             "The cutover-gate fixture could not produce a migration plan.");
@@ -1244,7 +1374,8 @@ internal static class RoutesFeatureTests
             Path.Combine(captureLibraryRoot, "nested"));
         Assert(!legacyOverlap.Succeeded && !libraryOverlap.Succeeded &&
                catalog.Inspect().Sources.Count == 0 &&
-               legacyOverlap.Reason.Contains("migrated", StringComparison.OrdinalIgnoreCase) &&
+               legacyOverlap.Reason.Contains(
+                   "primary recorder source", StringComparison.OrdinalIgnoreCase) &&
                libraryOverlap.Reason.Contains("Capture Library", StringComparison.Ordinal),
             "Named source registration must reject nesting with the migrated watcher and Capture Library before creating catalog authority.");
 
@@ -1343,12 +1474,12 @@ internal static class RoutesFeatureTests
         AssertRuntimeState(
             RoutesRuntimeViewState.LegacySetupNeeded,
             cutoverCommitted: false,
-            expectedButtonText: "Open Settings",
+            expectedButtonText: "Set up routes",
             expectedButtonEnabled: true,
             expectedStatusPrefix: "SETUP REQUIRED",
             expectRouteMutationEnabled: false,
             expectRetry: false,
-            expectOpenSettings: true);
+            expectSetup: true);
         AssertRuntimeState(
             RoutesRuntimeViewState.LegacyActive,
             cutoverCommitted: false,
@@ -1390,10 +1521,12 @@ internal static class RoutesFeatureTests
             string expectedStatusPrefix,
             bool expectRouteMutationEnabled,
             bool expectRetry,
-            bool expectOpenSettings = false)
+            bool expectSetup = false)
         {
             var retryCalls = 0;
-            var openSettingsCalls = 0;
+            var editorCalls = 0;
+            var setupCalls = 0;
+            RoutingRouteDraft? submittedDraft = null;
             using var form = new Form
             {
                 StartPosition = FormStartPosition.Manual,
@@ -1405,13 +1538,25 @@ internal static class RoutesFeatureTests
                 manager,
                 new FixedConnections(connectionId),
                 isCutoverCommitted: () => cutoverCommitted,
+                editRoute: _ =>
+                {
+                    editorCalls++;
+                    return LocalDraft(
+                        "First route",
+                        RoutingTriggerKind.AnyNewSourceClip);
+                },
                 runtimeStateProvider: () => state,
                 retryRuntimeAsync: () =>
                 {
                     retryCalls++;
                     return Task.FromResult(true);
+                },
+                setupFirstRouteAsync: draft =>
+                {
+                    setupCalls++;
+                    submittedDraft = draft;
+                    return Task.FromResult(true);
                 });
-            view.OpenSettingsRequested += (_, _) => openSettingsCalls++;
             form.Controls.Add(view);
             form.Show();
             view.ActivateView();
@@ -1424,6 +1569,20 @@ internal static class RoutesFeatureTests
                    view.HeaderActionButton.Enabled == expectedButtonEnabled &&
                    status.Text.StartsWith(expectedStatusPrefix, StringComparison.Ordinal),
                 $"Routes state {state} (cutover={cutoverCommitted}) must expose the truthful primary action and status copy.");
+            if (state == RoutesRuntimeViewState.Active && cutoverCommitted)
+            {
+                Assert(!status.Text.Contains("migrated", StringComparison.OrdinalIgnoreCase) &&
+                       !status.Text.Contains("1.x", StringComparison.OrdinalIgnoreCase),
+                    "The shared active status must remain truthful for fresh setups that have no migrated fallback.");
+            }
+            if (expectSetup)
+            {
+                Assert(view.HeaderActionButton.AccessibleName ==
+                           "Set up ClipCord routes" &&
+                       view.HeaderActionButton.AccessibleDescription?.Contains(
+                           "route builder", StringComparison.OrdinalIgnoreCase) == true,
+                    "The setup action must announce the route builder and its purpose to assistive technology.");
+            }
 
             var mutationControls = controls.Where(control =>
                     control.Name.StartsWith("RouteEnabled_", StringComparison.Ordinal) ||
@@ -1434,17 +1593,20 @@ internal static class RoutesFeatureTests
                        control.Enabled == expectRouteMutationEnabled),
                 $"Routes state {state} (cutover={cutoverCommitted}) must {(expectRouteMutationEnabled ? "allow" : "block")} durable route mutation.");
 
-            if (expectRetry || expectOpenSettings)
+            if (expectRetry || expectSetup)
             {
                 ((Button)view.HeaderActionButton).PerformClick();
                 Application.DoEvents();
                 Assert(retryCalls == (expectRetry ? 1 : 0) &&
-                       openSettingsCalls == (expectOpenSettings ? 1 : 0),
+                       editorCalls == (expectSetup ? 1 : 0) &&
+                       setupCalls == (expectSetup ? 1 : 0) &&
+                       (!expectSetup || submittedDraft?.Name == "First route"),
                     $"Routes state {state} must invoke only its truthful recovery or setup action exactly once.");
             }
             else
             {
-                Assert(retryCalls == 0 && openSettingsCalls == 0,
+                Assert(retryCalls == 0 && editorCalls == 0 && setupCalls == 0 &&
+                       submittedDraft is null,
                     $"Routes state {state} must not invoke a recovery or setup callback without that enabled action.");
             }
 
@@ -1512,6 +1674,103 @@ internal static class RoutesFeatureTests
             "Route command admission must re-read the runtime provider and reject a mutation after Active changes to Blocked.");
 
         form.Close();
+    }
+
+    private static void AssertFirstRouteSetupFlow(
+        RoutingRouteManager manager,
+        string connectionId)
+    {
+        var before = manager.Load().Document;
+        var completion = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        RoutingRouteDraft? submittedDraft = null;
+        using var form = new Form
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-32000, -32000),
+            ClientSize = new Size(984, 696),
+            BackColor = ClipCordTheme.SurfaceBase
+        };
+        using var view = new RoutesView(
+            manager,
+            new FixedConnections(connectionId),
+            isCutoverCommitted: () => false,
+            editRoute: _ => LocalDraft(
+                "Fresh profile route",
+                RoutingTriggerKind.AnyNewSourceClip),
+            runtimeStateProvider: () => RoutesRuntimeViewState.LegacySetupNeeded,
+            setupFirstRouteAsync: draft =>
+            {
+                submittedDraft = draft;
+                return completion.Task;
+            });
+        form.Controls.Add(view);
+        form.Show();
+        view.ActivateView();
+        Application.DoEvents();
+
+        Assert(view.TryBeginCreateRoute() && submittedDraft?.Name ==
+                   "Fresh profile route" &&
+               view.HeaderActionButton.Text == "Starting…" &&
+               !view.HeaderActionButton.Enabled &&
+               view.HeaderActionButton.AccessibleName == "Routes are starting" &&
+               manager.Load().Document == before,
+            "Fresh setup must submit the editor draft to activation, expose a disabled accessible busy state, and never write through the ordinary route manager before authority exists.");
+
+        completion.SetResult(false);
+        PumpUntil(
+            () => view.HeaderActionButton.Text == "Set up routes" &&
+                  view.HeaderActionButton.Enabled,
+            "failed first-route setup reset");
+        Assert(manager.Load().Document == before,
+            "A failed first-route activation must leave the route snapshot untouched and allow a safe retry.");
+
+        form.Close();
+
+        using var unavailable = new RoutesView(
+            manager,
+            new FixedConnections(connectionId),
+            isCutoverCommitted: () => false,
+            runtimeStateProvider: () => RoutesRuntimeViewState.LegacySetupNeeded);
+        unavailable.ActivateView();
+        Assert(!unavailable.HeaderActionButton.Enabled &&
+               unavailable.HeaderActionButton.Text == "Finish settings first" &&
+               unavailable.HeaderActionButton.AccessibleDescription?.Contains(
+                   "primary recorder folder", StringComparison.OrdinalIgnoreCase) == true &&
+               !unavailable.TryBeginCreateRoute(),
+            "Setup must remain disabled with explicit prerequisite guidance when the host has not supplied a first-route activation callback.");
+    }
+
+    private static void AssertWatchedFolderRequiresRealSource()
+    {
+        var saveGuards = new List<(string Message, string Caption)>();
+        using var dialog = new RouteEditorDialog(
+            connections: [],
+            layoutDpi: 96,
+            inputSources: [],
+            saveGuardMessage: (message, caption, _) =>
+            {
+                saveGuards.Add((message, caption));
+                return DialogResult.OK;
+            });
+        LayoutHeadlessly(dialog);
+        var controls = Enumerate(dialog).ToArray();
+        var selector = controls.OfType<ComboBox>().Single(control =>
+            control.Name == "RouteWatchedSourceSelector");
+        var watched = controls.OfType<RadioButton>().Single(control =>
+            control.Name == "RouteTriggerWatchedFolder");
+        controls.OfType<TextBox>().Single(control =>
+            control.Name == "RouteNameEditor").Text = "No invented source";
+        watched.Checked = true;
+        InvokeSaveDraft(dialog);
+
+        Assert(selector.Items.Count == 0 && selector.SelectedIndex == -1 &&
+               selector.AccessibleDescription?.Contains(
+                   "No external clip source", StringComparison.Ordinal) == true &&
+               dialog.Draft is null &&
+               saveGuards.Count == 1 &&
+               saveGuards[0].Caption == "Choose a clip source",
+            "A fresh watched-folder route must not expose or save a null pseudo-source when no real source exists.");
     }
 
     private static void AssertExplicitDiscordConnectionSelection(string firstConnectionId)
@@ -1657,7 +1916,7 @@ internal static class RoutesFeatureTests
             controls.OfType<RadioButton>().Single(control =>
                 control.Name == "RouteTriggerWatchedFolder").Checked = true;
             controls.OfType<ComboBox>().Single(control =>
-                control.Name == "RouteWatchedSourceSelector").SelectedIndex = 1;
+                control.Name == "RouteWatchedSourceSelector").SelectedIndex = 0;
             PumpUntil(
                 () => preflightStarted.IsSet && !xboxDialog.XboxPreflightCompletion.IsCompleted,
                 "blocked Xbox route preflight");
@@ -2991,13 +3250,11 @@ internal static class RoutesFeatureTests
         var portraitOutput = (RadioButton)typeof(RouteEditorDialog)
             .GetField("_portrait", fields)!.GetValue(dialog)!;
 
-        Assert(sourceSelector.Items.Count == 3 &&
-               sourceSelector.Items[0]!.ToString() ==
-               "Current migrated folder · SteelSeries/NVIDIA" &&
-               sourceSelector.Items[1]!.ToString() == source.Name &&
-               sourceSelector.Items[2]!.ToString()!.Contains(
+        Assert(sourceSelector.Items.Count == 2 &&
+               sourceSelector.Items[0]!.ToString() == source.Name &&
+               sourceSelector.Items[1]!.ToString()!.Contains(
                    "Needs attention", StringComparison.Ordinal),
-            "External watched folder must offer the configured default and named Xbox source while explicitly retaining an unhealthy source for recovery context.");
+            "A fresh route editor must offer only real named sources and retain an unhealthy source for recovery context without inventing a migrated folder.");
         Assert(!IsLocallyVisible(sourceConfiguration) &&
                !IsLocallyVisible(historyConfiguration) &&
                historyOptions.All(control => !control.TabStop),
@@ -3006,17 +3263,17 @@ internal static class RoutesFeatureTests
         watchedFolder.Checked = true;
         LayoutHeadlessly(dialog);
         Assert(IsLocallyVisible(sourceConfiguration) && sourceSelector.TabStop &&
-               !IsLocallyVisible(historyConfiguration) &&
-               historyOptions.All(control => !control.TabStop),
-            "External watched folder must reveal source selection while the default source keeps Xbox HISTORY hidden and untabbable.");
+               IsLocallyVisible(historyConfiguration) &&
+               historyOptions.All(control => control.TabStop),
+            "External watched folder must reveal source selection and the selected real Xbox source's HISTORY controls without relying on a fake default source.");
 
-        sourceSelector.SelectedIndex = 2;
+        sourceSelector.SelectedIndex = 1;
         Assert(sourceSelector.SelectedIndex == 0 &&
                sourceSelector.AccessibleDescription is { } unavailableDescription &&
                unavailableDescription.Contains("needs attention", StringComparison.OrdinalIgnoreCase),
             "A Needs attention Xbox source must remain visible but unselectable for new route creation, with an accessible recovery instruction.");
 
-        sourceSelector.SelectedIndex = 1;
+        sourceSelector.SelectedIndex = 0;
         SettleXboxPreflight(
             dialog,
             () => preflight.Calls.Any(call =>
@@ -3130,18 +3387,6 @@ internal static class RoutesFeatureTests
                    newOnlyCall.Policy.ActivationUtc.AddDays(-7),
             "From now, Last 24 hours, and Last 7 days must freeze absolute cutoffs from one route-editor activation instant.");
 
-        sourceSelector.SelectedIndex = 0;
-        LayoutHeadlessly(dialog);
-        Assert(IsLocallyVisible(sourceConfiguration) &&
-               !IsLocallyVisible(historyConfiguration) &&
-               !historyConfiguration.TabStop &&
-               historyOptions.All(control => !control.TabStop) &&
-               landscapeOutput.Enabled && portraitOutput.Enabled &&
-               summaryWhen.Text == "Migrated watched folder" &&
-               summaryIf.Text == "Game · Battlefield 6",
-            "Switching back to the default watched folder must remove HISTORY from view and tab order and clear Xbox summary semantics.");
-
-        sourceSelector.SelectedIndex = 1;
         historyOptions[1].Checked = true;
         SettleXboxPreflight(
             dialog,
@@ -3233,7 +3478,7 @@ internal static class RoutesFeatureTests
         controls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteTriggerWatchedFolder").Checked = true;
         controls.OfType<ComboBox>().Single(control =>
-            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 1;
+            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 0;
         var preflightStatus = controls.OfType<Label>().Single(control =>
             control.Name == "RouteXboxPreflightStatus");
         SettleXboxPreflight(
@@ -3310,7 +3555,7 @@ internal static class RoutesFeatureTests
         controls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteTriggerWatchedFolder").Checked = true;
         controls.OfType<ComboBox>().Single(control =>
-            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 1;
+            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 0;
         controls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteXboxHistoryLastWeek").Checked = true;
         var status = controls.OfType<Label>().Single(control =>
@@ -3367,7 +3612,7 @@ internal static class RoutesFeatureTests
         filteredControls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteTriggerWatchedFolder").Checked = true;
         filteredControls.OfType<ComboBox>().Single(control =>
-            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 1;
+            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 0;
         filteredControls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteXboxHistoryLastWeek").Checked = true;
         var filteredStatus = filteredControls.OfType<Label>().Single(control =>
@@ -3511,7 +3756,7 @@ internal static class RoutesFeatureTests
         controls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteTriggerWatchedFolder").Checked = true;
         controls.OfType<ComboBox>().Single(control =>
-            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 1;
+            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 0;
         controls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteXboxHistoryLastDay").Checked = true;
         var status = controls.OfType<Label>().Single(control =>
@@ -3617,7 +3862,7 @@ internal static class RoutesFeatureTests
         controls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteTriggerWatchedFolder").Checked = true;
         controls.OfType<ComboBox>().Single(control =>
-            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 1;
+            control.Name == "RouteWatchedSourceSelector").SelectedIndex = 0;
         controls.OfType<RadioButton>().Single(control =>
             control.Name == "RouteXboxHistoryLastDay").Checked = true;
         var status = controls.OfType<Label>().Single(control =>

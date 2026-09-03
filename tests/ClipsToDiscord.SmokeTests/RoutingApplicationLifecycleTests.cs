@@ -21,6 +21,231 @@ internal static class RoutingApplicationLifecycleTests
         await AssertCancellationAndFailuresRemainFencedAsync(
             Path.Combine(testRoot, "failure"));
         await AssertStickySettingsGuardAsync(Path.Combine(testRoot, "settings"));
+        await AssertFreshSetupStartsNoLegacyAsync(Path.Combine(testRoot, "fresh-setup"));
+        await AssertFreshActivationSeedsColdStartPrerequisitesAsync(
+            Path.Combine(testRoot, "fresh-cold-prerequisites"));
+        await AssertUnavailableAdmissionStartsNoLegacyAsync(
+            Path.Combine(testRoot, "unavailable-admission"));
+        await AssertEveryFreshMarkerPhaseBootstrapsRoutingAsync(
+            Path.Combine(testRoot, "fresh-marker-phases"));
+    }
+
+    private static async Task AssertFreshSetupStartsNoLegacyAsync(string root)
+    {
+        Directory.CreateDirectory(root);
+        var fixture = new RuntimeFixture();
+        var lifecycle = RoutingApplicationLifecycle.Create(
+            Store(root),
+            fixture.Ownership,
+            fixture.Legacy,
+            fixture.Routing);
+
+        Assert(lifecycle.State == RoutingApplicationLifecycleState.SetupReady &&
+               fixture.Ownership.Owner is null &&
+               !lifecycle.LegacyOperationsPermitted,
+            "The lifecycle's omitted-admission default must bootstrap setup-ready without reserving Legacy ownership.");
+        var startup = await lifecycle.StartAsync();
+        Assert(startup.Status == RoutingApplicationLifecycleStatus.SetupRequired &&
+               lifecycle.State == RoutingApplicationLifecycleState.SetupReady &&
+               fixture.Legacy.StartCalls == 0 && fixture.Legacy.StopCalls == 0 &&
+               fixture.Events.Count == 0,
+            "Ordinary startup must leave a fresh profile idle until the user submits a route.");
+
+        var activated = await lifecycle.ActivateRoutingAsync();
+        Assert(activated.Status == RoutingApplicationLifecycleStatus.RoutingStarted &&
+               lifecycle.State == RoutingApplicationLifecycleState.RoutingRunning &&
+               fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+               fixture.Legacy.StartCalls == 0 && fixture.Legacy.StopCalls == 0 &&
+               fixture.Events.SequenceEqual([
+                   "routing-prepare", "routing-commit", "routing-start"
+               ]),
+            "Fresh route activation must enter Routing directly, with zero Legacy callbacks.");
+    }
+
+    private static async Task AssertFreshActivationSeedsColdStartPrerequisitesAsync(
+        string root)
+    {
+        Directory.CreateDirectory(root);
+        var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var settings = Settings(clips);
+        var watchedStateStore = new WatchStateStore(
+            Path.Combine(root, "watch-state.json"),
+            Path.Combine(root, "watch-state.safe-baseline"));
+        watchedStateStore.Save(EmptyState(clips));
+        var manualStateStore = new WatchStateStore(
+            Path.Combine(root, "routing-manual-edits.json"),
+            Path.Combine(root, "routing-manual-edits.safe-baseline"));
+        var pendingRecovery = new TrayPendingEditedDispositionRecovery(
+            watchedStateStore,
+            new EditedClipDispositionProcessor());
+        var manualRecovery = new TrayPendingEditedDispositionRecovery(
+            manualStateStore,
+            new EditedClipDispositionProcessor());
+        var prerequisites = new TrayRoutingPrerequisiteRecovery(
+            _ => Task.CompletedTask,
+            pendingRecovery,
+            manualStateStore,
+            manualRecovery);
+
+        Assert(manualStateStore.ProbeForRoutingActivation().Status ==
+                   WatchStateRoutingProbeStatus.Missing,
+            "A fresh profile must begin this regression fixture without a manual-edit journal.");
+        var authority = Store(root);
+        var firstFixture = new RuntimeFixture();
+        var firstLifecycle = RoutingApplicationLifecycle.Create(
+            authority,
+            firstFixture.Ownership,
+            firstFixture.Legacy,
+            firstFixture.Routing,
+            legacyRuntimeAllowed: false);
+        Assert((await firstLifecycle.StartAsync()).Status ==
+                   RoutingApplicationLifecycleStatus.SetupRequired,
+            "The prerequisite fixture must begin in fresh setup.");
+
+        var sawDurableJournalBeforeActivation = false;
+        var activated = await TrayFreshRoutingActivationSequence.RunAsync(
+            recoveryToken => prerequisites.RecoverAsync(
+                settings,
+                recoverPendingEditedDispositions: false,
+                recoveryToken),
+            async activationToken =>
+            {
+                sawDurableJournalBeforeActivation =
+                    manualStateStore.ProbeForRoutingActivation(activationToken) is
+                    {
+                        Status: WatchStateRoutingProbeStatus.Loaded,
+                        State: not null
+                    };
+                return await firstLifecycle.ActivateRoutingAsync(activationToken);
+            },
+            CancellationToken.None);
+        Assert(sawDurableJournalBeforeActivation &&
+               activated.State == RoutingApplicationLifecycleState.RoutingRunning &&
+               File.Exists(manualStateStore.StatePath),
+            "Fresh first-route activation must durably initialize and verify the manual-edit journal before Lifecycle can commit Routing authority.");
+
+        _ = await firstLifecycle.StopAsync();
+        var binding = await CommitAuthorityAsync(authority, clips);
+        var coldFixture = new RuntimeFixture();
+        var coldLifecycle = RoutingApplicationLifecycle.Create(
+            new RoutingExecutionAuthorityStore(authority.Path),
+            coldFixture.Ownership,
+            coldFixture.Legacy,
+            coldFixture.Routing,
+            currentCaptureLibraryBinding: () => binding,
+            legacyRuntimeAllowed: false);
+        var cold = await TrayRoutingStartupSequence.RunAsync(
+            coldLifecycle.RoutingSelectedAtBootstrap,
+            recoveryToken => prerequisites.RecoverAsync(
+                settings,
+                recoverPendingEditedDispositions: true,
+                recoveryToken),
+            coldLifecycle.StartAsync,
+            static result => result.Status ==
+                RoutingApplicationLifecycleStatus.LegacyStarted,
+            _ => throw new InvalidOperationException(
+                "A cold Routing restart must not enter first-activation cutover."),
+            CancellationToken.None);
+        Assert(cold.RecoveryError is null && !cold.ActivationAttempted &&
+               cold.Result.State == RoutingApplicationLifecycleState.RoutingRunning &&
+               coldFixture.Legacy.StartCalls == 0 && coldFixture.Legacy.StopCalls == 0,
+            "The next cold Routing-only startup must recover the seeded manual-edit journal and start without wedging or invoking Legacy.");
+        _ = await coldLifecycle.StopAsync();
+    }
+
+    private static async Task AssertUnavailableAdmissionStartsNoLegacyAsync(string root)
+    {
+        Directory.CreateDirectory(root);
+        var fixture = new RuntimeFixture();
+        var unavailable = new LegacyRoutingMigrationAdmissionInspection(
+            RoutingDocumentLoadStatus.Unavailable,
+            Document: null);
+        var lifecycle = RoutingApplicationLifecycle.Create(
+            Store(root),
+            fixture.Ownership,
+            fixture.Legacy,
+            fixture.Routing,
+            legacyRuntimeAllowed: TrayRoutingAdmissionPolicy.AllowsLegacyRuntime(unavailable));
+
+        var startup = await lifecycle.StartAsync();
+        Assert(startup.Status == RoutingApplicationLifecycleStatus.SetupRequired &&
+               lifecycle.State == RoutingApplicationLifecycleState.SetupReady &&
+               fixture.Ownership.Owner is null &&
+               !lifecycle.LegacyOperationsPermitted &&
+               fixture.Legacy.StartCalls == 0 && fixture.Legacy.StopCalls == 0 &&
+               fixture.Events.Count == 0,
+            "An unavailable admission record must leave processing paused with zero Legacy callbacks.");
+    }
+
+    private static async Task AssertEveryFreshMarkerPhaseBootstrapsRoutingAsync(string root)
+    {
+        foreach (var phase in Enum.GetValues<LegacyRoutingMigrationMarkerPhase>())
+        {
+            var phaseRoot = Path.Combine(root, phase.ToString());
+            Directory.CreateDirectory(phaseRoot);
+            var clips = Path.Combine(phaseRoot, "clips");
+            var library = Path.Combine(phaseRoot, "library");
+            Directory.CreateDirectory(clips);
+            Directory.CreateDirectory(library);
+            var binding = RoutingCaptureLibraryBindingModel.Create(library);
+            var readiness = FreshRoutingSetupPlanner.Evaluate(
+                new FreshRoutingSetupInput(
+                    Settings(clips),
+                    EmptyState(clips),
+                    LegacyWorkerQuiesced: true,
+                    new RoutingRouteDraft(
+                        "Fresh route",
+                        RoutingTriggerKind.AnyNewSourceClip,
+                        Game: null,
+                        Destination: null,
+                        ConnectionId: null,
+                        RoutingOutputKind.Original,
+                        RoutingDeliveryMode.Automatic,
+                        RoutingMissingOutputBehavior.UseOriginal,
+                        FileIntoLibrary: true),
+                    binding,
+                    RoutingWatchedSourceAdapters.Get(ClipCaptureSource.SteelSeriesGg)
+                        .InspectRootIdentity(clips),
+                    LegacyRoutingMigrationAdmission.FreshOrInvalidProfile),
+                Now);
+            var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(
+                readiness.Plan ?? throw new InvalidOperationException(
+                    "The fresh lifecycle marker fixture could not prepare."),
+                Now);
+            var markerStore = new LegacyRoutingMigrationMarkerStore(Path.Combine(
+                phaseRoot,
+                "routing-state",
+                LegacyRoutingMigrationMarkerStore.FileName));
+            _ = await markerStore.SaveAsync(prepared, 0);
+            if (phase != LegacyRoutingMigrationMarkerPhase.Prepared)
+            {
+                var successor = phase == LegacyRoutingMigrationMarkerPhase.Aborting
+                    ? LegacyRoutingMigrationMarkerModel.BeginAbort(prepared, Now.AddSeconds(1))
+                    : LegacyRoutingMigrationMarkerModel.Commit(prepared, Now.AddSeconds(1));
+                _ = await markerStore.SaveAsync(successor, prepared.Generation);
+            }
+
+            var fixture = new RuntimeFixture();
+            var lifecycle = RoutingApplicationLifecycle.Create(
+                Store(phaseRoot),
+                fixture.Ownership,
+                fixture.Legacy,
+                fixture.Routing,
+                migrationMarkers: markerStore,
+                currentCaptureLibraryBinding: () => binding);
+            Assert(lifecycle.State == RoutingApplicationLifecycleState.RoutingReady &&
+                   lifecycle.RoutingSelectedAtBootstrap &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   fixture.Legacy.StartCalls == 0 && fixture.Legacy.StopCalls == 0,
+                $"Fresh {phase} evidence must bootstrap under Routing ownership, never Legacy.");
+
+            fixture.Routing.PrepareError = new IOException("resume later");
+            var failed = await lifecycle.StartAsync();
+            Assert(failed.State == RoutingApplicationLifecycleState.RoutingRecoveryNeeded &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   fixture.Legacy.StartCalls == 0 && fixture.Legacy.StopCalls == 0,
+                $"Fresh {phase} recovery failure must remain Routing-fenced across restart.");
+        }
     }
 
     private static async Task AssertMissingAuthorityStartsLegacyThenCutsOverAsync(string root)
@@ -32,7 +257,8 @@ internal static class RoutingApplicationLifecycleTests
             authority,
             fixture.Ownership,
             fixture.Legacy,
-            fixture.Routing);
+            fixture.Routing,
+            legacyRuntimeAllowed: true);
         Assert(lifecycle.AuthorityInspection.LegacyPermitted &&
                lifecycle.AuthorityInspection.LoadStatus == RoutingDocumentLoadStatus.Missing &&
                lifecycle.State == RoutingApplicationLifecycleState.LegacyReady &&
@@ -178,7 +404,8 @@ internal static class RoutingApplicationLifecycleTests
                 },
                 LegacyWorkerQuiesced: true,
                 DiscordConnectionIds: [],
-                captureLibraryBinding),
+                captureLibraryBinding,
+                LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
             Now);
         var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(
             readiness.Plan ?? throw new InvalidOperationException(
@@ -326,7 +553,8 @@ internal static class RoutingApplicationLifecycleTests
             Store(Path.Combine(root, "cancelled-legacy")),
             cancelledFixture.Ownership,
             cancelledFixture.Legacy,
-            cancelledFixture.Routing);
+            cancelledFixture.Routing,
+            legacyRuntimeAllowed: true);
         using (var cancellation = new CancellationTokenSource())
         {
             cancellation.Cancel();
@@ -347,7 +575,8 @@ internal static class RoutingApplicationLifecycleTests
             Store(Path.Combine(root, "failed-legacy")),
             failedLegacy.Ownership,
             failedLegacy.Legacy,
-            failedLegacy.Routing);
+            failedLegacy.Routing,
+            legacyRuntimeAllowed: true);
         var failed = await failedLifecycle.StartAsync();
         Assert(failed.Status == RoutingApplicationLifecycleStatus.StartFailed &&
                failedLifecycle.State == RoutingApplicationLifecycleState.LegacyReady &&
@@ -473,7 +702,8 @@ internal static class RoutingApplicationLifecycleTests
                 state,
                 LegacyWorkerQuiesced: true,
                 DiscordConnectionIds: [],
-                captureLibraryBinding),
+                captureLibraryBinding,
+                LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
             Now);
         Assert(readiness.CanCommit && readiness.Plan is not null,
             "The lifecycle authority fixture requires a valid drained migration.");
@@ -496,6 +726,20 @@ internal static class RoutingApplicationLifecycleTests
         UploadToDiscord: false,
         GlobalHotkeyBinding.DefaultDisplayText,
         ClipCaptureSource.SteelSeriesGg);
+
+    private static WatchState EmptyState(string clips) => new()
+    {
+        Version = WatchStateStore.CurrentVersion,
+        ClipsFolder = clips,
+        CaptureSource = ClipCaptureSource.SteelSeriesGg,
+        KnownContentHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+        UploadedContentHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+        LocalOnlyContentHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+        IgnoredFileKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+        PendingMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+        PendingLocalOnlyMoves = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+        PendingEditedUploads = []
+    };
 
     private sealed class RuntimeFixture
     {

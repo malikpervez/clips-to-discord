@@ -259,7 +259,8 @@ internal sealed class CaptureView : UserControl
             BackColor = ClipCordTheme.Shell,
             AccessibleRole = AccessibleRole.Pane
         };
-        if (_manualRecorder is not null) AddCard(BuildManualRecordingCard());
+        // Manual capture remains available to the capture host and automated diagnostics, but it
+        // is not a peer end-user workflow on the Figma-approved Instant Replay page.
         AddCard(BuildInstantReplayCard());
         AddCard(BuildQualityAndEstimateRow());
         AddCard(BuildAudioAndCameraRow());
@@ -1530,12 +1531,8 @@ internal sealed class CaptureView : UserControl
             ReplayCaptureState.Failed => ("●  REPLAY NEEDS ATTENTION", Amber),
             _ => _manualRecorder?.State switch
             {
-            ManualCaptureState.Starting => ("●  STARTING", Amber),
-            ManualCaptureState.Recording => ("●  RECORDING", ClipCordTheme.Coral),
-            ManualCaptureState.Finalizing => ("●  SAVING", Amber),
-            ManualCaptureState.Ready => ("●  TEST READY", Green),
-            ManualCaptureState.NoTarget => ("●  SELECT GAME", Amber),
-            ManualCaptureState.Failed => ("●  NEEDS ATTENTION", Amber),
+                ManualCaptureState.Recording => ("●  RECORDING", ClipCordTheme.Coral),
+                ManualCaptureState.Finalizing => ("●  SAVING", Amber),
                 _ => _state switch
                 {
                     CaptureViewState.Armed => ("●  WAITING FOR GAME", Green),

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ClipsToDiscord;
 
 internal static class RoutingMigrationTests
@@ -7,6 +8,9 @@ internal static class RoutingMigrationTests
     {
         Directory.CreateDirectory(testRoot);
         AssertDiscordAndLocalOnlyPlans(testRoot);
+        AssertExistingPreviewMigrationLabelRemainsCompatible(testRoot);
+        AssertFreshFirstRoutePlanAndEvidence(testRoot);
+        AssertFreshCutoverResumesAndRemainsUserOwned(testRoot);
         AssertReadinessBlocksUnsafeCutover(testRoot);
         AssertCommittedCutoverIsDurableAndIdempotent(testRoot);
         AssertPreparedCutoverResumesAfterRestart(testRoot);
@@ -17,6 +21,188 @@ internal static class RoutingMigrationTests
         AssertValidShapeMarkerMutationFailsClosed(testRoot);
         AssertConcurrentCutoverCommitsExactlyOnce(testRoot);
         AssertMarkerPathAndSizeAreBounded(testRoot);
+    }
+
+    private static void AssertExistingPreviewMigrationLabelRemainsCompatible(string root)
+    {
+        var clips = NewClipsRoot(root, "existing-preview-label");
+        var input = Input(Settings(clips, upload: false), State(clips), []) with
+        {
+            ImportedRouteLabelVersion =
+                LegacyRoutingMigrationPlanner.LegacyImportedRouteLabelVersion
+        };
+        var readiness = LegacyRoutingMigrationPlanner.Evaluate(input, At(0));
+        var marker = LegacyRoutingMigrationMarkerModel.CreatePrepared(
+            readiness.Plan ?? throw new InvalidOperationException(
+                "The existing-preview label fixture could not prepare a migration."),
+            At(0));
+        LegacyRoutingMigrationMarkerModel.Validate(marker);
+        Assert(marker.Route.Name != LegacyRoutingMigrationPlanner.ImportedRouteLabel &&
+               RoutesView.GetRouteDisplayName(marker.Route) ==
+               LegacyRoutingMigrationPlanner.ImportedRouteLabel,
+            "A migration committed by the prior 2.0 preview must remain byte-verifiable while displaying the approved imported label.");
+
+        var store = new LegacyRoutingMigrationMarkerStore(Path.Combine(
+            root,
+            "existing-preview-label-marker",
+            LegacyRoutingMigrationMarkerStore.FileName));
+        _ = store.SaveAsync(marker, expectedGeneration: 0).GetAwaiter().GetResult();
+        var oldJson = JsonNode.Parse(File.ReadAllText(store.Path))?.AsObject() ??
+                      throw new InvalidOperationException("The marker fixture was not JSON.");
+        Assert(oldJson.Remove("origin") && oldJson.Remove("importedRouteLabelVersion"),
+            "The compatibility fixture did not contain the new optional marker fields.");
+        File.WriteAllText(store.Path, oldJson.ToJsonString(new JsonSerializerOptions
+        {
+            WriteIndented = true
+        }));
+        var reloaded = store.Load();
+        Assert(reloaded.LoadedFromDisk &&
+               reloaded.Document!.Origin == RoutingActivationOrigin.LegacyMigration &&
+               reloaded.Document.ImportedRouteLabelVersion is null &&
+               reloaded.Document.PayloadFingerprint == marker.PayloadFingerprint,
+            "A marker written before origin and label-version fields existed must retain its exact legacy meaning and payload digest.");
+    }
+
+    private static void AssertFreshFirstRoutePlanAndEvidence(string root)
+    {
+        var clips = NewClipsRoot(root, "fresh-plan");
+        var state = State(clips);
+        state.KnownContentHashes.Add(Hash('4'));
+        var input = FreshInput(Settings(clips, upload: false), state);
+        var readiness = FreshRoutingSetupPlanner.Evaluate(input, At(0));
+        Assert(readiness.CanCommit && readiness.Plan is
+               {
+                   Origin: RoutingActivationOrigin.FreshSetup,
+                   ImportedRouteLabelVersion: null,
+                   Route.Source: RoutingRouteSource.User
+               } plan &&
+               plan.Route.Name == "My first route" &&
+               !plan.Route.Name.Contains("Imported", StringComparison.OrdinalIgnoreCase),
+            "Explicit fresh setup must create a user route without legacy migration presentation.");
+
+        var marker = LegacyRoutingMigrationMarkerModel.CreatePrepared(readiness.Plan!, At(0));
+        LegacyRoutingMigrationMarkerModel.Validate(marker);
+        var reconstructed = FreshRoutingSetupPlanner.ReconstructCurrentPlan(
+            marker,
+            input.Settings,
+            input.WatchState,
+            input.CaptureLibraryBinding,
+            input.WatchedRootIdentitySha256);
+        Assert(reconstructed.MigrationId == marker.MigrationId &&
+               reconstructed.SourceFingerprint == marker.SourceFingerprint,
+            "Fresh evidence must be reconstructable after restart without the original route draft.");
+
+        var evidenceStore = new WatchStateStore(
+            Path.Combine(root, "fresh-plan-evidence", "state.json"),
+            Path.Combine(root, "fresh-plan-evidence", ".safe-baseline-required"));
+        evidenceStore.Save(input.WatchState);
+        var liveRootIdentity = input.WatchedRootIdentitySha256;
+        var evidence = new FreshRoutingActivationEvidenceSource(
+            evidenceStore,
+            () => input.Settings,
+            () => input.CaptureLibraryBinding,
+            _ => liveRootIdentity);
+        Assert(evidence.Inspect(marker).Loaded,
+            "Fresh activation evidence must load while the native watched-root identity still matches.");
+        liveRootIdentity = DifferentHash(input.WatchedRootIdentitySha256);
+        Assert(evidence.Inspect(marker).Status ==
+               FreshRoutingActivationEvidenceStatus.InputUnavailable,
+            "Fresh activation evidence must re-read and reject a replaced native watched root.");
+
+        var changedState = State(clips);
+        changedState.KnownContentHashes.Add(Hash('5'));
+        AssertThrows<InvalidDataException>(() =>
+                FreshRoutingSetupPlanner.ReconstructCurrentPlan(
+                    marker,
+                    input.Settings,
+                    changedState,
+                    input.CaptureLibraryBinding,
+                    input.WatchedRootIdentitySha256),
+            "Fresh restart evidence must fail closed when the compatibility baseline changes.");
+        AssertThrows<InvalidDataException>(() =>
+                FreshRoutingSetupPlanner.ReconstructCurrentPlan(
+                    marker,
+                    input.Settings,
+                    input.WatchState,
+                    input.CaptureLibraryBinding,
+                    DifferentHash(input.WatchedRootIdentitySha256)),
+            "Fresh restart evidence must fail closed when the native source root changes at the same configured path.");
+        var invalidIdentity = FreshRoutingSetupPlanner.Evaluate(input with
+        {
+            WatchedRootIdentitySha256 = "not-a-sha256"
+        }, At(0));
+        Assert(invalidIdentity.Status == LegacyRoutingCutoverReadinessStatus.InvalidWatchState,
+            "Fresh setup must reject an invalid native watched-source identity.");
+        var denied = FreshRoutingSetupPlanner.Evaluate(input with
+        {
+            Admission = LegacyRoutingMigrationAdmission.ValidLegacyUpgrade
+        }, At(0));
+        Assert(denied.Status == LegacyRoutingCutoverReadinessStatus.NoFreshProfileEvidence,
+            "Fresh setup must require a durable negative migration admission decision.");
+    }
+
+    private static void AssertFreshCutoverResumesAndRemainsUserOwned(string root)
+    {
+        var test = Path.Combine(root, "fresh-cutover");
+        var clips = NewClipsRoot(test, "clips");
+        var input = FreshInput(Settings(clips, upload: false), State(clips));
+        var readiness = FreshRoutingSetupPlanner.Evaluate(input, At(0));
+        var (_, routes, markers) = Stores(test);
+        var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(readiness.Plan!, At(0));
+        _ = markers.SaveAsync(prepared, expectedGeneration: 0).GetAwaiter().GetResult();
+
+        var coordinator = new LegacyRoutingMigrationCoordinator(routes, markers);
+        var committed = coordinator.ResumeFreshAsync(
+                input.Settings,
+                input.WatchState,
+                input.CaptureLibraryBinding,
+                input.WatchedRootIdentitySha256,
+                At(1))
+            .GetAwaiter().GetResult();
+        Assert(committed.Status == LegacyRoutingCutoverResultStatus.Committed &&
+               markers.Load().Document is
+               {
+                   Origin: RoutingActivationOrigin.FreshSetup,
+                   Phase: LegacyRoutingMigrationMarkerPhase.Committed
+               } &&
+               routes.Load().Document!.Routes.Single().Source == RoutingRouteSource.User,
+            "A restarted fresh preparation must durably finish the exact user first route.");
+
+        var routeId = routes.Load().Document!.Routes.Single().RouteId;
+        var manager = new RoutingRouteManager(routes, () => At(2));
+        Assert(!manager.CanMutate() &&
+               !CommittedRoutingRouteMutationAuthority.IsCutoverCommitted(
+                   markers,
+                   routes.Load().Document!),
+            "A fresh marker must not unlock route mutation before runtime authority commits.");
+        var authority = new RoutingExecutionAuthorityStore(Path.Combine(
+            test,
+            "routing",
+            RoutingExecutionAuthorityStore.FileName));
+        _ = authority.CommitAsync(RoutingExecutionAuthorityModel.Create(
+                committed.Marker ?? throw new InvalidOperationException(
+                    "The fresh cutover did not return its committed marker."),
+                input.Settings.CaptureSource,
+                At(2)))
+            .GetAwaiter().GetResult();
+        manager.DeleteAsync(routeId).GetAwaiter().GetResult();
+        Assert(manager.CanMutate() && routes.Load().Document!.Routes.Count == 0,
+            "Committed fresh authority must allow its initial user route to be deleted.");
+        var restart = coordinator.ResumeFreshAsync(
+                input.Settings,
+                input.WatchState,
+                input.CaptureLibraryBinding,
+                input.WatchedRootIdentitySha256,
+                At(3))
+            .GetAwaiter().GetResult();
+        Assert(restart.Status == LegacyRoutingCutoverResultStatus.AlreadyCommitted &&
+               routes.Load().Document!.Routes.Count == 0,
+            "Fresh activation proof must remain valid after legitimate live-route deletion.");
+
+        var crossOrigin = coordinator.ExecuteAsync(
+            Input(input.Settings, input.WatchState, []), At(4)).GetAwaiter().GetResult();
+        Assert(crossOrigin.Status == LegacyRoutingCutoverResultStatus.StateConflict,
+            "A durable fresh activation marker must never be reinterpreted as legacy migration.");
     }
 
     private static void AssertDiscordAndLocalOnlyPlans(string root)
@@ -32,11 +218,15 @@ internal static class RoutingMigrationTests
             "A drained Discord-on legacy state should produce a cutover plan.");
         var route = discord.Plan!.Route;
         Assert(discord.Plan.Scope == LegacyRoutingCutoverScope.FutureClipsOnly &&
+               route.Name == LegacyRoutingMigrationPlanner.ImportedRouteLabel &&
                route.Source == RoutingRouteSource.Migration &&
                route.Kind == RoutingRouteKind.Fallback &&
                route.Trigger == RoutingTriggerKind.AnyNewSourceClip &&
                route.Conditions.Count == 0 && route.Actions.Count == 2,
             "Discord migration must be one unconditional future-clips fallback route.");
+        Assert(RoutesView.GetRouteDisplayName(route) ==
+               "Imported from ClipCord 1.x",
+            "A genuine 1.x migration must expose the approved imported-route label.");
         Assert(route.Actions[0] is
                {
                    Kind: RoutingActionKind.Deliver,
@@ -507,7 +697,37 @@ internal static class RoutingMigrationTests
             state,
             quiesced,
             connectionIds,
-            RoutingCaptureLibraryBindingModel.Create(captureLibraryRoot));
+            RoutingCaptureLibraryBindingModel.Create(captureLibraryRoot),
+            LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
+    }
+
+    private static FreshRoutingSetupInput FreshInput(
+        AppSettings settings,
+        WatchState state,
+        bool quiesced = true)
+    {
+        var captureLibraryRoot = Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(settings.ClipsFolder))!,
+            "capture-library");
+        Directory.CreateDirectory(captureLibraryRoot);
+        return new FreshRoutingSetupInput(
+            settings,
+            state,
+            quiesced,
+            new RoutingRouteDraft(
+                "My first route",
+                RoutingTriggerKind.AnyNewSourceClip,
+                Game: null,
+                Destination: null,
+                ConnectionId: null,
+                RoutingOutputKind.Original,
+                RoutingDeliveryMode.Automatic,
+                RoutingMissingOutputBehavior.UseOriginal,
+                FileIntoLibrary: true),
+            RoutingCaptureLibraryBindingModel.Create(captureLibraryRoot),
+            RoutingWatchedSourceAdapters.Get(settings.CaptureSource)
+                .InspectRootIdentity(settings.ClipsFolder),
+            LegacyRoutingMigrationAdmission.FreshOrInvalidProfile);
     }
 
     private static AppSettings Settings(string clips, bool upload) => new(
@@ -519,6 +739,9 @@ internal static class RoutingMigrationTests
         upload,
         GlobalHotkeyBinding.DefaultDisplayText,
         ClipCaptureSource.SteelSeriesGg);
+
+    private static string DifferentHash(string hash) =>
+        (hash[0] == '0' ? "1" : "0") + hash[1..];
 
     private static WatchState State(string clips) => new()
     {

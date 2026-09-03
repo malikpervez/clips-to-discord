@@ -24,6 +24,8 @@ internal static class NamedWatchedFolderIngressTests
             Path.Combine(root, "overlap-health"));
         await AssertIngressRestartAndRootResolutionAsync(
             Path.Combine(root, "ingress-and-resolution"));
+        await AssertSourceRevocationStopsAtomicJournalCommitAsync(
+            Path.Combine(root, "journal-authority-revocation"));
     }
 
     private static async Task AssertRuntimePersistsMissingRootAttentionAsync(string root)
@@ -383,6 +385,36 @@ internal static class NamedWatchedFolderIngressTests
             "Disabling or breaking one named source must not prevent another configured source from admitting new clips.");
     }
 
+    private static async Task AssertSourceRevocationStopsAtomicJournalCommitAsync(string root)
+    {
+        using var fixture = await Fixture.CreateAsync(root);
+        var named = fixture.Sources[0];
+        var path = named.CreateNewClip("revoked-before-journal.mp4");
+        var source = await named.Adapter.OpenAndFingerprintAsync(
+            named.Record.CanonicalRoot,
+            path);
+        var adapter = new RevalidationCallbackAdapter(
+            named.Adapter,
+            () =>
+            {
+                var disabled = fixture.Catalog.SetEnabledAsync(
+                        named.Record.SourceId,
+                        enabled: false,
+                        now: Now.AddMinutes(20))
+                    .GetAwaiter()
+                    .GetResult();
+                Assert(disabled.Status == RoutingInputSourceMutationStatus.Disabled,
+                    "The named-source revocation fixture could not disable its source.");
+            });
+
+        var result = await fixture.Ingress.AdmitAsync(named.Record, source, adapter);
+
+        Assert(result.Status == RoutingWatchedIngressStatus.Disabled &&
+               !fixture.Journals.EnumerateSourceClipIds().Any() &&
+               fixture.Outbox.Load().Status == RoutingDocumentLoadStatus.Missing,
+            "Revoking named-source authority during revalidation must be rechecked at the atomic journal commit boundary and return Disabled without journal or outbox persistence.");
+    }
+
     private static RoutingOutboxDocument RequireOutbox(RoutingOutboxStore store)
     {
         var loaded = store.Load();
@@ -603,7 +635,8 @@ internal static class NamedWatchedFolderIngressTests
                         state,
                         LegacyWorkerQuiesced: true,
                         connectionIds,
-                        captureBinding),
+                        captureBinding,
+                        LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
                     Now)
                 .Plan ?? throw new InvalidOperationException(
                     "The named watched-source fixture could not create its legacy migration route.");
@@ -665,7 +698,8 @@ internal static class NamedWatchedFolderIngressTests
                 stateStore,
                 () => settings,
                 () => connectionIds,
-                () => captureBinding);
+                () => captureBinding,
+                () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
             var ownership = new ClipProcessingOwnershipCoordinator();
             if (!ownership.TryAcquire(
                     ClipProcessingRuntimeOwner.Routing,
@@ -800,6 +834,42 @@ internal static class NamedWatchedFolderIngressTests
                 1920,
                 1080));
         }
+    }
+
+    private sealed class RevalidationCallbackAdapter(
+        IRoutingWatchedSourceAdapter inner,
+        Action onRevalidated) : IRoutingWatchedSourceAdapter
+    {
+        public ClipCaptureSource Source => inner.Source;
+
+        public IReadOnlyList<string> EnumerateCandidates(
+            string clipsRoot,
+            CancellationToken cancellationToken = default) =>
+            inner.EnumerateCandidates(clipsRoot, cancellationToken);
+
+        public Task<RoutingWatchedSourceOccurrence> InspectOccurrenceAsync(
+            string clipsRoot,
+            string candidatePath,
+            CancellationToken cancellationToken = default) =>
+            inner.InspectOccurrenceAsync(clipsRoot, candidatePath, cancellationToken);
+
+        public Task<RoutingWatchedSourceFile> OpenAndFingerprintAsync(
+            string clipsRoot,
+            string candidatePath,
+            CancellationToken cancellationToken = default) =>
+            inner.OpenAndFingerprintAsync(clipsRoot, candidatePath, cancellationToken);
+
+        public async Task<RoutingWatchedSourceFile> RevalidateAsync(
+            RoutingWatchedSourceFile prior,
+            CancellationToken cancellationToken = default)
+        {
+            var revalidated = await inner.RevalidateAsync(prior, cancellationToken);
+            onRevalidated();
+            return revalidated;
+        }
+
+        public string InspectRootIdentity(string clipsRoot) =>
+            inner.InspectRootIdentity(clipsRoot);
     }
 
     private sealed class RejectingProvider : IRoutingDeliveryProvider

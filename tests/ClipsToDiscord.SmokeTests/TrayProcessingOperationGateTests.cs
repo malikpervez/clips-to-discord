@@ -11,7 +11,9 @@ internal static class TrayProcessingOperationGateTests
         await AssertCancellationAndStartupFailurePropagateAsync();
         await AssertAuthorityAwareStartupRecoveryOrderingAsync();
         await AssertRetryRestartsLegacyBeforeActivationAsync();
+        AssertAdmissionPolicyFailsClosed();
         AssertRuntimeViewPresentationTracksRealTransitions();
+        AssertFreshPreparedRouteDraftCanBeReconstructed();
         await AssertRoutingManualOperationQuiescesRecoversAndRestartsAsync();
         await AssertBlockedAuthorityManualOperationFailsClosedAsync(
             Path.Combine(testRoot, "blocked-authority"));
@@ -498,28 +500,124 @@ internal static class TrayProcessingOperationGateTests
     {
         Assert(TrayRoutesRuntimePresentation.Map(
                    startupRunning: true,
-                   RoutingApplicationLifecycleState.LegacyRunning) ==
+                   RoutingApplicationLifecycleState.LegacyRunning,
+                   LegacyRoutingMigrationAdmission.ValidLegacyUpgrade) ==
                RoutesRuntimeViewState.Activating,
             "An in-flight startup or manual retry must stay visibly Activating even while Lifecycle has not yet published its final state.");
         Assert(TrayRoutesRuntimePresentation.Map(
                    startupRunning: false,
-                   RoutingApplicationLifecycleState.LegacyReady) ==
-               RoutesRuntimeViewState.LegacySetupNeeded,
-            "LegacyReady after startup settles must expose editable first-run recovery instead of an endless disabled Starting state or Routing-owned lockout.");
+                   RoutingApplicationLifecycleState.LegacyReady,
+                   LegacyRoutingMigrationAdmission.ValidLegacyUpgrade) ==
+               RoutesRuntimeViewState.LegacyActive,
+            "A valid legacy upgrade must expose migration retry, never the fresh-profile planner.");
         Assert(TrayRoutesRuntimePresentation.Map(
                    startupRunning: false,
-                   RoutingApplicationLifecycleState.LegacyRunning) ==
+                   RoutingApplicationLifecycleState.SetupReady,
+                   LegacyRoutingMigrationAdmission.FreshOrInvalidProfile) ==
+               RoutesRuntimeViewState.LegacySetupNeeded &&
+               TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.LegacyReady,
+                   LegacyRoutingMigrationAdmission.FreshOrInvalidProfile) ==
+               RoutesRuntimeViewState.LegacySetupNeeded,
+            "Only a terminal fresh-profile decision in a setup-ready lifecycle may expose the guided first-route planner.");
+        Assert(TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.LegacyRunning,
+                   LegacyRoutingMigrationAdmission.FreshOrInvalidProfile) ==
                RoutesRuntimeViewState.LegacyActive &&
                TrayRoutesRuntimePresentation.Map(
                    startupRunning: false,
-                   RoutingApplicationLifecycleState.RoutingRunning) ==
+                   RoutingApplicationLifecycleState.LegacyReady,
+                   LegacyRoutingMigrationAdmission.Deferred) ==
+               RoutesRuntimeViewState.LegacyActive &&
+               TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.SetupReady,
+                   LegacyRoutingMigrationAdmission.Deferred) ==
+               RoutesRuntimeViewState.Blocked &&
+               TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.LegacyRunning,
+                   LegacyRoutingMigrationAdmission.ValidLegacyUpgrade) ==
+               RoutesRuntimeViewState.LegacyActive &&
+               TrayRoutesRuntimePresentation.Map(
+                   startupRunning: false,
+                   RoutingApplicationLifecycleState.RoutingRunning,
+                   LegacyRoutingMigrationAdmission.ValidLegacyUpgrade) ==
                RoutesRuntimeViewState.Active,
-            "Settled runtime presentation must distinguish the live Legacy and Routing owners.");
+            "Settled runtime presentation must distinguish owners and keep ambiguous admission away from fresh setup.");
         Assert(TrayRoutesRuntimePresentation.IsActivationStatus(
                    "Routes activating — safely preparing existing clips") &&
                !TrayRoutesRuntimePresentation.IsActivationStatus(
                    "Discord open — watching for clips"),
             "A failed retry may restore its prior watcher status only while the temporary activation status is still current.");
+    }
+
+    private static void AssertAdmissionPolicyFailsClosed()
+    {
+        foreach (var status in Enum.GetValues<RoutingDocumentLoadStatus>()
+                     .Where(status => status != RoutingDocumentLoadStatus.Loaded))
+        {
+            Assert(!TrayRoutingAdmissionPolicy.AllowsLegacyRuntime(
+                    new LegacyRoutingMigrationAdmissionInspection(status, Document: null)),
+                $"A non-loaded {status} admission must not authorize the Legacy runtime.");
+        }
+
+        var timestamp = new DateTimeOffset(2026, 9, 2, 16, 0, 0, TimeSpan.Zero);
+        LegacyRoutingMigrationAdmissionDocument Document(
+            LegacyRoutingMigrationAdmission admission) => new(
+            LegacyRoutingMigrationAdmissionStore.CurrentSchemaVersion,
+            Generation: 1,
+            admission,
+            LegacyRoutingMigrationPlanner.CurrentImportedRouteLabelVersion,
+            timestamp);
+
+        var fresh = new LegacyRoutingMigrationAdmissionInspection(
+            RoutingDocumentLoadStatus.Loaded,
+            Document(LegacyRoutingMigrationAdmission.FreshOrInvalidProfile));
+        var legacy = new LegacyRoutingMigrationAdmissionInspection(
+            RoutingDocumentLoadStatus.Loaded,
+            Document(LegacyRoutingMigrationAdmission.ValidLegacyUpgrade));
+        Assert(!TrayRoutingAdmissionPolicy.AllowsLegacyRuntime(fresh) &&
+               TrayRoutingAdmissionPolicy.AllowsLegacyRuntime(legacy),
+            "Only a loaded, durable positive legacy admission may authorize the compatibility watcher.");
+    }
+
+    private static void AssertFreshPreparedRouteDraftCanBeReconstructed()
+    {
+        const string sourceId = "source.0123456789abcdef0123456789abcdef";
+        var original = new RoutingRouteDraft(
+            "NVIDIA highlights → Discord",
+            RoutingTriggerKind.WatchedFolder,
+            "Halo Infinite",
+            RoutingDestinationKind.Discord,
+            "discord.0123456789abcdef0123456789abcdef",
+            RoutingOutputKind.Landscape,
+            RoutingDeliveryMode.Approval,
+            RoutingMissingOutputBehavior.NeedsAttention,
+            FileIntoLibrary: true,
+            WatchedSourceId: sourceId,
+            WatchedSourceKind: RoutingInputSourceKind.Nvidia);
+        var route = RoutingRouteManager.CreateRoute(
+            original,
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            [
+                Guid.Parse("22222222-2222-2222-2222-222222222222"),
+                Guid.Parse("33333333-3333-3333-3333-333333333333")
+            ],
+            [
+                Guid.Parse("44444444-4444-4444-4444-444444444444"),
+                Guid.Parse("55555555-5555-5555-5555-555555555555")
+            ],
+            priority: 0,
+            createdUtc: new DateTimeOffset(2026, 8, 20, 12, 0, 0, TimeSpan.Zero));
+
+        var reconstructed = TrayRoutingActivationPreparer.ReconstructFreshRouteDraft(
+            route,
+            id => id == sourceId ? RoutingInputSourceKind.Nvidia : null);
+        Assert(reconstructed == original,
+            "A prepared fresh marker must reconstruct its semantic route draft after restart without retaining the editor callback.");
     }
 
     private static async Task AssertConfirmedDispositionRecoveryIsLocalOnlyAsync(string root)
@@ -670,7 +768,10 @@ internal static class TrayProcessingOperationGateTests
                 state,
                 uploadToDiscord: true);
             Assert(
-                state == RoutingApplicationLifecycleState.RoutingRunning
+                state == RoutingApplicationLifecycleState.SetupReady
+                    ? message ==
+                      "Settings saved. Create your first route to start clip processing."
+                    : state == RoutingApplicationLifecycleState.RoutingRunning
                     ? message == activeMessage
                     : message == attentionMessage &&
                       !message.Contains("Active Routes", StringComparison.Ordinal),

@@ -237,7 +237,7 @@ internal sealed class RoutingInputSourceCatalogViewSource : IRoutingInputSourceV
             {
                 return new RoutingInputSourceViewActionResult(
                     RoutingInputSourceViewActionStatus.Failed,
-                    "That folder overlaps the migrated ClipCord 1.x source. Keep the migrated source as-is, or choose a separate recorder folder.");
+                    "That folder overlaps ClipCord's primary recorder source. Keep that source as-is, or choose a separate recorder folder.");
             }
             var catalogSnapshot = _catalog.Inspect(cancellationToken);
             if (!catalogSnapshot.IsUsable)
@@ -815,7 +815,7 @@ internal sealed class RoutingInputSourceCatalogViewSource : IRoutingInputSourceV
         if (_legacyWatchedRoot is not null &&
             CapturePathPolicy.PathsOverlap(root, _legacyWatchedRoot))
         {
-            return "That folder overlaps the migrated ClipCord 1.x source. Choose a separate recorder folder.";
+            return "That folder overlaps ClipCord's primary recorder source. Choose a separate recorder folder.";
         }
         var snapshot = _catalog.Inspect(cancellationToken);
         if (!snapshot.IsUsable)
@@ -998,6 +998,7 @@ internal sealed class RoutesView : UserControl
     private readonly Func<bool> _isCutoverCommitted;
     private readonly Func<RoutesRuntimeViewState>? _runtimeStateProvider;
     private readonly Func<Task<bool>>? _retryRuntimeAsync;
+    private readonly Func<RoutingRouteDraft, Task<bool>>? _setupFirstRouteAsync;
     private readonly Func<IReadOnlyList<RoutingConnectionDisplay>, RoutingRouteDraft?> _editRoute;
     private readonly Func<RoutingInputSourceRegistrationDraft?> _createInputSourceDraft;
     private readonly Func<string, string, DialogResult> _confirmInputSourceRemoval;
@@ -1005,7 +1006,8 @@ internal sealed class RoutesView : UserControl
     private readonly Func<string, string, DialogResult> _confirmInputSourceSkip;
     private readonly Func<string?> _discoverDefaultXboxRoot;
     private readonly Action<string, string> _showInputSourceMessage;
-    private readonly RoutingMigratedInputSourceDisplay? _migratedInputSource;
+    private RoutingMigratedInputSourceDisplay? _migratedInputSource;
+    private readonly Func<RoutingMigratedInputSourceDisplay?>? _migratedInputSourceProvider;
     private readonly int? _layoutDpi;
     private bool _showConnections;
     private bool _busy;
@@ -1017,7 +1019,6 @@ internal sealed class RoutesView : UserControl
     private RoutesRuntimeViewState _runtimeState;
     private IReadOnlyList<RoutingInputSourceDisplay> _editorInputSources = [];
 
-    internal event EventHandler? OpenSettingsRequested;
     internal event EventHandler? DeliveryHistoryRequested;
     internal event EventHandler? LocalOnlyModeChanged;
 
@@ -1027,7 +1028,10 @@ internal sealed class RoutesView : UserControl
     internal bool TryBeginCreateRoute()
     {
         SelectTab(showConnections: false);
-        if (_runtimeState != RoutesRuntimeViewState.Active ||
+        var canCreate = _runtimeState == RoutesRuntimeViewState.Active ||
+                        _runtimeState == RoutesRuntimeViewState.LegacySetupNeeded &&
+                        _setupFirstRouteAsync is not null;
+        if (!canCreate ||
             !_newRouteButton.Visible || !_newRouteButton.Enabled)
         {
             return false;
@@ -1053,7 +1057,9 @@ internal sealed class RoutesView : UserControl
         Action<string, string>? showInputSourceMessage = null,
         IRoutingLocalOnlyModeViewSource? localOnlyMode = null,
         Func<RoutingInputSourceRegistrationDraft?>? createInputSourceDraft = null,
-        RoutingMigratedInputSourceDisplay? migratedInputSource = null)
+        RoutingMigratedInputSourceDisplay? migratedInputSource = null,
+        Func<RoutingRouteDraft, Task<bool>>? setupFirstRouteAsync = null,
+        Func<RoutingMigratedInputSourceDisplay?>? migratedInputSourceProvider = null)
     {
         _layoutDpi = layoutDpi is null ? null : Math.Max(96, layoutDpi.Value);
         _routeManager = routeManager ?? new RoutingRouteManager();
@@ -1063,9 +1069,11 @@ internal sealed class RoutesView : UserControl
         _isCutoverCommitted = isCutoverCommitted ?? CreateCutoverStatusSource(_routeManager);
         _runtimeStateProvider = runtimeStateProvider;
         _retryRuntimeAsync = retryRuntimeAsync;
+        _setupFirstRouteAsync = setupFirstRouteAsync;
         _editRoute = editRoute ?? ShowRouteEditor;
         _createInputSourceDraft = createInputSourceDraft ?? ShowInputSourceDialog;
         _migratedInputSource = migratedInputSource;
+        _migratedInputSourceProvider = migratedInputSourceProvider;
         _confirmInputSourceRemoval = confirmInputSourceRemoval ?? ((message, caption) =>
             MessageBox.Show(
                 this,
@@ -1118,7 +1126,7 @@ internal sealed class RoutesView : UserControl
             if (_runtimeState == RoutesRuntimeViewState.Active)
                 await AddRouteAsync();
             else if (_runtimeState == RoutesRuntimeViewState.LegacySetupNeeded)
-                OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
+                await SetupFirstRouteAsync();
             else
                 await RetryRuntimeAsync();
         };
@@ -1319,6 +1327,20 @@ internal sealed class RoutesView : UserControl
     private void Reload()
     {
         if (IsDisposed || Disposing) return;
+        if (InvokeRequired)
+        {
+            if (!IsHandleCreated) return;
+            try
+            {
+                Invoke((Action)Reload);
+            }
+            catch (InvalidOperationException) when (
+                IsDisposed || Disposing || !IsHandleCreated)
+            {
+            }
+            return;
+        }
+        _migratedInputSource = ReadMigratedInputSource();
         _cutoverCommitted = ReadCutoverStatus();
         _runtimeState = ReadRuntimeState(_cutoverCommitted);
         _localOnlyModeSnapshot = SafeInspectLocalOnlyMode();
@@ -1395,8 +1417,8 @@ internal sealed class RoutesView : UserControl
             content.Controls.Add(BuildInlineEmpty(
                 "No fallback route",
                 _runtimeState == RoutesRuntimeViewState.Active && _cutoverCommitted
-                    ? "The committed legacy fallback is missing. Routing must remain inactive until it is restored."
-                    : "Safe cutover will create the fallback that preserves today’s Discord or Local-only behavior."), 0, row++);
+                    ? "No fallback action is configured. Only matching specific routes will run."
+                    : "A fallback runs only when no specific route matches."), 0, row++);
         }
         else
         {
@@ -2387,6 +2409,7 @@ internal sealed class RoutesView : UserControl
         RoutingRoute route,
         IReadOnlyList<RoutingRoute> orderedRoutes)
     {
+        var displayName = GetRouteDisplayName(route);
         var displayedActions = route.Actions.Count(action => action.Enabled);
         var actionRowsLogicalHeight = Math.Max(27, Math.Max(1, displayedActions) * 28);
         var card = new RoundedPanel
@@ -2399,7 +2422,7 @@ internal sealed class RoutesView : UserControl
             CornerRadius = ScaleLogical(10),
             Margin = new Padding(0, 0, 0, ScaleLogical(10)),
             Padding = new Padding(ScaleLogical(16), ScaleLogical(12), ScaleLogical(12), ScaleLogical(12)),
-            AccessibleName = route.Name
+            AccessibleName = displayName
         };
         var layout = new BufferedTableLayoutPanel
         {
@@ -2418,7 +2441,7 @@ internal sealed class RoutesView : UserControl
 
         var name = new Label
         {
-            Text = route.Name,
+            Text = displayName,
             Dock = DockStyle.Fill,
             AutoEllipsis = true,
             TextAlign = ContentAlignment.MiddleLeft,
@@ -2427,7 +2450,7 @@ internal sealed class RoutesView : UserControl
             Margin = Padding.Empty
         };
         layout.Controls.Add(name, 0, 0);
-        var actions = BuildRouteActions(route, orderedRoutes);
+        var actions = BuildRouteActions(route, displayName, orderedRoutes);
         layout.Controls.Add(actions, 1, 0);
         layout.SetRowSpan(actions, 3);
         layout.Controls.Add(new Label
@@ -2440,19 +2463,27 @@ internal sealed class RoutesView : UserControl
             Font = ClipCordTheme.InterfaceFont(8.5f, FontStyle.Bold),
             Margin = Padding.Empty
         }, 0, 1);
-        layout.Controls.Add(BuildRouteActionRows(route), 0, 2);
+        layout.Controls.Add(BuildRouteActionRows(route, displayName), 0, 2);
         card.Controls.Add(layout);
         return card;
     }
 
-    private Control BuildRouteActionRows(RoutingRoute route)
+    internal static string GetRouteDisplayName(RoutingRoute route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        return route.Source == RoutingRouteSource.Migration
+            ? LegacyRoutingMigrationPlanner.ImportedRouteLabel
+            : route.Name;
+    }
+
+    private Control BuildRouteActionRows(RoutingRoute route, string displayName)
     {
         var actions = route.Actions.Where(action => action.Enabled).ToArray();
         var rows = Math.Max(1, actions.Length);
         var host = new BufferedTableLayoutPanel
         {
             Name = $"RouteActionRows_{route.RouteId:N}",
-            AccessibleName = $"{route.Name} actions",
+            AccessibleName = $"{displayName} actions",
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             RowCount = rows,
@@ -2609,6 +2640,7 @@ internal sealed class RoutesView : UserControl
 
     private Control BuildRouteActions(
         RoutingRoute route,
+        string displayName,
         IReadOnlyList<RoutingRoute> orderedRoutes)
     {
         var editable = _runtimeState == RoutesRuntimeViewState.Active &&
@@ -2632,7 +2664,7 @@ internal sealed class RoutesView : UserControl
             route.Source == RoutingRouteSource.Migration ? 72 : 54);
         enabled.Name = $"RouteEnabled_{route.RouteId:N}";
         enabled.AccessibleRole = AccessibleRole.CheckButton;
-        enabled.AccessibleName = $"{(route.Enabled ? "Disable" : "Enable")} {route.Name}";
+        enabled.AccessibleName = $"{(route.Enabled ? "Disable" : "Enable")} {displayName}";
         enabled.AccessibleDescription = route.Source == RoutingRouteSource.Migration
             ? "This fallback is pinned to the committed legacy cutover."
             : !editable
@@ -2649,16 +2681,19 @@ internal sealed class RoutesView : UserControl
         {
             if (MessageBox.Show(
                     this,
-                    $"Delete ‘{route.Name}’? Existing delivery plans keep their frozen settings.",
+                    $"Delete ‘{displayName}’? Existing delivery plans keep their frozen settings.",
                     "Delete route",
                     MessageBoxButtons.OKCancel,
                     MessageBoxIcon.Warning) != DialogResult.OK) return;
             await RunRouteCommandAsync(() => _routeManager.DeleteAsync(route.RouteId));
         };
         remove.Enabled = editable;
+        remove.AccessibleName = $"Delete {displayName}";
         remove.AccessibleDescription = editable
             ? null
-            : "The route cannot be deleted before safe cutover or when it preserves legacy behavior.";
+            : route.Source == RoutingRouteSource.Migration
+                ? "This route preserves committed legacy behavior and cannot be deleted."
+                : "Route editing is unavailable until Routes is active.";
         host.Controls.Add(remove);
         var sorted = orderedRoutes.OrderBy(item => item.Priority).ToArray();
         var index = Array.FindIndex(sorted, item => item.RouteId == route.RouteId);
@@ -2669,14 +2704,14 @@ internal sealed class RoutesView : UserControl
         var down = CreateSmallButton("↓", 34);
         down.Name = $"MoveRouteDown_{route.RouteId:N}";
         down.Enabled = editable && nextIsEditable;
-        down.AccessibleName = $"Move {route.Name} down";
+        down.AccessibleName = $"Move {displayName} down";
         down.Click += async (_, _) => await RunRouteCommandAsync(
             () => _routeManager.MoveAsync(route.RouteId, 1));
         host.Controls.Add(down);
         var up = CreateSmallButton("↑", 34);
         up.Name = $"MoveRouteUp_{route.RouteId:N}";
         up.Enabled = editable && previousIsEditable;
-        up.AccessibleName = $"Move {route.Name} up";
+        up.AccessibleName = $"Move {displayName} up";
         up.Click += async (_, _) => await RunRouteCommandAsync(
             () => _routeManager.MoveAsync(route.RouteId, -1));
         host.Controls.Add(up);
@@ -2689,7 +2724,7 @@ internal sealed class RoutesView : UserControl
             : _runtimeState == RoutesRuntimeViewState.Activating
                 ? "Routes are starting"
                 : _runtimeState == RoutesRuntimeViewState.LegacySetupNeeded
-                    ? "Finish ClipCord setup"
+                    ? "Set up your first route"
                 : _runtimeState == RoutesRuntimeViewState.LegacyActive
                     ? "Safe migration is deferred"
                     : "Routes need attention",
@@ -2698,7 +2733,9 @@ internal sealed class RoutesView : UserControl
             : _runtimeState == RoutesRuntimeViewState.Activating
                 ? "ClipCord is recovering local work before it transfers processing authority."
                 : _runtimeState == RoutesRuntimeViewState.LegacySetupNeeded
-                    ? "Choose the watched folder, capture source, and Discord destination in Settings first."
+                    ? _setupFirstRouteAsync is null
+                        ? "Finish and save the primary recorder settings before creating your first route. No clip processing has started."
+                        : "Choose a clip source and where new clips should go. No route was created automatically."
                 : _runtimeState == RoutesRuntimeViewState.LegacyActive
                     ? "Your existing watcher still handles every clip. Retry when you are ready."
                     : "Clip processing remains paused until Routing recovery succeeds.");
@@ -2885,6 +2922,51 @@ internal sealed class RoutesView : UserControl
                 "Clip source needs attention");
         }
         Reload();
+    }
+
+    private async Task SetupFirstRouteAsync()
+    {
+        if (_busy || _setupFirstRouteAsync is null ||
+            ReadRuntimeState(ReadCutoverStatus()) !=
+                RoutesRuntimeViewState.LegacySetupNeeded)
+        {
+            return;
+        }
+
+        var connections = SafeLoadConnections().Where(item => item.Available).ToArray();
+        _editorInputSources = await PrepareInputSourcesAsync().ConfigureAwait(true);
+        if (ReadRuntimeState(ReadCutoverStatus()) !=
+            RoutesRuntimeViewState.LegacySetupNeeded)
+        {
+            Reload();
+            return;
+        }
+        var draft = _editRoute(connections);
+        if (draft is null) return;
+        if (ReadRuntimeState(ReadCutoverStatus()) !=
+            RoutesRuntimeViewState.LegacySetupNeeded)
+        {
+            Reload();
+            return;
+        }
+
+        _busy = true;
+        ConfigureHeaderAction();
+        try
+        {
+            _ = await _setupFirstRouteAsync(draft).ConfigureAwait(true);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException or IOException or
+                UnauthorizedAccessException or OperationCanceledException)
+        {
+            Log.Error("The first Routes setup could not be completed.", exception);
+        }
+        finally
+        {
+            _busy = false;
+            Reload();
+        }
     }
 
     private RoutingRouteDraft? ShowRouteEditor(
@@ -3480,11 +3562,25 @@ internal sealed class RoutesView : UserControl
         }
         if (_runtimeState == RoutesRuntimeViewState.LegacySetupNeeded)
         {
-            _newRouteButton.Text = "Open Settings";
+            if (_setupFirstRouteAsync is null)
+            {
+                _newRouteButton.Text = "Finish settings first";
+                _newRouteButton.Size = new Size(ScaleLogical(148), ScaleLogical(33));
+                _newRouteButton.AccessibleName = "Finish recorder settings first";
+                _newRouteButton.AccessibleDescription =
+                    "Save a valid primary recorder folder in Settings before creating the first route.";
+                _newRouteButton.Enabled = false;
+                return;
+            }
+            _newRouteButton.Text = _busy ? "Starting…" : "Set up routes";
             _newRouteButton.Size = new Size(ScaleLogical(136), ScaleLogical(33));
-            _newRouteButton.AccessibleName = "Open ClipCord settings";
+            _newRouteButton.AccessibleName = _busy
+                ? "Routes are starting"
+                : "Set up ClipCord routes";
             _newRouteButton.AccessibleDescription =
-                "Finish the watched-folder and Discord setup before Routes can activate.";
+                _busy
+                    ? "ClipCord is safely activating the route you chose."
+                    : "Open the route builder to choose the clip source and optional Discord destination for this profile.";
             _newRouteButton.Enabled = !_busy;
             return;
         }
@@ -3518,7 +3614,7 @@ internal sealed class RoutesView : UserControl
             ? "Routes need attention"
             : "Create a new routing rule";
         _newRouteButton.AccessibleDescription =
-            "Route editing unlocks after the safe Routing migration is active.";
+            "Route editing unlocks after Routing is active.";
         _newRouteButton.Enabled = false;
     }
 
@@ -3573,11 +3669,11 @@ internal sealed class RoutesView : UserControl
         RoutesRuntimeViewState.Active when _cutoverCommitted =>
             _localOnlyModeSnapshot?.EffectiveEnabled == true
                 ? "ROUTING ACTIVE · EXTERNAL DELIVERIES PAUSED · Future clips are filed into Library → Local only."
-                : "ROUTING ACTIVE · New clips are evaluated by your saved routes. The migrated fallback preserves 1.x behavior.",
+                : "ROUTING ACTIVE · New clips are evaluated by your saved routes.",
         RoutesRuntimeViewState.Activating =>
             "STARTING ROUTES · ClipCord is safely recovering local work before it transfers processing authority.",
         RoutesRuntimeViewState.LegacySetupNeeded =>
-            "SETUP REQUIRED · Finish your watched-folder and Discord settings before ClipCord starts processing clips.",
+            "SETUP REQUIRED · This profile has no automatic route. Choose a clip source and destination to get started.",
         RoutesRuntimeViewState.LegacyActive =>
             "ROUTING NOT ACTIVE · Your existing watcher remains active. Retry the safe migration when ready.",
         RoutesRuntimeViewState.RecoveryNeeded =>
@@ -3631,6 +3727,21 @@ internal sealed class RoutesView : UserControl
                 IsUsable: false,
                 Sources: [],
                 "Saved clip-source status could not be read. No source was removed or changed.");
+        }
+    }
+
+    private RoutingMigratedInputSourceDisplay? ReadMigratedInputSource()
+    {
+        if (_migratedInputSourceProvider is null) return _migratedInputSource;
+        try
+        {
+            return _migratedInputSourceProvider();
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            Log.Error("The migrated clip-source status could not be verified.", exception);
+            return null;
         }
     }
 
@@ -4430,12 +4541,14 @@ internal sealed class RouteEditorDialog : Form
             Margin = Padding.Empty
         };
         _watchedSource.DrawItem += DrawWatchedSourceItem;
-        _watchedSource.Items.Add(new WatchedSourceChoice(
-            _migratedInputSource?.Name ?? "Current migrated folder · SteelSeries/NVIDIA",
-            _migratedInputSource?.Detail ??
-            "Preserved from ClipCord 1.x · add a named source in Routes → Connections",
-            null,
-            Selectable: true));
+        if (_migratedInputSource is not null)
+        {
+            _watchedSource.Items.Add(new WatchedSourceChoice(
+                _migratedInputSource.Name,
+                _migratedInputSource.Detail,
+                null,
+                Selectable: true));
+        }
         foreach (var source in _inputSources)
         {
             _watchedSource.Items.Add(new WatchedSourceChoice(
@@ -4449,7 +4562,17 @@ internal sealed class RouteEditorDialog : Form
                 source.Available));
         }
         _watchedSource.SelectedIndexChanged += WatchedSourceSelectionChanged;
-        _watchedSource.SelectedIndex = 0;
+        _lastSelectableWatchedSourceIndex = Enumerable.Range(0, _watchedSource.Items.Count)
+            .FirstOrDefault(
+                index => _watchedSource.Items[index] is WatchedSourceChoice
+                    { Selectable: true },
+                -1);
+        _watchedSource.SelectedIndex = _lastSelectableWatchedSourceIndex;
+        if (_lastSelectableWatchedSourceIndex < 0)
+        {
+            _watchedSource.AccessibleDescription =
+                "No external clip source is available. Add or repair one from the Connections tab.";
+        }
         _historyNewOnly = CreateRadio(
             "RouteXboxHistoryNewOnly", "New clips from now on", selected: true);
         _historyLastDay = CreateRadio("RouteXboxHistoryLastDay", "Clips from the last 24 hours");
@@ -5527,6 +5650,13 @@ internal sealed class RouteEditorDialog : Form
             ? source
             : null;
 
+    private bool IsMigratedSourceSelected =>
+        _watchedFolder.Checked && _migratedInputSource is not null &&
+        _watchedSource.SelectedIndex is var selectedIndex &&
+        selectedIndex >= 0 && selectedIndex < _watchedSource.Items.Count &&
+        _watchedSource.Items[selectedIndex] is WatchedSourceChoice
+            { Selectable: true, Source: null };
+
     private RoutingInputSourceDisplay? SelectedXboxSource =>
         SelectedNamedSource is { Kind: RoutingInputSourceKind.XboxGameDvrOneDrive } source
             ? source
@@ -5591,8 +5721,10 @@ internal sealed class RouteEditorDialog : Form
                 "NVIDIA watches <Game>\\<clip>.mp4 exactly one folder below this root. Existing clips stay as the baseline; only new completed clips start this route.",
             RoutingInputSourceKind.XboxGameDvrOneDrive =>
                 "Xbox imports eligible clips into ClipCord's Library. The OneDrive original stays in place, and previewing history reads metadata only.",
+            _ when IsMigratedSourceSelected =>
+                "This migrated recorder folder keeps its established structure. Add a named source in Routes → Connections to watch a different folder.",
             _ =>
-                "This migrated recorder folder keeps its established structure. Add a named source in Routes → Connections to watch a different folder."
+                "No external clip source is available. Add or repair one from Routes → Connections before saving this route."
         };
     }
 
@@ -5841,10 +5973,14 @@ internal sealed class RouteEditorDialog : Form
         _restoringWatchedSourceSelection = true;
         try
         {
-            _watchedSource.SelectedIndex = Math.Clamp(
-                _lastSelectableWatchedSourceIndex,
-                0,
-                Math.Max(0, _watchedSource.Items.Count - 1));
+            _watchedSource.SelectedIndex = _lastSelectableWatchedSourceIndex >= 0 &&
+                                           _lastSelectableWatchedSourceIndex <
+                                               _watchedSource.Items.Count &&
+                                           _watchedSource.Items[
+                                               _lastSelectableWatchedSourceIndex] is
+                                               WatchedSourceChoice { Selectable: true }
+                ? _lastSelectableWatchedSourceIndex
+                : -1;
             _watchedSource.AccessibleDescription =
                 unavailableChoice.Source?.Retired == true
                     ? "That replaced clip source is retained for existing routes and cannot be selected for a new route."
@@ -6019,7 +6155,9 @@ internal sealed class RouteEditorDialog : Form
                         RoutingInputSourceKind.Nvidia => "NVIDIA",
                         _ => "External watched folder"
                     }
-                    : _migratedInputSource?.Name ?? "Migrated watched folder"
+                    : IsMigratedSourceSelected
+                        ? _migratedInputSource!.Name
+                        : "Choose an external clip source"
                 : _anyClip.Checked
                     ? "Any new source clip"
                     : "Instant Replay";
@@ -6062,6 +6200,8 @@ internal sealed class RouteEditorDialog : Form
     private bool CanSave =>
         !string.IsNullOrWhiteSpace(_name.Text) &&
         (!_discord.Checked || _discordConnection.SelectedConnection is not null) &&
+        (!_watchedFolder.Checked || SelectedNamedSource is not null ||
+         IsMigratedSourceSelected) &&
         (SelectedXboxSource is null ||
          _latestPreflight is { } preview &&
          GetSelectedXboxWindowMatchCount(preview) <=
@@ -6089,6 +6229,17 @@ internal sealed class RouteEditorDialog : Form
                 "Choose a Discord connection",
                 MessageBoxIcon.Warning);
             _discordConnection.Focus();
+            return;
+        }
+        if (_watchedFolder.Checked && SelectedNamedSource is null &&
+            !IsMigratedSourceSelected)
+        {
+            ShowStep(1);
+            _showSaveGuardMessage(
+                "Choose an available external clip source. Add or repair one from Routes → Connections first.",
+                "Choose a clip source",
+                MessageBoxIcon.Warning);
+            _watchedSource.Focus();
             return;
         }
         var selectedNamedSource = SelectedNamedSource;

@@ -131,10 +131,21 @@ internal sealed class RoutingNamedWatchedFolderIngress
                 snapshotLoad.Document,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (!permit.SamePermit(_featureGate.Inspect())) return Disabled();
-        _ = RequireCurrentSource(sourceAuthority, requireEnabled: true);
-        var durable = await _journals.PersistExactAsync(prepared, cancellationToken)
-            .ConfigureAwait(false);
+        RoutingWatchedSourceJournalDocument durable;
+        try
+        {
+            durable = await _journals.PersistExactAsync(
+                    prepared,
+                    cancellationToken,
+                    beforeCommit: () => RequireCurrentJournalAuthority(
+                        sourceAuthority,
+                        permit))
+                .ConfigureAwait(false);
+        }
+        catch (JournalAuthorityRevokedException)
+        {
+            return Disabled();
+        }
         return await ReconcileJournalAsync(
                 durable, sourceAuthority, permit, cancellationToken)
             .ConfigureAwait(false);
@@ -186,7 +197,8 @@ internal sealed class RoutingNamedWatchedFolderIngress
                 StringComparison.Ordinal) ||
             !journal.MarkerPayloadFingerprint.Equals(
                 permit.MarkerPayloadFingerprint, StringComparison.OrdinalIgnoreCase) ||
-            !permit.SamePermit(_featureGate.Inspect()))
+            !permit.SamePermit(_featureGate.Inspect()) ||
+            !HasCurrentSourceAuthority(source))
         {
             return Disabled();
         }
@@ -241,6 +253,33 @@ internal sealed class RoutingNamedWatchedFolderIngress
             (!requireEnabled || current.Enabled),
             "The named watched source changed or is not currently ready.");
         return current;
+    }
+
+    private void RequireCurrentJournalAuthority(
+        RoutingInputSourceRecord expectedSource,
+        RoutingRuntimeGateInspection expectedPermit)
+    {
+        if (!expectedPermit.SamePermit(_featureGate.Inspect()) ||
+            !HasCurrentSourceAuthority(expectedSource))
+        {
+            throw new JournalAuthorityRevokedException();
+        }
+    }
+
+    private bool HasCurrentSourceAuthority(RoutingInputSourceRecord expectedSource)
+    {
+        try
+        {
+            var current = RequireCurrentSource(expectedSource, requireEnabled: true);
+            return RoutingWatchedJournalFactory.CreateNamedAuthorityFingerprint(current).Equals(
+                RoutingWatchedJournalFactory.CreateNamedAuthorityFingerprint(expectedSource),
+                StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private RoutingInputSourceRecord? FindSource(string sourceId)
@@ -307,4 +346,8 @@ internal sealed class RoutingNamedWatchedFolderIngress
         null,
         null,
         null);
+
+    private sealed class JournalAuthorityRevokedException : Exception
+    {
+    }
 }

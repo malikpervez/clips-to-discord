@@ -2,6 +2,7 @@ namespace ClipsToDiscord;
 
 internal enum RoutingApplicationLifecycleState
 {
+    SetupReady,
     LegacyReady,
     RoutingReady,
     LegacyRunning,
@@ -14,6 +15,7 @@ internal enum RoutingApplicationLifecycleState
 
 internal enum RoutingApplicationLifecycleStatus
 {
+    SetupRequired,
     LegacyStarted,
     RoutingStarted,
     AlreadyRunning,
@@ -78,7 +80,8 @@ internal sealed class RoutingApplicationLifecycle
         IRoutingClipProcessingRuntime routingRuntime,
         CancellationToken cancellationToken = default,
         LegacyRoutingMigrationMarkerStore? migrationMarkers = null,
-        Func<RoutingCaptureLibraryBinding>? currentCaptureLibraryBinding = null)
+        Func<RoutingCaptureLibraryBinding>? currentCaptureLibraryBinding = null,
+        bool legacyRuntimeAllowed = false)
     {
         ArgumentNullException.ThrowIfNull(authorityStore);
         ArgumentNullException.ThrowIfNull(ownership);
@@ -114,8 +117,13 @@ internal sealed class RoutingApplicationLifecycle
             }
         }
 
-        if (inspection.LegacyPermitted && markerInspection?.Document is
-                { Phase: LegacyRoutingMigrationMarkerPhase.Committed })
+        var freshSetupMarker = markerInspection?.Document is
+            { Origin: RoutingActivationOrigin.FreshSetup };
+        var effectiveLegacyRuntimeAllowed = legacyRuntimeAllowed && !freshSetupMarker;
+        if (inspection.LegacyPermitted && markerInspection?.Document is not null &&
+            ((markerInspection.Document.Phase ==
+                    LegacyRoutingMigrationMarkerPhase.Committed) ||
+             freshSetupMarker))
         {
             var bindingError = CaptureLibraryBindingError(
                 markerInspection.Document.CaptureLibraryBinding,
@@ -143,7 +151,8 @@ internal sealed class RoutingApplicationLifecycle
                     routingRuntime,
                     new RoutingRuntimeCoordinatorOptions(
                         RequestedEnabled: true,
-                        RecoverCommittedMigration: true),
+                        RecoverCommittedMigration: true,
+                        LegacyRuntimeAllowed: effectiveLegacyRuntimeAllowed),
                     recoveryLease);
                 return new RoutingApplicationLifecycle(
                     ownership,
@@ -168,6 +177,23 @@ internal sealed class RoutingApplicationLifecycle
                 Document: null
             })
         {
+            if (!effectiveLegacyRuntimeAllowed)
+            {
+                var setupCoordinator = new RoutingRuntimeCoordinator(
+                    ownership,
+                    legacyRuntime,
+                    routingRuntime,
+                    new RoutingRuntimeCoordinatorOptions(
+                        RequestedEnabled: true,
+                        LegacyRuntimeAllowed: false));
+                return new RoutingApplicationLifecycle(
+                    ownership,
+                    legacyRuntime,
+                    setupCoordinator,
+                    inspection,
+                    RoutingApplicationLifecycleState.SetupReady,
+                    captureLibraryOperationsPermitted: true);
+            }
             if (!ownership.TryAcquire(
                     ClipProcessingRuntimeOwner.Legacy,
                     out var legacyLease) || legacyLease is null)
@@ -183,7 +209,9 @@ internal sealed class RoutingApplicationLifecycle
                 ownership,
                 legacyRuntime,
                 routingRuntime,
-                new RoutingRuntimeCoordinatorOptions(RequestedEnabled: true));
+                new RoutingRuntimeCoordinatorOptions(
+                    RequestedEnabled: true,
+                    LegacyRuntimeAllowed: true));
             return new RoutingApplicationLifecycle(
                 ownership,
                 legacyRuntime,
@@ -203,7 +231,9 @@ internal sealed class RoutingApplicationLifecycle
         {
             if (markerInspection is not null &&
                 (markerInspection.Document is not
-                    { Phase: LegacyRoutingMigrationMarkerPhase.Committed } committedMarker ||
+                    { } committedMarker ||
+                 (committedMarker.Phase != LegacyRoutingMigrationMarkerPhase.Committed &&
+                  committedMarker.Origin != RoutingActivationOrigin.FreshSetup) ||
                  committedMarker.MigrationId != inspection.Document.MigrationId ||
                  !committedMarker.PayloadFingerprint.Equals(
                      inspection.Document.MigrationPayloadFingerprint,
@@ -241,13 +271,20 @@ internal sealed class RoutingApplicationLifecycle
             }
             try
             {
+                var recoverFreshMarker = markerInspection?.Document is
+                    {
+                        Origin: RoutingActivationOrigin.FreshSetup,
+                        Phase: not LegacyRoutingMigrationMarkerPhase.Committed
+                    };
                 var coordinator = new RoutingRuntimeCoordinator(
                     ownership,
                     legacyRuntime,
                     routingRuntime,
                     new RoutingRuntimeCoordinatorOptions(
                         RequestedEnabled: true,
-                        AuthorityAlreadyCommitted: true),
+                        AuthorityAlreadyCommitted: !recoverFreshMarker,
+                        RecoverCommittedMigration: recoverFreshMarker,
+                        LegacyRuntimeAllowed: effectiveLegacyRuntimeAllowed),
                     routingLease);
                 return new RoutingApplicationLifecycle(
                     ownership,
@@ -301,6 +338,8 @@ internal sealed class RoutingApplicationLifecycle
         {
             return State switch
             {
+                RoutingApplicationLifecycleState.SetupReady =>
+                    Result(RoutingApplicationLifecycleStatus.SetupRequired),
                 RoutingApplicationLifecycleState.LegacyReady =>
                     await StartLegacyAsync(cancellationToken).ConfigureAwait(false),
                 RoutingApplicationLifecycleState.RoutingReady or
@@ -332,7 +371,8 @@ internal sealed class RoutingApplicationLifecycle
         {
             if (State == RoutingApplicationLifecycleState.RoutingRunning)
                 return Result(RoutingApplicationLifecycleStatus.AlreadyRunning);
-            if (State is not (RoutingApplicationLifecycleState.LegacyRunning or
+            if (State is not (RoutingApplicationLifecycleState.SetupReady or
+                RoutingApplicationLifecycleState.LegacyRunning or
                 RoutingApplicationLifecycleState.RoutingReady or
                 RoutingApplicationLifecycleState.RoutingQuiesced or
                 RoutingApplicationLifecycleState.RoutingRecoveryNeeded))
@@ -359,6 +399,11 @@ internal sealed class RoutingApplicationLifecycle
         {
             if (State == RoutingApplicationLifecycleState.Stopped)
                 return Result(RoutingApplicationLifecycleStatus.AlreadyStopped);
+            if (State == RoutingApplicationLifecycleState.SetupReady)
+            {
+                SetState(RoutingApplicationLifecycleState.Stopped);
+                return Result(RoutingApplicationLifecycleStatus.Stopped);
+            }
             if (State == RoutingApplicationLifecycleState.LegacyReady)
             {
                 _legacyStartupLease?.Dispose();
@@ -503,6 +548,8 @@ internal sealed class RoutingApplicationLifecycle
         if (_coordinator is null) return;
         SetState(_coordinator.State switch
         {
+            RoutingRuntimeCoordinatorState.SetupReady =>
+                RoutingApplicationLifecycleState.SetupReady,
             RoutingRuntimeCoordinatorState.LegacyActive =>
                 RoutingApplicationLifecycleState.LegacyRunning,
             RoutingRuntimeCoordinatorState.RoutingActive =>

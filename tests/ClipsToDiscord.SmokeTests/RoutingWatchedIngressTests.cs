@@ -22,6 +22,10 @@ internal static class RoutingWatchedIngressTests
             Path.Combine(testRoot, "same-occurrence"));
         await AssertKnownPathAvoidsRepeatFingerprintingAsync(
             Path.Combine(testRoot, "known-path-fast-path"));
+        await AssertFreshOriginUsesCurrentSnapshotAsync(
+            Path.Combine(testRoot, "fresh-current-snapshot"));
+        await AssertLegacyOriginStillRequiresImportedRouteAsync(
+            Path.Combine(testRoot, "legacy-route-authority"));
         await AssertGateRevocationStopsAdmissionAndReconciliationAsync(
             Path.Combine(testRoot, "gate-revocation"));
     }
@@ -39,6 +43,7 @@ internal static class RoutingWatchedIngressTests
             adapter,
             fixture.Marker,
             fixture.Snapshot,
+            fixture.Gate.Inspect(),
             cancellationToken: CancellationToken.None);
         _ = await fixture.Journals.PersistExactAsync(frozen);
 
@@ -92,7 +97,8 @@ internal static class RoutingWatchedIngressTests
             source,
             adapter,
             fixture.Marker,
-            fixture.Snapshot);
+            fixture.Snapshot,
+            fixture.Gate.Inspect());
         _ = await fixture.Journals.PersistExactAsync(frozen);
         var frozenDelivery = frozen.FrozenPlan!.Deliveries.Single();
         Assert(frozenDelivery.ConnectionId == Fixture.OriginalConnectionId &&
@@ -171,7 +177,8 @@ internal static class RoutingWatchedIngressTests
             await fixture.CreateSourceAsync(name, hash, fileIndex),
             adapter,
             fixture.Marker,
-            fixture.Snapshot);
+            fixture.Snapshot,
+            fixture.Gate.Inspect());
 
         var uploaded = await CreateAsync("uploaded.mp4", uploadedHash, 10);
         var localOnly = await CreateAsync("local-only.mp4", localOnlyHash, 11);
@@ -260,6 +267,13 @@ internal static class RoutingWatchedIngressTests
 
         var first = await fixture.Ingress.AdmitAsync(source, adapter);
         var afterFirst = RequireOutbox(fixture.Outbox);
+        var durable = fixture.Journals.Load(first.SourceClipId!).Document ??
+                      throw new InvalidOperationException(
+                          "The idempotence fixture did not persist its first journal.");
+        var existingAuthorityChecks = 0;
+        _ = await fixture.Journals.PersistExactAsync(
+            durable,
+            beforeCommit: () => Interlocked.Increment(ref existingAuthorityChecks));
         var second = await fixture.Ingress.AdmitAsync(source, adapter);
         var afterSecond = RequireOutbox(fixture.Outbox);
         Assert(first.Status == RoutingWatchedIngressStatus.Planned &&
@@ -270,8 +284,9 @@ internal static class RoutingWatchedIngressTests
                afterSecond.Plans.Count == 1 &&
                afterSecond.Deliveries.Count == 1 &&
                afterSecond.Generation == afterFirst.Generation &&
-               probe.Calls == 1 && adapter.RevalidationCalls == 1,
-            "Retrying the same native occurrence must reuse one journal and one exact outbox plan without probing again.");
+               probe.Calls == 1 && adapter.RevalidationCalls == 1 &&
+               existingAuthorityChecks == 1,
+            "Retrying the same native occurrence must reuse one journal and one exact outbox plan without probing again, while the immutable-store return path still rechecks commit authority.");
     }
 
     private static async Task AssertKnownPathAvoidsRepeatFingerprintingAsync(string root)
@@ -383,6 +398,128 @@ internal static class RoutingWatchedIngressTests
             "Pre-receipt duplicate-attention journals must remain readable without inventing a plan.");
     }
 
+    private static async Task AssertFreshOriginUsesCurrentSnapshotAsync(string root)
+    {
+        var excludedHash = new string('a', 64);
+        using var fixture = await Fixture.CreateAsync(
+            root,
+            knownHashes: [excludedHash],
+            fresh: true);
+        var adapter = new RecordingAdapter(ClipCaptureSource.SteelSeriesGg);
+        Assert(fixture.Marker.Origin == RoutingActivationOrigin.FreshSetup &&
+               fixture.Gate.Enabled,
+            "The fresh watched-ingress fixture must begin under committed execution authority.");
+
+        var excludedSource = await fixture.CreateSourceAsync(
+            "Fresh baseline excluded.mp4",
+            excludedHash,
+            fileIndex: 50);
+        var excluded = await fixture.Ingress.AdmitAsync(excludedSource, adapter);
+        var excludedJournal = fixture.Journals.Load(excluded.SourceClipId!).Document!;
+        Assert(excluded.Status == RoutingWatchedIngressStatus.Excluded &&
+               excluded.AdmissionKind == RoutingWatchedJournalAdmissionKind.LegacyKnownExcluded &&
+               excludedJournal.MarkerSourceFingerprint.Equals(
+                   fixture.Marker.SourceFingerprint, StringComparison.OrdinalIgnoreCase) &&
+               excludedJournal.MarkerPayloadFingerprint.Equals(
+                   fixture.Marker.PayloadFingerprint, StringComparison.OrdinalIgnoreCase),
+            "A fresh baseline exclusion must remain terminal and bind its journal to the exact fresh source and authority payload.");
+
+        var initialSource = await fixture.CreateSourceAsync(
+            "Fresh initial route.mp4",
+            new string('b', 64),
+            fileIndex: 51);
+        await AssertThrowsAsync<InvalidDataException>(
+            () => fixture.JournalFactory.CreateAsync(
+                initialSource,
+                adapter,
+                fixture.Marker,
+                fixture.Snapshot,
+                RoutingRuntimeFeatureGate.Disabled.Inspect()),
+            "A committed fresh marker and route snapshot must not bypass the live execution feature gate.");
+        var initial = await fixture.Ingress.AdmitAsync(initialSource, adapter);
+        var initialPlan = fixture.Journals.Load(initial.SourceClipId!).Document!.FrozenPlan!;
+        Assert(initial.Status == RoutingWatchedIngressStatus.Planned &&
+               initialPlan.RoutingGeneration == fixture.Snapshot.Generation &&
+               initialPlan.MatchedRouteIds.SequenceEqual([fixture.Marker.Route.RouteId]) &&
+               initialPlan.HasWork,
+            "A fresh committed marker must admit ordinary watched-source work through its exact first snapshot.");
+
+        var editedRoute = fixture.Marker.Route with
+        {
+            Enabled = false,
+            Revision = fixture.Marker.Route.Revision + 1,
+            ModifiedUtc = Now.AddMinutes(2)
+        };
+        var editedSnapshot = RoutingSnapshotModel.ReplaceRoutes(
+            fixture.Snapshot,
+            [editedRoute],
+            Now.AddMinutes(2));
+        _ = await fixture.Snapshots.SaveAsync(
+            editedSnapshot,
+            fixture.Snapshot.Generation);
+        Assert(fixture.Gate.Enabled,
+            "Editing the fresh first route after authority must retain watched-source execution authority.");
+
+        var editedSource = await fixture.CreateSourceAsync(
+            "Fresh edited route.mp4",
+            new string('c', 64),
+            fileIndex: 52);
+        var edited = await fixture.Ingress.AdmitAsync(editedSource, adapter);
+        var editedPlan = fixture.Journals.Load(edited.SourceClipId!).Document!.FrozenPlan!;
+        Assert(edited.Status == RoutingWatchedIngressStatus.Planned &&
+               editedPlan.RoutingGeneration == editedSnapshot.Generation &&
+               editedPlan.MatchedRouteIds.Count == 0 && !editedPlan.HasWork,
+            "Fresh watched ingress must evaluate the current edited snapshot instead of requiring or replaying the frozen first route.");
+
+        var emptySnapshot = RoutingSnapshotModel.ReplaceRoutes(
+            editedSnapshot,
+            [],
+            Now.AddMinutes(3));
+        _ = await fixture.Snapshots.SaveAsync(emptySnapshot, editedSnapshot.Generation);
+        Assert(fixture.Gate.Enabled,
+            "Deleting the fresh first route after authority must retain watched-source execution authority.");
+
+        var deletedSource = await fixture.CreateSourceAsync(
+            "Fresh deleted route.mp4",
+            new string('d', 64),
+            fileIndex: 53);
+        var deleted = await fixture.Ingress.AdmitAsync(deletedSource, adapter);
+        var deletedPlan = fixture.Journals.Load(deleted.SourceClipId!).Document!.FrozenPlan!;
+        Assert(deleted.Status == RoutingWatchedIngressStatus.Planned &&
+               deletedPlan.RoutingGeneration == emptySnapshot.Generation &&
+               deletedPlan.MatchedRouteIds.Count == 0 && !deletedPlan.HasWork,
+            "A valid empty fresh snapshot may produce no actions, but it must not be rejected as an authority failure.");
+    }
+
+    private static async Task AssertLegacyOriginStillRequiresImportedRouteAsync(string root)
+    {
+        using var fixture = await Fixture.CreateAsync(root);
+        var source = await fixture.CreateSourceAsync(
+            "Legacy exact route.mp4",
+            new string('e', 64),
+            fileIndex: 54);
+        await AssertThrowsAsync<InvalidDataException>(
+            () => fixture.JournalFactory.CreateAsync(
+                source,
+                new RecordingAdapter(source.Source),
+                fixture.Marker,
+                fixture.Snapshot,
+                RoutingRuntimeFeatureGate.Disabled.Inspect()),
+            "Legacy-origin journal preparation must require a current live execution permit.");
+        var withoutImportedRoute = fixture.Snapshot with
+        {
+            Routes = [fixture.CustomRoute]
+        };
+        await AssertThrowsAsync<InvalidDataException>(
+            () => fixture.JournalFactory.CreateAsync(
+                source,
+                new RecordingAdapter(source.Source),
+                fixture.Marker,
+                withoutImportedRoute,
+                fixture.Gate.Inspect()),
+            "Legacy-origin watched ingress must continue to require the exact imported migration route.");
+    }
+
     private static async Task AssertGateRevocationStopsAdmissionAndReconciliationAsync(
         string root)
     {
@@ -399,7 +536,7 @@ internal static class RoutingWatchedIngressTests
             Assert(result.Status == RoutingWatchedIngressStatus.Disabled &&
                    !fixture.Journals.EnumerateSourceClipIds().Any() &&
                    fixture.Outbox.Load().Status == RoutingDocumentLoadStatus.Missing,
-                "Revoking execution authority during probe revalidation must stop before journal or outbox persistence.");
+                "Revoking execution authority during probe revalidation must be rechecked at the atomic journal commit boundary and return Disabled without journal or outbox persistence.");
         }
 
         using (var fixture = await Fixture.CreateAsync(Path.Combine(root, "before-reconcile")))
@@ -413,7 +550,8 @@ internal static class RoutingWatchedIngressTests
                 source,
                 adapter,
                 fixture.Marker,
-                fixture.Snapshot);
+                fixture.Snapshot,
+                fixture.Gate.Inspect());
             _ = await fixture.Journals.PersistExactAsync(journal);
             fixture.RevokeGate();
 
@@ -627,7 +765,8 @@ internal static class RoutingWatchedIngressTests
             RecordingProbe? probe = null,
             IReadOnlyList<string>? knownHashes = null,
             IReadOnlyList<string>? uploadedHashes = null,
-            IReadOnlyList<string>? localOnlyHashes = null)
+            IReadOnlyList<string>? localOnlyHashes = null,
+            bool fresh = false)
         {
             Directory.CreateDirectory(root);
             var clipsRoot = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
@@ -656,29 +795,53 @@ internal static class RoutingWatchedIngressTests
             stateStore.Save(state);
             var settings = new AppSettings(
                 clipsRoot,
-                "https://discord.com/api/webhooks/123456789012345678/test-token",
+                fresh
+                    ? string.Empty
+                    : "https://discord.com/api/webhooks/123456789012345678/test-token",
                 StartWithWindows: false,
                 AppSettings.DefaultCompressionTargetMb,
                 "Ingress Test",
-                UploadToDiscord: true,
+                UploadToDiscord: !fresh,
                 ModeToggleHotkey: string.Empty,
                 ClipCaptureSource.SteelSeriesGg);
-            IReadOnlyList<string> connectionIds = [LegacyConnectionId];
-            var readiness = LegacyRoutingMigrationPlanner.Evaluate(
-                new LegacyRoutingMigrationInput(
-                    settings,
-                    state,
-                    LegacyWorkerQuiesced: true,
-                    connectionIds,
-                    captureLibraryBinding),
-                Now);
+            IReadOnlyList<string> connectionIds = fresh ? [] : [LegacyConnectionId];
+            var readiness = fresh
+                ? FreshRoutingSetupPlanner.Evaluate(
+                    new FreshRoutingSetupInput(
+                        settings,
+                        state,
+                        LegacyWorkerQuiesced: true,
+                        new RoutingRouteDraft(
+                            "My first route",
+                            RoutingTriggerKind.AnyNewSourceClip,
+                            Game: null,
+                            Destination: null,
+                            ConnectionId: null,
+                            RoutingOutputKind.Original,
+                            RoutingDeliveryMode.Automatic,
+                            RoutingMissingOutputBehavior.UseOriginal,
+                            FileIntoLibrary: true),
+                        captureLibraryBinding,
+                        RoutingWatchedSourceAdapters.Get(settings.CaptureSource)
+                            .InspectRootIdentity(settings.ClipsFolder),
+                        LegacyRoutingMigrationAdmission.FreshOrInvalidProfile),
+                    Now)
+                : LegacyRoutingMigrationPlanner.Evaluate(
+                    new LegacyRoutingMigrationInput(
+                        settings,
+                        state,
+                        LegacyWorkerQuiesced: true,
+                        connectionIds,
+                        captureLibraryBinding,
+                        LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
+                    Now);
             var migrationPlan = readiness.Plan ?? throw new InvalidOperationException(
                 $"The watched-ingress migration fixture is unavailable ({readiness.Status}).");
             var customRoute = CreateCustomRoute();
             var snapshot = new RoutingSnapshotDocument(
                 RoutingSnapshotStore.CurrentSchemaVersion,
                 Generation: 1,
-                Routes: [customRoute, migrationPlan.Route],
+                Routes: fresh ? [migrationPlan.Route] : [customRoute, migrationPlan.Route],
                 CreatedUtc: Now,
                 UpdatedUtc: Now);
             var snapshots = new RoutingSnapshotStore(
@@ -705,7 +868,16 @@ internal static class RoutingWatchedIngressTests
                 stateStore,
                 () => settings,
                 () => connectionIds,
-                () => captureLibraryBinding);
+                () => captureLibraryBinding,
+                () => fresh
+                    ? LegacyRoutingMigrationAdmission.FreshOrInvalidProfile
+                    : LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
+            var freshEvidence = fresh
+                ? new FreshRoutingActivationEvidenceSource(
+                    stateStore,
+                    () => settings,
+                    () => captureLibraryBinding)
+                : null;
             var ownership = new ClipProcessingOwnershipCoordinator();
             if (!ownership.TryAcquire(
                     ClipProcessingRuntimeOwner.Routing,
@@ -721,7 +893,8 @@ internal static class RoutingWatchedIngressTests
                 evidence,
                 routingLease,
                 RoutingWatchedSourceAdapters.CoveredSources,
-                authorityStore);
+                authorityStore,
+                freshEvidence);
             Assert(gate.Enabled,
                 "The watched-ingress fixture must begin with complete cutover authority.");
 
@@ -845,5 +1018,21 @@ internal static class RoutingWatchedIngressTests
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static async Task AssertThrowsAsync<TException>(
+        Func<Task> action,
+        string message)
+        where TException : Exception
+    {
+        try
+        {
+            await action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+        throw new InvalidOperationException(message);
     }
 }

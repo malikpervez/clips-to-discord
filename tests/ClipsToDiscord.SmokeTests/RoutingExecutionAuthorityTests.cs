@@ -254,7 +254,8 @@ internal static class RoutingExecutionAuthorityTests
                 state,
                 LegacyWorkerQuiesced: true,
                 DiscordConnectionIds: [],
-                CaptureLibraryBinding: captureLibraryBinding),
+                CaptureLibraryBinding: captureLibraryBinding,
+                Admission: LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
             At(0));
         Assert(readiness.CanCommit && readiness.Plan is not null,
             "The authority fixture requires a valid drained migration.");
