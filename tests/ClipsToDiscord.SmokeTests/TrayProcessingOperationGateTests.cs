@@ -287,12 +287,14 @@ internal static class TrayProcessingOperationGateTests
                File.ReadAllBytes(outboxPath).SequenceEqual(outboxBefore),
             "Blocked authority must reject a Capture LibraryRoot change before settings, hotkey, runtime, capture, or outbox mutation.");
 
-        AssertThrows<InvalidOperationException>(() => AttemptRootChange(
-            Authority(RoutingExecutionAuthorityInspectionState.RoutingRequired)));
-        Assert(mutations == 0 &&
+        var routingChange = TrayCaptureLibraryRootAuthorityGuard.RequireAllowed(
+            oldRoot,
+            requestedRoot,
+            Authority(RoutingExecutionAuthorityInspectionState.RoutingRequired));
+        Assert(routingChange && mutations == 0 &&
                File.ReadAllBytes(oldArtifactPath).SequenceEqual(artifactBefore) &&
                File.ReadAllBytes(outboxPath).SequenceEqual(outboxBefore),
-            "Committed Routing authority must reject a Capture LibraryRoot change until a durable source switch exists.");
+            "Committed Routing authority must admit a Capture LibraryRoot change only to the separate durable switch transaction.");
 
         var unchanged = TrayCaptureLibraryRootAuthorityGuard.RequireAllowed(
             oldRoot,

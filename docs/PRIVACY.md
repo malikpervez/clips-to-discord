@@ -43,6 +43,9 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
   migrated watcher source and ClipCord Capture library. The Capture binding consists only of two
   one-way SHA-256 fingerprints for the canonical location and Windows directory identity; neither
   record stores the Capture library path, Windows user name, native file id, or a Discord secret.
+  If the user later changes the Capture folder, a separate crash-safe successor record stores only
+  the old and replacement one-way bindings plus transaction identifiers and timestamps; the chosen
+  path remains solely in Capture settings.
   While ClipCord is running, it also keeps a local Windows directory handle open to prevent that
   authorized folder from being silently renamed or replaced between checks. The handle is released
   at shutdown and never leaves the computer. ClipCord rechecks this local authority while Capture
