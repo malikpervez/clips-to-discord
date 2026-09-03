@@ -1327,6 +1327,19 @@ internal sealed class RoutesView : UserControl
     private void Reload()
     {
         if (IsDisposed || Disposing) return;
+        if (InvokeRequired)
+        {
+            if (!IsHandleCreated) return;
+            try
+            {
+                Invoke((Action)Reload);
+            }
+            catch (InvalidOperationException) when (
+                IsDisposed || Disposing || !IsHandleCreated)
+            {
+            }
+            return;
+        }
         _migratedInputSource = ReadMigratedInputSource();
         _cutoverCommitted = ReadCutoverStatus();
         _runtimeState = ReadRuntimeState(_cutoverCommitted);
