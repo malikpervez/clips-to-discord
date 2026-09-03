@@ -18,6 +18,11 @@ internal static class RoutingProductionRuntimeTests
         await AssertProductionLayoutPreflightRestoresLegacyAsync(
             Path.Combine(root, "layout-preflight"));
         await AssertStickyBoundaryAndWorkHostAsync(Path.Combine(root, "sticky"));
+        await AssertFreshAuthorityAndMutableSnapshotAsync(Path.Combine(root, "fresh"));
+        await AssertFreshSamePathRootReplacementFailsClosedAsync(
+            Path.Combine(root, "fresh-root-replacement"));
+        await AssertFreshDependencyRevocationFailsClosedAsync(
+            Path.Combine(root, "fresh-dependencies"));
         await AssertCommitPreflightFailsClosedAsync(Path.Combine(root, "preflight"));
         await AssertDeterministicColdRepeatAsync(Path.Combine(root, "repeat"));
     }
@@ -516,7 +521,9 @@ internal static class RoutingProductionRuntimeTests
             ownership,
             legacy,
             runtime,
-            new RoutingRuntimeCoordinatorOptions(RequestedEnabled: true));
+            new RoutingRuntimeCoordinatorOptions(
+                RequestedEnabled: true,
+                LegacyRuntimeAllowed: true));
 
         var result = await coordinator.StartAsync(CancellationToken.None);
 
@@ -528,6 +535,540 @@ internal static class RoutingProductionRuntimeTests
                preflightCalls == 1 && authority.Inspect().LegacyPermitted &&
                !File.Exists(authority.Path) && !File.Exists(fixture.Markers.Path),
             "An invalid production folder layout must fail before migration or sticky authority and restore the existing Legacy watcher.");
+    }
+
+    private static async Task AssertFreshAuthorityAndMutableSnapshotAsync(string root)
+    {
+        Directory.CreateDirectory(root);
+        var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var library = Directory.CreateDirectory(Path.Combine(root, "capture-library")).FullName;
+        var settings = Settings(clips, upload: false);
+        var stateStore = Store(root);
+        stateStore.Save(State(clips));
+        var state = stateStore.ProbeForRoutingActivation().State ??
+                    throw new InvalidOperationException("Fresh state did not reload.");
+        var binding = RoutingCaptureLibraryBindingModel.Create(library);
+        var watchedRootIdentity = RoutingWatchedSourceAdapters
+            .Get(settings.CaptureSource)
+            .InspectRootIdentity(clips);
+        var readiness = FreshRoutingSetupPlanner.Evaluate(
+            new FreshRoutingSetupInput(
+                settings,
+                state,
+                LegacyWorkerQuiesced: true,
+                new RoutingRouteDraft(
+                    "My first route",
+                    RoutingTriggerKind.AnyNewSourceClip,
+                    Game: null,
+                    Destination: null,
+                    ConnectionId: null,
+                    RoutingOutputKind.Original,
+                    RoutingDeliveryMode.Automatic,
+                    RoutingMissingOutputBehavior.UseOriginal,
+                    FileIntoLibrary: true),
+                binding,
+                watchedRootIdentity,
+                LegacyRoutingMigrationAdmission.FreshOrInvalidProfile),
+            Now);
+        var plan = readiness.Plan ?? throw new InvalidOperationException(
+            $"Fresh setup plan did not become ready ({readiness.Status}).");
+        var routingRoot = Path.Combine(root, "routing");
+        var snapshots = new RoutingSnapshotStore(Path.Combine(
+            routingRoot, RoutingSnapshotStore.FileName));
+        var initialSnapshot = new RoutingSnapshotDocument(
+            RoutingSnapshotStore.CurrentSchemaVersion,
+            Generation: 1,
+            Routes: [plan.Route],
+            plan.Route.CreatedUtc,
+            plan.Route.ModifiedUtc);
+        await snapshots.SaveAsync(initialSnapshot, expectedGeneration: 0);
+        var initialSnapshotBytes = await File.ReadAllBytesAsync(snapshots.Path);
+        var markers = new LegacyRoutingMigrationMarkerStore(Path.Combine(
+            routingRoot, LegacyRoutingMigrationMarkerStore.FileName));
+        var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(plan, Now);
+        await markers.SaveAsync(prepared, expectedGeneration: 0);
+
+        var authority = AuthorityStore(root, "authority");
+        var legacyEvidence = new LegacyRoutingActivationEvidenceSource(
+            stateStore,
+            () => settings,
+            () => [],
+            () => binding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
+        var freshEvidence = new FreshRoutingActivationEvidenceSource(
+            stateStore,
+            () => settings,
+            () => binding);
+        var runtime = new RoutingProductionRuntime(
+            new RecordingPreparer(prepared, throwIfCalled: true),
+            markers,
+            snapshots,
+            legacyEvidence,
+            authority,
+            RoutingWatchedSourceAdapters.CoveredSources,
+            (_, _, _) => ValueTask.CompletedTask,
+            _ => ValueTask.CompletedTask,
+            freshActivationEvidence: freshEvidence);
+        Assert(runtime.RequiresRoutingFenceAfterPreparation(),
+            "Every durable fresh marker phase must immediately fence Legacy, before runtime authority commits.");
+        var committedMarker = LegacyRoutingMigrationMarkerModel.Commit(
+            prepared, Now.AddSeconds(1));
+        await markers.SaveAsync(committedMarker, prepared.Generation);
+        var ownership = new ClipProcessingOwnershipCoordinator();
+        Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var lease) &&
+               lease is not null, "The fresh test could not acquire Routing ownership.");
+        using var routingLease = lease!;
+
+        var preAuthorityEdit = plan.Route with
+        {
+            Name = "Edited before authority",
+            Revision = plan.Route.Revision + 1,
+            ModifiedUtc = Now.AddSeconds(2)
+        };
+        var preAuthoritySnapshot = RoutingSnapshotModel.ReplaceRoutes(
+            initialSnapshot,
+            [preAuthorityEdit],
+            Now.AddSeconds(2));
+        await snapshots.SaveAsync(preAuthoritySnapshot, initialSnapshot.Generation);
+        await ExpectAsync<InvalidDataException>(() =>
+            runtime.CommitExecutionAuthorityAsync(routingLease).AsTask());
+        Assert(authority.Inspect().LegacyPermitted,
+            "Editing the frozen fresh first route before authority commits must fail before the irreversible write.");
+
+        // Reset this deliberately corrupted negative-case fixture to the byte-exact clean
+        // starting document. Production correctly forbids decreasing a route revision, so an
+        // ordinary successor cannot represent a test-only rollback.
+        await File.WriteAllBytesAsync(snapshots.Path, initialSnapshotBytes);
+        var restoredSnapshot = snapshots.Load().Document ??
+                               throw new InvalidOperationException(
+                                   "The clean fresh snapshot could not be restored for activation.");
+        await runtime.CommitExecutionAuthorityAsync(routingLease);
+        Assert(authority.Inspect().RoutingRequired &&
+               runtime.InspectActivation(routingLease).Enabled,
+            "A strict fresh marker, frozen first route, source coverage, and current evidence must commit authority and enable Routing.");
+
+        var editedRoute = plan.Route with
+        {
+            Name = "Renamed after activation",
+            Revision = plan.Route.Revision + 1,
+            ModifiedUtc = Now.AddMinutes(1)
+        };
+        var editedSnapshot = RoutingSnapshotModel.ReplaceRoutes(
+            restoredSnapshot,
+            [editedRoute],
+            Now.AddMinutes(1));
+        await snapshots.SaveAsync(editedSnapshot, restoredSnapshot.Generation);
+        Assert(runtime.InspectActivation(routingLease).Enabled,
+            "A fresh first route may be edited after authority commits without revoking Routing.");
+        await AssertFreshColdRestartAsync(
+            "edited",
+            markers,
+            snapshots,
+            stateStore,
+            authority,
+            settings,
+            binding,
+            committedMarker);
+
+        var emptySnapshot = RoutingSnapshotModel.ReplaceRoutes(
+            editedSnapshot,
+            [],
+            Now.AddMinutes(2));
+        await snapshots.SaveAsync(emptySnapshot, editedSnapshot.Generation);
+        Assert(runtime.InspectActivation(routingLease).Enabled,
+            "A fresh first route may be deleted after authority commits while a valid live snapshot remains.");
+        await AssertFreshColdRestartAsync(
+            "empty",
+            markers,
+            snapshots,
+            stateStore,
+            authority,
+            settings,
+            binding,
+            committedMarker);
+
+        var changedState = stateStore.ProbeForRoutingActivation().State!;
+        changedState.KnownContentHashes.Add(new string('E', 64));
+        stateStore.Save(changedState);
+        Assert(runtime.InspectActivation(routingLease).State ==
+               RoutingRuntimeGateState.MigrationEvidenceMismatch,
+            "Changing fresh settings/state evidence after authority commits must fail closed.");
+        changedState.KnownContentHashes.Clear();
+        stateStore.Save(changedState);
+        Assert(runtime.InspectActivation(routingLease).Enabled,
+            "Restoring fresh evidence must restore the same authority permit.");
+
+        File.Delete(snapshots.Path);
+        Assert(runtime.InspectActivation(routingLease).State ==
+               RoutingRuntimeGateState.RoutingSnapshotUnavailable,
+            "Fresh authority must still require a valid loaded live snapshot.");
+    }
+
+    private static async Task AssertFreshColdRestartAsync(
+        string scenario,
+        LegacyRoutingMigrationMarkerStore markers,
+        RoutingSnapshotStore snapshots,
+        WatchStateStore stateStore,
+        RoutingExecutionAuthorityStore authority,
+        AppSettings settings,
+        RoutingCaptureLibraryBinding binding,
+        LegacyRoutingMigrationMarker committedMarker)
+    {
+        var legacyEvidence = new LegacyRoutingActivationEvidenceSource(
+            stateStore,
+            () => settings,
+            () => [],
+            () => binding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
+        var freshEvidence = new FreshRoutingActivationEvidenceSource(
+            stateStore,
+            () => settings,
+            () => binding);
+        var started = 0;
+        var restartedRuntime = new RoutingProductionRuntime(
+            new RecordingPreparer(committedMarker, throwIfCalled: true),
+            markers,
+            snapshots,
+            legacyEvidence,
+            authority,
+            RoutingWatchedSourceAdapters.CoveredSources,
+            (_, _, _) =>
+            {
+                started++;
+                return ValueTask.CompletedTask;
+            },
+            _ => ValueTask.CompletedTask,
+            freshActivationEvidence: freshEvidence);
+        var lifecycle = RoutingApplicationLifecycle.Create(
+            authority,
+            new ClipProcessingOwnershipCoordinator(),
+            new InertLegacyRuntime(),
+            restartedRuntime,
+            migrationMarkers: markers,
+            currentCaptureLibraryBinding: () => binding,
+            legacyRuntimeAllowed: false);
+        var result = await lifecycle.StartAsync();
+        Assert(result is
+                   {
+                       Status: RoutingApplicationLifecycleStatus.RoutingStarted,
+                       State: RoutingApplicationLifecycleState.RoutingRunning
+                   } && started == 1,
+            $"A cold restart must activate fresh Routing from the valid {scenario} live snapshot without restoring Legacy or requiring the frozen first route.");
+        _ = await lifecycle.StopAsync();
+    }
+
+    private static async Task AssertFreshSamePathRootReplacementFailsClosedAsync(
+        string root)
+    {
+        Directory.CreateDirectory(root);
+        var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var displacedClips = Path.Combine(root, "clips-before-replacement");
+        var library = Directory.CreateDirectory(Path.Combine(root, "capture-library")).FullName;
+        var settings = Settings(clips, upload: false);
+        var stateStore = Store(root);
+        stateStore.Save(State(clips));
+        var state = stateStore.ProbeForRoutingActivation().State ??
+                    throw new InvalidOperationException(
+                        "The root-replacement fresh state did not reload.");
+        var binding = RoutingCaptureLibraryBindingModel.Create(library);
+        var adapter = RoutingWatchedSourceAdapters.Get(settings.CaptureSource);
+        var originalRootIdentity = adapter.InspectRootIdentity(clips);
+        var readiness = FreshRoutingSetupPlanner.Evaluate(
+            new FreshRoutingSetupInput(
+                settings,
+                state,
+                LegacyWorkerQuiesced: true,
+                new RoutingRouteDraft(
+                    "Root-bound first route",
+                    RoutingTriggerKind.AnyNewSourceClip,
+                    Game: null,
+                    Destination: null,
+                    ConnectionId: null,
+                    RoutingOutputKind.Original,
+                    RoutingDeliveryMode.Automatic,
+                    RoutingMissingOutputBehavior.UseOriginal,
+                    FileIntoLibrary: true),
+                binding,
+                originalRootIdentity,
+                LegacyRoutingMigrationAdmission.FreshOrInvalidProfile),
+            Now);
+        var plan = readiness.Plan ?? throw new InvalidOperationException(
+            $"The root-replacement fresh plan was blocked ({readiness.Status}).");
+        var routingRoot = Path.Combine(root, "routing");
+        var snapshots = new RoutingSnapshotStore(Path.Combine(
+            routingRoot, RoutingSnapshotStore.FileName));
+        await snapshots.SaveAsync(
+            new RoutingSnapshotDocument(
+                RoutingSnapshotStore.CurrentSchemaVersion,
+                Generation: 1,
+                Routes: [plan.Route],
+                plan.Route.CreatedUtc,
+                plan.Route.ModifiedUtc),
+            expectedGeneration: 0);
+        var markers = new LegacyRoutingMigrationMarkerStore(Path.Combine(
+            routingRoot, LegacyRoutingMigrationMarkerStore.FileName));
+        var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(plan, Now);
+        await markers.SaveAsync(prepared, expectedGeneration: 0);
+        var committed = LegacyRoutingMigrationMarkerModel.Commit(
+            prepared, Now.AddSeconds(1));
+        await markers.SaveAsync(committed, prepared.Generation);
+
+        Directory.Move(clips, displacedClips);
+        _ = Directory.CreateDirectory(clips);
+        var replacementRootIdentity = adapter.InspectRootIdentity(clips);
+        Assert(!replacementRootIdentity.Equals(
+                originalRootIdentity, StringComparison.Ordinal),
+            "Replacing a directory at the same canonical path must change its native root identity.");
+
+        var authority = AuthorityStore(root, "authority");
+        var legacyEvidence = new LegacyRoutingActivationEvidenceSource(
+            stateStore,
+            () => settings,
+            () => [],
+            () => binding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
+        var runtime = new RoutingProductionRuntime(
+            new RecordingPreparer(committed, throwIfCalled: true),
+            markers,
+            snapshots,
+            legacyEvidence,
+            authority,
+            RoutingWatchedSourceAdapters.CoveredSources,
+            (_, _, _) => ValueTask.CompletedTask,
+            _ => ValueTask.CompletedTask,
+            freshActivationEvidence: new FreshRoutingActivationEvidenceSource(
+                stateStore,
+                () => settings,
+                () => binding));
+        var ownership = new ClipProcessingOwnershipCoordinator();
+        Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var lease) &&
+               lease is not null,
+            "The root-replacement test could not acquire Routing ownership.");
+        using (var routingLease = lease!)
+        {
+            await ExpectAsync<InvalidDataException>(() =>
+                runtime.CommitExecutionAuthorityAsync(routingLease).AsTask());
+        }
+        Assert(authority.Inspect().LegacyPermitted && !File.Exists(authority.Path),
+            "A same-path watched-root replacement must fail closed before sticky authority is written.");
+    }
+
+    private static async Task AssertFreshDependencyRevocationFailsClosedAsync(string root)
+    {
+        const string discordConnectionId =
+            "discord.11111111222233334444555555555555";
+        const string namedSourceId =
+            "source.11111111222233334444555555555555";
+        const string xboxSourceId =
+            "source.aaaaaaaa222233334444555555555555";
+
+        var missingDiscord = await RecoverPreparedFreshSetupAsync(
+            Path.Combine(root, "discord-missing"),
+            new RoutingRouteDraft(
+                "Discord first route",
+                RoutingTriggerKind.AnyNewSourceClip,
+                Game: null,
+                RoutingDestinationKind.Discord,
+                discordConnectionId,
+                RoutingOutputKind.Original,
+                RoutingDeliveryMode.Automatic,
+                RoutingMissingOutputBehavior.UseOriginal,
+                FileIntoLibrary: true));
+        await AssertFreshDependencyBlocksAuthorityAsync(
+            missingDiscord,
+            new SequencedConnectionMembership(discordConnectionId, false),
+            inputSources: null,
+            "A deleted or unready Discord connection");
+
+        var revokingDiscord = await RecoverPreparedFreshSetupAsync(
+            Path.Combine(root, "discord-before-commit"),
+            new RoutingRouteDraft(
+                "Discord callback route",
+                RoutingTriggerKind.AnyNewSourceClip,
+                Game: null,
+                RoutingDestinationKind.Discord,
+                discordConnectionId,
+                RoutingOutputKind.Original,
+                RoutingDeliveryMode.Automatic,
+                RoutingMissingOutputBehavior.UseOriginal,
+                FileIntoLibrary: true));
+        var connection = new SequencedConnectionMembership(
+            discordConnectionId,
+            true,
+            false);
+        await AssertFreshDependencyBlocksAuthorityAsync(
+            revokingDiscord,
+            connection,
+            inputSources: null,
+            "A Discord connection revoked at the atomic authority boundary");
+        Assert(connection.Checks == 2 && connection.GateEntries == 1 &&
+               connection.ChecksOutsideGate == 0 && connection.ActiveGates == 0,
+            "Discord readiness must be checked after fresh evidence and again in the authority store's before-commit callback while its mutation gate remains held.");
+
+        var missingNamedSource = await RecoverPreparedFreshSetupAsync(
+            Path.Combine(root, "named-source-missing"),
+            new RoutingRouteDraft(
+                "NVIDIA first route",
+                RoutingTriggerKind.WatchedFolder,
+                Game: null,
+                Destination: null,
+                ConnectionId: null,
+                RoutingOutputKind.Original,
+                RoutingDeliveryMode.Automatic,
+                RoutingMissingOutputBehavior.UseOriginal,
+                FileIntoLibrary: true,
+                WatchedSourceId: namedSourceId,
+                WatchedSourceKind: RoutingInputSourceKind.Nvidia));
+        var namedSource = new GatedInputSourceMembership(
+            namedSourceId,
+            RoutingInputSourceKind.Nvidia,
+            false);
+        await AssertFreshDependencyBlocksAuthorityAsync(
+            missingNamedSource,
+            connections: null,
+            namedSource,
+            "A retired, replaced, disabled, or unready named source");
+        Assert(namedSource.GateEntries == 1 && namedSource.ChecksOutsideGate == 0 &&
+               namedSource.ActiveGates == 0 &&
+               !namedSource.ObservedKinds.Contains(RoutingInputSourceKind.XboxGameDvrOneDrive),
+            "Named-source readiness must be inspected under its execution gate and must not be reinterpreted as Xbox authority.");
+
+        var revokingXboxSource = await RecoverPreparedFreshSetupAsync(
+            Path.Combine(root, "xbox-before-commit"),
+            new RoutingRouteDraft(
+                "Xbox first route",
+                RoutingTriggerKind.WatchedFolder,
+                Game: null,
+                Destination: null,
+                ConnectionId: null,
+                RoutingOutputKind.Original,
+                RoutingDeliveryMode.Automatic,
+                RoutingMissingOutputBehavior.UseOriginal,
+                FileIntoLibrary: true,
+                WatchedSourceId: xboxSourceId,
+                EarliestCapturedUtc: Now.AddMinutes(-1),
+                XboxHistorySelection: new RoutingXboxHistorySelection(Now, []),
+                WatchedSourceKind: RoutingInputSourceKind.XboxGameDvrOneDrive));
+        var xboxSource = new GatedInputSourceMembership(
+            xboxSourceId,
+            RoutingInputSourceKind.XboxGameDvrOneDrive,
+            true,
+            false);
+        await AssertFreshDependencyBlocksAuthorityAsync(
+            revokingXboxSource,
+            connections: null,
+            xboxSource,
+            "An Xbox source revoked at the atomic authority boundary");
+        Assert(xboxSource.ExpectedKindChecks == 2 && xboxSource.GateEntries == 1 &&
+               xboxSource.ChecksOutsideGate == 0 && xboxSource.ActiveGates == 0 &&
+               xboxSource.ObservedKinds.All(kind =>
+                   kind == RoutingInputSourceKind.XboxGameDvrOneDrive),
+            "Xbox readiness must be rechecked in the atomic callback while the same source execution gate remains held.");
+    }
+
+    private static async Task<RecoveredFreshSetup> RecoverPreparedFreshSetupAsync(
+        string root,
+        RoutingRouteDraft draft)
+    {
+        Directory.CreateDirectory(root);
+        var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var library = Directory.CreateDirectory(Path.Combine(root, "capture-library")).FullName;
+        var settings = Settings(clips, upload: false);
+        var stateStore = Store(root);
+        stateStore.Save(State(clips));
+        var state = stateStore.ProbeForRoutingActivation().State ??
+                    throw new InvalidOperationException(
+                        "The fresh dependency test state did not reload.");
+        var binding = RoutingCaptureLibraryBindingModel.Create(library);
+        var watchedRootIdentity = RoutingWatchedSourceAdapters
+            .Get(settings.CaptureSource)
+            .InspectRootIdentity(clips);
+        var readiness = FreshRoutingSetupPlanner.Evaluate(
+            new FreshRoutingSetupInput(
+                settings,
+                state,
+                LegacyWorkerQuiesced: true,
+                draft,
+                binding,
+                watchedRootIdentity,
+                LegacyRoutingMigrationAdmission.FreshOrInvalidProfile),
+            Now);
+        var plan = readiness.Plan ?? throw new InvalidOperationException(
+            $"The fresh dependency plan was blocked ({readiness.Status}).");
+        var routingRoot = Path.Combine(root, "routing");
+        var snapshots = new RoutingSnapshotStore(Path.Combine(
+            routingRoot,
+            RoutingSnapshotStore.FileName));
+        var markers = new LegacyRoutingMigrationMarkerStore(Path.Combine(
+            routingRoot,
+            LegacyRoutingMigrationMarkerStore.FileName));
+        var prepared = LegacyRoutingMigrationMarkerModel.CreatePrepared(plan, Now);
+        await markers.SaveAsync(prepared, expectedGeneration: 0);
+
+        // Reconstruct every store/coordinator to exercise the real cold recovery path from a
+        // durable Prepared marker. Dependency revocation happens only after that recovery has
+        // made the route and marker durable, but before sticky runtime authority is allowed.
+        snapshots = new RoutingSnapshotStore(snapshots.Path);
+        markers = new LegacyRoutingMigrationMarkerStore(markers.Path);
+        var recovered = await new LegacyRoutingMigrationCoordinator(snapshots, markers)
+            .ResumeFreshAsync(
+                settings,
+                state,
+                binding,
+                watchedRootIdentity,
+                Now.AddSeconds(1));
+        Assert(recovered.IsCommitted && recovered.Marker is
+               { Phase: LegacyRoutingMigrationMarkerPhase.Committed },
+            "Cold recovery from Prepared must establish the frozen fresh route before dependency revocation is tested.");
+        return new RecoveredFreshSetup(
+            root,
+            settings,
+            stateStore,
+            binding,
+            snapshots,
+            markers,
+            recovered.Marker!);
+    }
+
+    private static async Task AssertFreshDependencyBlocksAuthorityAsync(
+        RecoveredFreshSetup setup,
+        IRoutingConnectionMembership? connections,
+        IRoutingInputSourceMembership? inputSources,
+        string scenario)
+    {
+        var authority = AuthorityStore(setup.Root, "authority");
+        var legacyEvidence = new LegacyRoutingActivationEvidenceSource(
+            setup.WatchState,
+            () => setup.Settings,
+            () => [],
+            () => setup.Binding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
+        var runtime = new RoutingProductionRuntime(
+            new RecordingPreparer(setup.Marker, throwIfCalled: true),
+            setup.Markers,
+            setup.Snapshots,
+            legacyEvidence,
+            authority,
+            RoutingWatchedSourceAdapters.CoveredSources,
+            (_, _, _) => ValueTask.CompletedTask,
+            _ => ValueTask.CompletedTask,
+            freshActivationEvidence: new FreshRoutingActivationEvidenceSource(
+                setup.WatchState,
+                () => setup.Settings,
+                () => setup.Binding),
+            connectionMembership: connections,
+            inputSourceMembership: inputSources);
+        var ownership = new ClipProcessingOwnershipCoordinator();
+        Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var lease) &&
+               lease is not null,
+            "The fresh dependency test could not acquire Routing ownership.");
+        using (var routingLease = lease!)
+        {
+            await ExpectAsync<InvalidDataException>(() =>
+                runtime.CommitExecutionAuthorityAsync(routingLease).AsTask());
+        }
+        Assert(authority.Inspect().LegacyPermitted && !File.Exists(authority.Path),
+            $"{scenario} must fail closed without writing sticky execution authority.");
     }
 
     private static async Task AssertCommitPreflightFailsClosedAsync(string root)
@@ -643,13 +1184,15 @@ internal static class RoutingProductionRuntimeTests
             watchState,
             cutover,
             () => captureLibraryBinding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade,
             () => Now);
         var evidence = new LegacyRoutingActivationEvidenceSource(
             watchState,
             () => settings,
             () => catalog.Inspect().Connections.Select(connection => connection.ConnectionId)
                 .ToArray(),
-            () => captureLibraryBinding);
+            () => captureLibraryBinding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
         return new RuntimeFixture(
             root, clips, captureLibraryRoot, captureLibraryBinding,
             settings, watchState, routes, markers,
@@ -740,6 +1283,133 @@ internal static class RoutingProductionRuntimeTests
         DiscordConnectionCatalog Catalog,
         LegacyRoutingActivationPreparer Preparer,
         LegacyRoutingActivationEvidenceSource Evidence);
+
+    private sealed record RecoveredFreshSetup(
+        string Root,
+        AppSettings Settings,
+        WatchStateStore WatchState,
+        RoutingCaptureLibraryBinding Binding,
+        RoutingSnapshotStore Snapshots,
+        LegacyRoutingMigrationMarkerStore Markers,
+        LegacyRoutingMigrationMarker Marker);
+
+    private sealed class SequencedConnectionMembership : IRoutingConnectionMembership
+    {
+        private readonly string _connectionId;
+        private readonly bool[] _readiness;
+        private int _activeGates;
+
+        internal SequencedConnectionMembership(string connectionId, params bool[] readiness)
+        {
+            _connectionId = connectionId;
+            _readiness = readiness.Length == 0 ? [false] : readiness;
+        }
+
+        internal int Checks { get; private set; }
+        internal int GateEntries { get; private set; }
+        internal int ChecksOutsideGate { get; private set; }
+        internal int ActiveGates => Volatile.Read(ref _activeGates);
+
+        public bool IsReady(
+            RoutingDestinationKind destination,
+            string connectionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _activeGates) == 0) ChecksOutsideGate++;
+            var index = Math.Min(Checks, _readiness.Length - 1);
+            Checks++;
+            return destination == RoutingDestinationKind.Discord &&
+                   connectionId.Equals(_connectionId, StringComparison.Ordinal) &&
+                   _readiness[index];
+        }
+
+        public ValueTask<IDisposable> EnterExecutionGateAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            GateEntries++;
+            Interlocked.Increment(ref _activeGates);
+            return ValueTask.FromResult<IDisposable>(new CallbackDisposable(() =>
+                Interlocked.Decrement(ref _activeGates)));
+        }
+    }
+
+    private sealed class GatedInputSourceMembership : IRoutingInputSourceMembership
+    {
+        private readonly string _sourceId;
+        private readonly RoutingInputSourceKind _expectedKind;
+        private readonly bool[] _readiness;
+        private int _activeGates;
+
+        internal GatedInputSourceMembership(
+            string sourceId,
+            RoutingInputSourceKind expectedKind,
+            params bool[] readiness)
+        {
+            _sourceId = sourceId;
+            _expectedKind = expectedKind;
+            _readiness = readiness.Length == 0 ? [false] : readiness;
+        }
+
+        internal int GateEntries { get; private set; }
+        internal int ChecksOutsideGate { get; private set; }
+        internal int ExpectedKindChecks { get; private set; }
+        internal int ActiveGates => Volatile.Read(ref _activeGates);
+        internal List<RoutingInputSourceKind> ObservedKinds { get; } = [];
+
+        public bool IsReady(
+            string sourceId,
+            RoutingInputSourceKind kind,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _activeGates) == 0) ChecksOutsideGate++;
+            ObservedKinds.Add(kind);
+            if (!sourceId.Equals(_sourceId, StringComparison.Ordinal) ||
+                kind != _expectedKind)
+            {
+                return false;
+            }
+            var index = Math.Min(ExpectedKindChecks, _readiness.Length - 1);
+            ExpectedKindChecks++;
+            return _readiness[index];
+        }
+
+        public ValueTask<IDisposable> EnterExecutionGateAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            GateEntries++;
+            Interlocked.Increment(ref _activeGates);
+            return ValueTask.FromResult<IDisposable>(new CallbackDisposable(() =>
+                Interlocked.Decrement(ref _activeGates)));
+        }
+    }
+
+    private sealed class CallbackDisposable(Action dispose) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0) dispose();
+        }
+    }
+
+    private sealed class InertLegacyRuntime : ILegacyClipProcessingRuntime
+    {
+        public ValueTask StopAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask StartAsync(
+            ClipProcessingOwnershipLease ownership,
+            CancellationToken cancellationToken) => throw new InvalidOperationException(
+            "Fresh Routing cold restart must never start the Legacy runtime.");
+    }
 
     private sealed class RestorableLegacyRuntime(
         ClipProcessingOwnershipLease initialOwnership) :

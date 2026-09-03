@@ -24,8 +24,10 @@ These values come from Partner Center's Product identity page. Do not substitute
 
 ClipCord keeps completed gaming clips organized and ready to share.
 
+- Capture gameplay directly with Instant Replay or manual game-window recording.
+- Add an optional Reaction Camera and create local landscape or portrait silhouette layouts.
 - Watch a folder used by SteelSeries GG, NVIDIA, or another recorder that saves MP4 files.
-- Send new clips to a configured Discord webhook or keep them Local only.
+- Build routes that send new clips to a named Discord destination or keep them in the local library.
 - Browse locally generated thumbnails and play archived clips inside the app.
 - Mark clips as Favorites and browse them together without moving or duplicating the original files.
 - Trim, preview, mute, rename, and explicitly upload a Local-only clip.
@@ -33,6 +35,24 @@ ClipCord keeps completed gaming clips organized and ready to share.
 - Keep settings, history, thumbnails, editing, playback preparation, and compression on the PC.
 
 ClipCord has no analytics, advertising, account system, telemetry service, or project-operated server. Discord uploads occur only through the webhook configured by the user. ClipCord is not affiliated with Discord or any recording-software vendor.
+
+### What's new in 2.0
+
+ClipCord 2.0 adds direct Instant Replay and manual game-window capture, optional Reaction Camera
+and silhouette layouts, and a crash-safe Routes engine for ClipCord Capture, SteelSeries GG,
+NVIDIA, named watched folders, and Xbox Game DVR sources. Existing ClipCord 1.x profiles migrate
+only from verified local evidence; new profiles start with no automatic route and use guided setup.
+
+### Suggested feature entries
+
+- Instant Replay and manual game-window recording
+- Optional Reaction Camera with explicit consent
+- Landscape and portrait silhouette layouts
+- Routes for ClipCord Capture and watched-folder sources
+- Named Discord destinations or local-library filing
+- Local Gallery, Favorites, playback, and editing
+- Crash-safe migration and duplicate prevention
+- No advertising, analytics, accounts, or telemetry
 
 ## Capability explanations
 
@@ -58,6 +78,10 @@ These explanations are the capability-purpose text to provide with a Store submi
 - **Check for updates** opens Microsoft Store's downloads and updates surface in this distribution.
 - **Start with Windows** uses the declared `ClipCordStartup` startup task and can be disabled in ClipCord or Windows Settings.
 - The package contains the pinned FFmpeg build and its matching license. Third-party notices are included in `THIRD_PARTY_NOTICES.md`.
+- ClipCord launches only its bundled FFmpeg executable and isolated copies of its own executable for
+  capture and silhouette processing. WACK's blocked-executable string scan can report unrelated
+  command names embedded in the self-contained .NET runtime, FFmpeg, or the MODNet model; no shell,
+  compiler, registry tool, downloader, or other flagged executable is packaged or invoked.
 
 ## Before submission
 
@@ -65,6 +89,7 @@ These explanations are the capability-purpose text to provide with a Store submi
 2. Run the warning-as-error build, full smoke suite, and `scripts/test-store-msix.ps1 -RequireFfmpeg`.
 3. Install a locally trusted test package or use a Partner Center private audience to verify first launch, settings migration, startup toggling, Store update routing, and uninstall.
 4. Upload the `.msix` from the verified CI artifact. Do not upload the unsigned package as a public direct download; Microsoft signs the accepted Store package.
-5. Upload current 1800×1140 Home, Gallery, Player, Editor, Activity, Settings, and About screenshots.
+5. Upload current 1800×1140 Capture, Routes, Home, Gallery, Editor, Activity, Settings, and About
+   screenshots. Use at least four current desktop screenshots and no more than ten.
 6. Complete the age-rating questionnaire truthfully for a utility that opens user-owned local videos and can send a selected clip to a user-configured Discord destination.
 7. Review the final pricing/availability and submission summary, then obtain explicit approval before selecting **Submit for certification**.

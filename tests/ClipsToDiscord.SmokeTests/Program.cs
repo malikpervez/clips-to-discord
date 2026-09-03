@@ -25,6 +25,63 @@ try
     Application.SetCompatibleTextRenderingDefault(false);
 
     if (args.Length == 1 &&
+        args[0].Equals("--routing-migration-onboarding", StringComparison.Ordinal))
+    {
+        var migrationRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipCordRoutingMigrationOnboarding",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(migrationRoot);
+            RoutingMigrationAdmissionTests.Run(Path.Combine(migrationRoot, "admission"));
+            FreshRoutingBaselinePreparerTests.Run(Path.Combine(migrationRoot, "fresh-baseline"));
+            RoutingMigrationTests.Run(Path.Combine(migrationRoot, "migration"));
+            Console.WriteLine("Routing migration and onboarding tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(migrationRoot))
+                    Directory.Delete(migrationRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 && args[0].Equals("--capture-ui", StringComparison.Ordinal))
+    {
+        var captureUiRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipCordCaptureUi",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(captureUiRoot);
+            AssertCaptureViewContract(new AppSettings(
+                captureUiRoot,
+                string.Empty,
+                StartWithWindows: false,
+                AppSettings.DefaultCompressionTargetMb,
+                "Capture UI tester",
+                UploadToDiscord: false));
+            Console.WriteLine("Capture UI tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(captureUiRoot))
+                    Directory.Delete(captureUiRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
         args[0].Equals("--silhouette-job-kill-probe", StringComparison.Ordinal))
     {
         if (!SilhouetteWorkerJobLifetime.TryEstablish(out var error))
@@ -212,6 +269,31 @@ try
     }
 
     if (args.Length == 1 &&
+        args[0].Equals("--routing-watched-ingress", StringComparison.Ordinal))
+    {
+        var watchedIngressRoot = Path.Combine(
+            Path.GetTempPath(),
+            "ClipCordRoutingWatchedIngress",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(watchedIngressRoot);
+            await RoutingWatchedIngressTests.RunAsync(watchedIngressRoot);
+            Console.WriteLine("Routing watched-folder ingress tests passed.");
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(watchedIngressRoot))
+                    Directory.Delete(watchedIngressRoot, recursive: true);
+            }
+            catch { }
+        }
+        return;
+    }
+
+    if (args.Length == 1 &&
         args[0].Equals("--routing-local-only", StringComparison.Ordinal))
     {
         var localOnlyRoot = Path.Combine(
@@ -389,6 +471,8 @@ try
             RoutingArchiveTests.Run(Path.Combine(routingRoot, "archive"));
             RoutingCaptureJournalTests.Run(Path.Combine(routingRoot, "capture-journal"));
             RoutingEvaluatorTests.Run(Path.Combine(routingRoot, "evaluator"));
+            RoutingMigrationAdmissionTests.Run(Path.Combine(routingRoot, "admission"));
+            FreshRoutingBaselinePreparerTests.Run(Path.Combine(routingRoot, "fresh-baseline"));
             RoutingMigrationTests.Run(Path.Combine(routingRoot, "migration"));
             RoutingRuntimeBridgeTests.Run(Path.Combine(routingRoot, "bridge"));
             await RoutingWatchedFolderShadowTests.RunAsync(
@@ -1160,6 +1244,10 @@ try
     RoutingCaptureJournalTests.Run(Path.Combine(temporaryRoot, "routing-journal"));
     RoutingEvaluatorTests.Run(Path.Combine(temporaryRoot, "routing-evaluator"));
     TraceSmokeStep("ClipCord 2.0 routing migration");
+    RoutingMigrationAdmissionTests.Run(
+        Path.Combine(temporaryRoot, "routing-migration-admission"));
+    FreshRoutingBaselinePreparerTests.Run(
+        Path.Combine(temporaryRoot, "routing-fresh-baseline"));
     RoutingMigrationTests.Run(Path.Combine(temporaryRoot, "routing-migration"));
     TraceSmokeStep("ClipCord 2.0 routing runtime bridge");
     RoutingRuntimeBridgeTests.Run(Path.Combine(temporaryRoot, "routing-runtime-bridge"));
@@ -5641,22 +5729,63 @@ static void AssertCaptureViewContract(AppSettings settings)
         checkForUpdatesAsync: _ => Task.CompletedTask,
         initialPage: SettingsPage.Capture,
         captureSettings: captureSettings,
-        captureEngineAvailable: false,
+        captureEngineAvailable: true,
         manualCaptureRecorder: manualRecorder);
     startingForm.Show();
     Application.DoEvents();
+    var startingControls = EnumerateControls(startingForm).ToArray();
+    var startingCapture = startingControls.OfType<CaptureView>().Single();
+    var headerStatusPill = startingCapture.HeaderStatusPill;
+    var headerStatusText = EnumerateControls(headerStatusPill).OfType<Label>()
+        .Single(label => label.Name == "CaptureStatusText");
+    var headerActionHost = startingControls.Single(control => control.Name == "PageActionHost");
+    Assert(
+        ReferenceEquals(headerStatusPill.Parent, headerActionHost) &&
+        headerStatusText.Text == "●  OFF" &&
+        headerStatusPill.AccessibleDescription == "OFF",
+        "SettingsForm must host a truthful Instant Replay status pill without exposing the hidden manual recorder's ready state.");
+
+    foreach (var hiddenState in new[]
+             {
+                 ManualCaptureState.NoTarget,
+                 ManualCaptureState.Failed
+             })
+    {
+        manualRecorder.SetState(hiddenState);
+        Application.DoEvents();
+        Assert(
+            headerStatusText.Text == "●  OFF" &&
+            headerStatusPill.AccessibleDescription == "OFF",
+            $"The SettingsForm Capture header must not expose hidden Game Capture Test state {hiddenState}.");
+    }
+
     manualRecorder.SetState(ManualCaptureState.Starting);
     Application.DoEvents();
-    var startingControls = EnumerateControls(startingForm).ToArray();
     Assert(
-        !startingControls.Single(control => control.Name == "ChooseCaptureTargetButton").Enabled &&
-        !startingControls.Single(control => control.Name == "ManualCaptureRecordButton").Enabled &&
-        startingControls.Single(control => control.Name == "ManualCaptureRecordButton").Text == "Starting capture…" &&
-        startingControls.OfType<Label>().Single(label => label.Name == "CaptureStatusText").Text.Contains("STARTING", StringComparison.Ordinal) &&
+        !startingControls.Any(control => control.Name == "CaptureManualRecordingCard") &&
+        !startingControls.Any(control => control.Name == "ChooseCaptureTargetButton") &&
+        !startingControls.Any(control => control.Name == "ManualCaptureRecordButton") &&
+        !startingControls.OfType<Label>().Any(label =>
+            label.Text.Contains("Game capture test", StringComparison.OrdinalIgnoreCase)) &&
+        headerStatusText.Text == "●  OFF" &&
+        headerStatusPill.AccessibleDescription == "OFF" &&
         startingControls.OfType<ToggleSwitch>().Where(toggle =>
                 toggle.Name is "RecordGameAudioToggle" or "IncludeMicrophoneToggle" or "IncludeVoiceChatToggle")
             .All(toggle => !toggle.Enabled),
-        "Permission and hardware-encoder startup must present a distinct state and lock every capture-pipeline control.");
+        "The normal Capture page must omit Game Capture Test semantics while hidden recorder startup still locks every capture-pipeline control.");
+
+    manualRecorder.SetState(ManualCaptureState.Recording);
+    Application.DoEvents();
+    Assert(
+        headerStatusText.Text == "●  RECORDING" &&
+        headerStatusPill.AccessibleDescription == "RECORDING",
+        "An active manual recording must remain visible in the shared Capture header.");
+    manualRecorder.SetState(ManualCaptureState.Finalizing);
+    Application.DoEvents();
+    Assert(
+        headerStatusText.Text == "●  SAVING" &&
+        headerStatusPill.AccessibleDescription == "SAVING",
+        "Manual recording finalization must remain visible in the shared Capture header.");
     manualRecorder.SetState(ManualCaptureState.Ready);
     manualRecorder.SetReactionCameraStatus(new ReactionCameraRuntimeStatus(
         false,
@@ -9418,16 +9547,19 @@ static void AssertActivityEditorHandoff(AppSettings settings)
 
 static void SelectGalleryGame(Control root, string gameName)
 {
+    var gallery = root as GalleryView ?? EnumerateControls(root)
+        .OfType<GalleryView>()
+        .Single(control => control.Visible);
     WaitForUiCondition(
-        () => EnumerateControls(root).OfType<GalleryGameFilterButton>().Any(control =>
+        () => EnumerateControls(gallery).OfType<GalleryGameFilterButton>().Any(control =>
             control.Name == "GalleryGameFilterButton" &&
             control.AccessibleName?.Contains(gameName, StringComparison.OrdinalIgnoreCase) == true),
         TimeSpan.FromSeconds(5),
         $"Gallery did not populate its '{gameName}' game-rail entry.");
-    var gameFilter = EnumerateControls(root)
+    var gameFilter = EnumerateControls(gallery)
         .OfType<GalleryGameFilterButton>()
-        .Single(control => control.Name == "GalleryGameFilterButton" &&
-                           control.AccessibleName?.Contains(gameName, StringComparison.OrdinalIgnoreCase) == true);
+        .First(control => control.Name == "GalleryGameFilterButton" &&
+                          control.AccessibleName?.Contains(gameName, StringComparison.OrdinalIgnoreCase) == true);
     typeof(Control).GetMethod(
             "OnClick",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
@@ -11183,13 +11315,25 @@ internal sealed class RecordingClipPlaybackPreparer(
     internal void Release() => _release.TrySetResult();
 }
 
-internal sealed class RecordingManualCaptureRecorder : IManualCaptureRecorder, IReactionCameraController
+internal sealed class RecordingManualCaptureRecorder : IManualCaptureRecorder, IReplayCaptureController,
+    IReactionCameraController
 {
     public ManualCaptureState State { get; private set; } = ManualCaptureState.Ready;
     public ManualCaptureTarget? Target { get; } = new("Test game", 1920, 1080);
     public string? LastError { get; private set; }
+    public ReplayCaptureStatus ReplayStatus { get; } = new(
+        ReplayCaptureState.Off,
+        Target: null,
+        LastError: null,
+        BufferedDuration: TimeSpan.Zero,
+        ResidentBytes: 0);
     public ReactionCameraRuntimeStatus ReactionCameraStatus { get; private set; } = new(false, false);
     public event EventHandler? StateChanged;
+    public event EventHandler? ReplayStateChanged
+    {
+        add { }
+        remove { }
+    }
     public event EventHandler? ReactionCameraStateChanged;
 
     internal void SetState(ManualCaptureState state, string? error = null)
@@ -11212,6 +11356,15 @@ internal sealed class RecordingManualCaptureRecorder : IManualCaptureRecorder, I
         throw new NotSupportedException("The layout fake does not run the Windows capture engine.");
 
     public Task<ManualCaptureResult?> StopAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The layout fake does not run the Windows capture engine.");
+
+    public Task StartReplayAsync(CaptureSettings settings, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The layout fake does not run the Windows capture engine.");
+
+    public Task StopReplayAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The layout fake does not run the Windows capture engine.");
+
+    public Task<ManualCaptureResult?> SaveReplayAsync(CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("The layout fake does not run the Windows capture engine.");
 
     public Task DisableReactionCameraAsync(CancellationToken cancellationToken = default) =>

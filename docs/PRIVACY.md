@@ -28,6 +28,16 @@ The app stores the following under `%LOCALAPPDATA%\ClipsToDiscord`, retaining th
 - The Discord webhook URL encrypted with Windows DPAPI for the current user
 - Additional named Discord connections encrypted with Windows DPAPI for the current user; route
   files contain only random opaque connection identifiers, never webhook URLs or tokens
+- One immutable, distribution-neutral migration-admission record containing a schema version,
+  generation, terminal admission result (valid legacy upgrade or clearly fresh profile), approved
+  imported-route label version, and local creation timestamp. Ambiguous or transient evidence is
+  not recorded: unavailable settings; locked, corrupt, incomplete, unsupported, or conflicting
+  watcher state all fail closed for the current launch and are reconsidered later. The
+  admission-only probe accepts released versioned watcher schemas v2 through v4 and the exact
+  released unversioned v1.0-v1.1 schema. An exact released unversioned state is immediately
+  recorded as a valid legacy upgrade; Routing activation then waits for the legacy runtime to
+  upgrade that watcher state to v4. Once a terminal result is recorded, later setup state cannot
+  change it; Microsoft Store installation by itself is never treated as upgrade evidence.
 - Local route definitions, the crash-resumable legacy-cutover marker (prepared, aborting, or
   committed), and a durable execution-authority record that binds active Routing to the exact
   migrated watcher source and ClipCord Capture library. The Capture binding consists only of two

@@ -17,6 +17,8 @@ internal static class DiscordConnectionCatalogTests
         await AssertLegacyImportAndCutoverAreOrderedAsync(Path.Combine(root, "legacy"));
         await AssertLocalOnlyCutoverDoesNotImportDormantWebhookAsync(
             Path.Combine(root, "local-only"));
+        await AssertFreshProfileDoesNotImportDiscordAsync(
+            Path.Combine(root, "fresh-profile"));
         await AssertUnsafeCutoverLeavesLegacyAuthoritativeAsync(Path.Combine(root, "blocked"));
         await AssertCorruptCatalogFailsClosedAsync(Path.Combine(root, "corrupt"));
         await AssertManualGalleryUsesCatalogConnectionAsync(Path.Combine(root, "manual-gallery"));
@@ -202,6 +204,7 @@ internal static class DiscordConnectionCatalogTests
             state,
             legacyWorkerQuiesced: true,
             captureLibraryBinding,
+            LegacyRoutingMigrationAdmission.ValidLegacyUpgrade,
             Now);
         Assert(first.Status == LegacyDiscordConnectionCutoverStatus.Completed &&
                first.MayReleaseLegacyOwnership &&
@@ -237,6 +240,7 @@ internal static class DiscordConnectionCatalogTests
             state,
             legacyWorkerQuiesced: true,
             captureLibraryBinding,
+            LegacyRoutingMigrationAdmission.ValidLegacyUpgrade,
             Now.AddMinutes(1));
         Assert(second.MayReleaseLegacyOwnership &&
                second.Cutover!.Status == LegacyRoutingCutoverResultStatus.AlreadyCommitted &&
@@ -262,8 +266,10 @@ internal static class DiscordConnectionCatalogTests
             State(clips),
             legacyWorkerQuiesced: false,
             captureLibraryBinding,
+            LegacyRoutingMigrationAdmission.ValidLegacyUpgrade,
             Now);
-        Assert(!result.MayReleaseLegacyOwnership &&
+        Assert(result.Status == LegacyDiscordConnectionCutoverStatus.MigrationIncomplete &&
+               !result.MayReleaseLegacyOwnership &&
                result.Cutover!.Status == LegacyRoutingCutoverResultStatus.Blocked &&
                result.Cutover.Readiness.Status ==
                LegacyRoutingCutoverReadinessStatus.LegacyWorkerActive &&
@@ -297,6 +303,7 @@ internal static class DiscordConnectionCatalogTests
             State(clips),
             legacyWorkerQuiesced: true,
             captureLibraryBinding,
+            LegacyRoutingMigrationAdmission.ValidLegacyUpgrade,
             Now.AddMinutes(1));
         var route = fixture.RouteStore.Load().Document!.Routes.Single();
         Assert(result.Status == LegacyDiscordConnectionCutoverStatus.Completed &&
@@ -475,6 +482,33 @@ internal static class DiscordConnectionCatalogTests
         var captureLibraryRoot = Path.Combine(root, "capture-library");
         Directory.CreateDirectory(captureLibraryRoot);
         return RoutingCaptureLibraryBindingModel.Create(captureLibraryRoot);
+    }
+
+    private static async Task AssertFreshProfileDoesNotImportDiscordAsync(string root)
+    {
+        var fixture = Fixture(root, new Guid("11111111-aaaa-bbbb-cccc-222222222222"));
+        var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var marker = new LegacyRoutingMigrationMarkerStore(
+            Path.Combine(root, "routing", LegacyRoutingMigrationMarkerStore.FileName));
+        var result = await new LegacyDiscordConnectionCutoverAdapter(
+                fixture.Catalog,
+                new LegacyRoutingMigrationCoordinator(fixture.RouteStore, marker))
+            .ExecuteAsync(
+                Settings(clips, Webhook),
+                State(clips),
+                legacyWorkerQuiesced: true,
+                CaptureLibraryBinding(root),
+                LegacyRoutingMigrationAdmission.FreshOrInvalidProfile,
+                Now);
+
+        Assert(result.Status == LegacyDiscordConnectionCutoverStatus.NotAdmitted &&
+               !result.MayReleaseLegacyOwnership && result.Connection is null &&
+               result.Cutover?.Readiness.Status ==
+               LegacyRoutingCutoverReadinessStatus.NoLegacyUpgradeEvidence &&
+               fixture.Catalog.Inspect().Connections.Count == 0 &&
+               fixture.RouteStore.Load().Status == RoutingDocumentLoadStatus.Missing &&
+               marker.Load().Status == RoutingDocumentLoadStatus.Missing,
+            "A non-admitted profile must report that no cutover ran, and must not import its setup webhook or create legacy routing artifacts.");
     }
 
     private static void Assert(bool condition, string message)

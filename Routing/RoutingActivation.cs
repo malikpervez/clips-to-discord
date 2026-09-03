@@ -25,6 +25,107 @@ internal interface ILegacyRoutingActivationEvidenceSource
     LegacyRoutingActivationEvidence Inspect();
 }
 
+internal enum FreshRoutingActivationEvidenceStatus
+{
+    Loaded,
+    WatchStateUnavailable,
+    InputUnavailable
+}
+
+internal sealed record FreshRoutingActivationEvidence(
+    FreshRoutingActivationEvidenceStatus Status,
+    WatchStateRoutingProbe WatchState,
+    LegacyRoutingMigrationPlan? Plan)
+{
+    internal bool Loaded => Status == FreshRoutingActivationEvidenceStatus.Loaded &&
+                            WatchState.Loaded && WatchState.State is not null && Plan is not null;
+}
+
+internal interface IFreshRoutingActivationEvidenceSource
+{
+    /// <summary>
+    /// Re-reads the strict current settings, watcher state, native watched-root identity, and
+    /// Capture library identity that are payload-bound by a fresh setup marker. The marker's
+    /// initial route is proof of the authority transition, not a permanent constraint on the
+    /// editable live snapshot.
+    /// </summary>
+    FreshRoutingActivationEvidence Inspect(LegacyRoutingMigrationMarker marker);
+}
+
+internal sealed class FreshRoutingActivationEvidenceSource : IFreshRoutingActivationEvidenceSource
+{
+    private readonly WatchStateStore _watchState;
+    private readonly Func<AppSettings> _settingsProvider;
+    private readonly Func<RoutingCaptureLibraryBinding> _captureLibraryBindingProvider;
+    private readonly Func<AppSettings, string> _watchedRootIdentityProvider;
+
+    internal FreshRoutingActivationEvidenceSource(
+        WatchStateStore watchState,
+        Func<AppSettings> settingsProvider,
+        Func<RoutingCaptureLibraryBinding> captureLibraryBindingProvider,
+        Func<AppSettings, string>? watchedRootIdentityProvider = null)
+    {
+        _watchState = watchState ?? throw new ArgumentNullException(nameof(watchState));
+        _settingsProvider = settingsProvider ??
+                            throw new ArgumentNullException(nameof(settingsProvider));
+        _captureLibraryBindingProvider = captureLibraryBindingProvider ??
+                                         throw new ArgumentNullException(
+                                             nameof(captureLibraryBindingProvider));
+        _watchedRootIdentityProvider = watchedRootIdentityProvider ??
+                                       InspectWatchedRootIdentity;
+    }
+
+    public FreshRoutingActivationEvidence Inspect(LegacyRoutingMigrationMarker marker)
+    {
+        ArgumentNullException.ThrowIfNull(marker);
+        var state = _watchState.ProbeForRoutingActivation();
+        if (!state.Loaded || state.State is null)
+        {
+            return new FreshRoutingActivationEvidence(
+                FreshRoutingActivationEvidenceStatus.WatchStateUnavailable,
+                state,
+                null);
+        }
+
+        try
+        {
+            var settings = _settingsProvider() ?? throw new InvalidDataException(
+                "The fresh Routing settings evidence is missing.");
+            var captureLibraryBinding = _captureLibraryBindingProvider() ??
+                                        throw new InvalidDataException(
+                                            "The Capture library identity evidence is missing.");
+            var watchedRootIdentity = _watchedRootIdentityProvider(settings);
+            var plan = FreshRoutingSetupPlanner.ReconstructCurrentPlan(
+                marker,
+                settings,
+                state.State,
+                captureLibraryBinding,
+                watchedRootIdentity);
+            return new FreshRoutingActivationEvidence(
+                FreshRoutingActivationEvidenceStatus.Loaded,
+                state,
+                plan);
+        }
+        catch (Exception)
+        {
+            return new FreshRoutingActivationEvidence(
+                FreshRoutingActivationEvidenceStatus.InputUnavailable,
+                state,
+                null);
+        }
+    }
+
+    private static string InspectWatchedRootIdentity(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var source = AppSettings.NormalizeCaptureSource(settings.CaptureSource);
+        if (!Enum.IsDefined(source))
+            throw new InvalidDataException("The fresh watched-source type is invalid.");
+        return RoutingWatchedSourceAdapters.Get(source)
+            .InspectRootIdentity(settings.ClipsFolder);
+    }
+}
+
 /// <summary>
 /// Strict adapter for the current settings, durable watcher state, and opaque connection ids.
 /// Providers are invoked on every inspection so a settings, source-folder, connection, or hash
@@ -38,12 +139,16 @@ internal sealed class LegacyRoutingActivationEvidenceSource : ILegacyRoutingActi
     private readonly Func<AppSettings> _settingsProvider;
     private readonly Func<IReadOnlyList<string>> _discordConnectionIdsProvider;
     private readonly Func<RoutingCaptureLibraryBinding> _captureLibraryBindingProvider;
+    private readonly Func<LegacyRoutingMigrationAdmission> _admissionProvider;
+    private readonly Func<int> _importedRouteLabelVersionProvider;
 
     internal LegacyRoutingActivationEvidenceSource(
         WatchStateStore watchState,
         Func<AppSettings> settingsProvider,
         Func<IReadOnlyList<string>> discordConnectionIdsProvider,
-        Func<RoutingCaptureLibraryBinding> captureLibraryBindingProvider)
+        Func<RoutingCaptureLibraryBinding> captureLibraryBindingProvider,
+        Func<LegacyRoutingMigrationAdmission> admissionProvider,
+        Func<int>? importedRouteLabelVersionProvider = null)
     {
         _watchState = watchState ?? throw new ArgumentNullException(nameof(watchState));
         _settingsProvider = settingsProvider ??
@@ -54,6 +159,10 @@ internal sealed class LegacyRoutingActivationEvidenceSource : ILegacyRoutingActi
         _captureLibraryBindingProvider = captureLibraryBindingProvider ??
                                          throw new ArgumentNullException(
                                              nameof(captureLibraryBindingProvider));
+        _admissionProvider = admissionProvider ??
+                             throw new ArgumentNullException(nameof(admissionProvider));
+        _importedRouteLabelVersionProvider = importedRouteLabelVersionProvider ?? (() =>
+            LegacyRoutingMigrationPlanner.CurrentImportedRouteLabelVersion);
     }
 
     public LegacyRoutingActivationEvidence Inspect()
@@ -84,7 +193,9 @@ internal sealed class LegacyRoutingActivationEvidenceSource : ILegacyRoutingActi
                     state.State,
                     LegacyWorkerQuiesced: true,
                     connectionIds,
-                    captureLibraryBinding),
+                    captureLibraryBinding,
+                    _admissionProvider(),
+                    _importedRouteLabelVersionProvider()),
                 EvaluationTimestamp);
             return new LegacyRoutingActivationEvidence(
                 LegacyRoutingActivationEvidenceStatus.Loaded,

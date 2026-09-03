@@ -10,6 +10,10 @@ internal static class RoutingWatchedFolderShadowTests
     {
         Directory.CreateDirectory(root);
         await AssertDisabledAndMissingGateAreInertAsync(Path.Combine(root, "disabled"));
+        await AssertFreshOriginDoesNotEnterLegacyShadowAsync(
+            Path.Combine(root, "fresh-origin"));
+        await AssertPersistedImportedLabelVersionIsAuthoritativeAsync(
+            Path.Combine(root, "persisted-label-version"));
         await AssertLocalOnlyShadowPlanIsIsolatedAsync(Path.Combine(root, "local-only"));
         await AssertDiscordPlanRestartAndDuplicatesAsync(Path.Combine(root, "discord"));
         await AssertLegacyExclusionsNeverPlanAsync(Path.Combine(root, "exclusions"));
@@ -65,6 +69,98 @@ internal static class RoutingWatchedFolderShadowTests
                 new RoutingWatchedShadowStore(Path.Combine(routing, "active-shadow.json")),
                 probe),
             "The shadow observer must refuse to masquerade as a live active runtime.");
+    }
+
+    private static async Task AssertFreshOriginDoesNotEnterLegacyShadowAsync(string root)
+    {
+        var clips = Directory.CreateDirectory(Path.Combine(root, "clips")).FullName;
+        var captureLibrary = Directory.CreateDirectory(
+            Path.Combine(root, "capture-library")).FullName;
+        var binding = RoutingCaptureLibraryBindingModel.Create(captureLibrary);
+        var routing = Directory.CreateDirectory(Path.Combine(root, "routing")).FullName;
+        var settings = Settings(clips, upload: false, ClipCaptureSource.SteelSeriesGg);
+        var state = State(clips, ClipCaptureSource.SteelSeriesGg);
+        var snapshots = new RoutingSnapshotStore(Path.Combine(
+            routing,
+            RoutingSnapshotStore.FileName));
+        var markers = new LegacyRoutingMigrationMarkerStore(Path.Combine(
+            routing,
+            LegacyRoutingMigrationMarkerStore.FileName));
+        var cutover = await new LegacyRoutingMigrationCoordinator(snapshots, markers)
+            .ExecuteFreshAsync(
+                new FreshRoutingSetupInput(
+                    settings,
+                    state,
+                    LegacyWorkerQuiesced: true,
+                    new RoutingRouteDraft(
+                        "My first route",
+                        RoutingTriggerKind.AnyNewSourceClip,
+                        Game: null,
+                        Destination: null,
+                        ConnectionId: null,
+                        RoutingOutputKind.Original,
+                        RoutingDeliveryMode.Automatic,
+                        RoutingMissingOutputBehavior.UseOriginal,
+                        FileIntoLibrary: true),
+                    binding,
+                    RoutingWatchedSourceAdapters.Get(settings.CaptureSource)
+                        .InspectRootIdentity(settings.ClipsFolder),
+                    LegacyRoutingMigrationAdmission.FreshOrInvalidProfile),
+                Now);
+        Assert(cutover.IsCommitted &&
+               cutover.Marker?.Origin == RoutingActivationOrigin.FreshSetup,
+            "The fresh shadow rejection fixture could not commit its first route.");
+
+        var path = await WriteClipAsync(
+            clips,
+            "Fresh source 2026.08.28 - 12.00.00.00.DVR.mp4",
+            [1, 3, 5, 7]);
+        var candidate = await CandidateAsync(settings, path);
+        var shadow = new RoutingWatchedShadowStore(Path.Combine(
+            routing,
+            RoutingWatchedShadowStore.FileName));
+        var probe = new RecordingMediaProbe();
+        var observer = new RoutingWatchedFolderShadowObserver(
+            RoutingWatchedFolderIngestionOptions.Shadow,
+            snapshots,
+            markers,
+            shadow,
+            probe,
+            createPlanId: Guid.NewGuid,
+            utcNow: () => Now.AddSeconds(1));
+        var result = await observer.ObserveAsync(candidate, CancellationToken.None);
+
+        Assert(result.Status == RoutingWatchedFolderObservationStatus.GateUnavailable &&
+               !observer.MatchesMarkerSource(cutover.Marker!, candidate, CancellationToken.None) &&
+               probe.Calls == 0 && shadow.Load().Status == RoutingDocumentLoadStatus.Missing &&
+               File.Exists(path),
+            "Legacy comparison shadow must explicitly reject fresh activation markers without probing, planning, or persistence.");
+    }
+
+    private static async Task AssertPersistedImportedLabelVersionIsAuthoritativeAsync(
+        string root)
+    {
+        var fixture = CreateFixture(
+            root,
+            upload: false,
+            ClipCaptureSource.SteelSeriesGg);
+        var path = await WriteClipAsync(
+            fixture.ClipsRoot,
+            "Label authority 2026.08.28 - 12.00.00.00.DVR.mp4",
+            [2, 4, 6, 8]);
+        var candidate = await CandidateAsync(fixture.Settings, path);
+        var renamedPresentation = fixture.Marker with
+        {
+            Route = fixture.Marker.Route with { Name = "A future imported-route label" }
+        };
+
+        Assert(fixture.Marker.ImportedRouteLabelVersion ==
+                   LegacyRoutingMigrationPlanner.CurrentImportedRouteLabelVersion &&
+               fixture.Observer.MatchesMarkerSource(
+                   renamedPresentation,
+                   candidate,
+                   CancellationToken.None),
+            "Legacy source verification must use the marker's persisted imported-label version rather than re-inferring it from mutable route display text.");
     }
 
     private static async Task AssertLocalOnlyShadowPlanIsIsolatedAsync(string root)
@@ -432,7 +528,8 @@ internal static class RoutingWatchedFolderShadowTests
                     state,
                     LegacyWorkerQuiesced: true,
                     connectionIds,
-                    captureLibraryBinding),
+                    captureLibraryBinding,
+                    LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
                 Now)
             .GetAwaiter().GetResult();
         Assert(cutover.IsCommitted,

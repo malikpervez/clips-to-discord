@@ -599,12 +599,12 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
                 null);
         }
 
-        var snapshotLoad = _snapshots.Load(cancellationToken);
-        if (!snapshotLoad.LoadedFromDisk || snapshotLoad.Document is null ||
-            !CommittedRoutingRouteMutationAuthority.IsCutoverCommitted(
-                _markers,
-                snapshotLoad.Document,
-                cancellationToken))
+        var markerLoad = _markers.Load(cancellationToken);
+        if (!markerLoad.LoadedFromDisk || markerLoad.Document is not
+            {
+                Phase: LegacyRoutingMigrationMarkerPhase.Committed,
+                Origin: RoutingActivationOrigin.LegacyMigration
+            })
         {
             return new RoutingWatchedFolderObservationResult(
                 RoutingWatchedFolderObservationStatus.GateUnavailable,
@@ -612,8 +612,12 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
                 null,
                 null);
         }
-        var markerLoad = _markers.Load(cancellationToken);
-        if (!markerLoad.LoadedFromDisk || markerLoad.Document is null ||
+        var snapshotLoad = _snapshots.Load(cancellationToken);
+        if (!snapshotLoad.LoadedFromDisk || snapshotLoad.Document is null ||
+            !CommittedRoutingRouteMutationAuthority.IsCutoverCommitted(
+                _markers,
+                snapshotLoad.Document,
+                cancellationToken) ||
             !MatchesMarkerSource(markerLoad.Document, candidate, cancellationToken))
         {
             return new RoutingWatchedFolderObservationResult(
@@ -973,6 +977,7 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
         RoutingWatchedFolderCandidate candidate,
         CancellationToken cancellationToken)
     {
+        if (marker.Origin != RoutingActivationOrigin.LegacyMigration) return false;
         if (marker.Mode != candidate.LegacyMode) return false;
         string? connectionId = null;
         if (candidate.LegacyMode == LegacyRoutingMode.DiscordUpload)
@@ -989,7 +994,9 @@ internal sealed class RoutingWatchedFolderShadowObserver : IRoutingWatchedFolder
             candidate.CaptureSource,
             connectionId,
             marker.CaptureLibraryBinding,
-            marker.ContentHashExclusions);
+            marker.ContentHashExclusions,
+            marker.ImportedRouteLabelVersion ??
+            LegacyRoutingMigrationPlanner.LegacyImportedRouteLabelVersion);
         return marker.SourceFingerprint.Equals(expected, StringComparison.Ordinal);
     }
 

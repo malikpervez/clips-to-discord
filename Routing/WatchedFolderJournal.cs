@@ -357,7 +357,8 @@ internal sealed class RoutingWatchedSourceJournalStore
 
     internal async Task<RoutingWatchedSourceJournalDocument> PersistExactAsync(
         RoutingWatchedSourceJournalDocument document,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? beforeCommit = null)
     {
         RoutingWatchedJournalModel.Validate(document);
         var store = StoreFor(document.SourceClipId);
@@ -368,6 +369,8 @@ internal sealed class RoutingWatchedSourceJournalStore
             if (existing.LoadedFromDisk && existing.Document is not null)
             {
                 RoutingWatchedJournalModel.RequireExact(existing.Document, document);
+                beforeCommit?.Invoke();
+                cancellationToken.ThrowIfCancellationRequested();
                 return existing.Document;
             }
             if (existing.Status != RoutingWatchedJournalLoadStatus.Missing)
@@ -377,7 +380,11 @@ internal sealed class RoutingWatchedSourceJournalStore
             }
             try
             {
-                return await store.SaveAsync(document, 0, cancellationToken)
+                return await store.SaveAsync(
+                        document,
+                        0,
+                        cancellationToken,
+                        beforeCommit)
                     .ConfigureAwait(false);
             }
             catch (RoutingConcurrencyException) when (attempt < 3)
@@ -550,24 +557,41 @@ internal sealed class RoutingWatchedJournalFactory
         IRoutingWatchedSourceAdapter adapter,
         LegacyRoutingMigrationMarker marker,
         RoutingSnapshotDocument routingSnapshot,
+        RoutingRuntimeGateInspection authorityPermit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(adapter);
         ArgumentNullException.ThrowIfNull(marker);
         ArgumentNullException.ThrowIfNull(routingSnapshot);
+        ArgumentNullException.ThrowIfNull(authorityPermit);
         LegacyRoutingMigrationMarkerModel.Validate(marker);
         RoutingSnapshotModel.Validate(routingSnapshot);
         RoutingValidation.Require(
             marker.Phase == LegacyRoutingMigrationMarkerPhase.Committed,
             "A watched source requires a committed migration marker.");
-        RoutingValidation.Require(source.Source == adapter.Source &&
-                                  marker.Route is not null &&
-                                  routingSnapshot.Routes.Any(route =>
-                                      route.RouteId == marker.Route.RouteId &&
-                                      LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
-                                          route, marker.Route)),
-            "The watched source adapter or frozen routing snapshot is outside migration authority.");
+        RoutingValidation.Require(source.Source == adapter.Source,
+            "The watched source adapter is outside activation authority.");
+        RoutingValidation.Require(
+            authorityPermit.Enabled &&
+            authorityPermit.HasRequiredSourceCoverage &&
+            authorityPermit.ExecutionAuthorityActivationId is not null &&
+            authorityPermit.RoutingGeneration == routingSnapshot.Generation &&
+            authorityPermit.RequiredLegacySource == source.Source &&
+            authorityPermit.MarkerPayloadFingerprint is not null &&
+            authorityPermit.MarkerPayloadFingerprint.Equals(
+                marker.PayloadFingerprint,
+                StringComparison.OrdinalIgnoreCase),
+            "The watched source does not match the live Routing execution permit.");
+        if (marker.Origin == RoutingActivationOrigin.LegacyMigration)
+        {
+            RoutingValidation.Require(
+                routingSnapshot.Routes.Any(route =>
+                    route.RouteId == marker.Route.RouteId &&
+                    LegacyRoutingMigrationPlanner.IsEquivalentMigrationRoute(
+                        route, marker.Route)),
+                "The frozen routing snapshot is outside legacy migration authority.");
+        }
         cancellationToken.ThrowIfCancellationRequested();
         var occurrence = CreateOccurrenceIdentity(source, marker.SourceFingerprint);
         var sourceClipId = RoutingWatchedJournalModel.SourcePrefix + occurrence;

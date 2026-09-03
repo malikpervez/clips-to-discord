@@ -1042,7 +1042,8 @@ internal static class RoutingActiveWorkSessionTests
                     state,
                     LegacyWorkerQuiesced: true,
                     connections,
-                    captureLibraryBinding),
+                    captureLibraryBinding,
+                    LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
                 Now);
             var migration = readiness.Plan ?? throw new InvalidOperationException(
                 $"The active-session migration fixture is unavailable ({readiness.Status}).");
@@ -1073,7 +1074,8 @@ internal static class RoutingActiveWorkSessionTests
                 stateStore,
                 () => settings,
                 () => connections,
-                () => captureLibraryBinding);
+                () => captureLibraryBinding,
+                () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
             var ownership = new ClipProcessingOwnershipCoordinator();
             if (!ownership.TryAcquire(
                     ClipProcessingRuntimeOwner.Routing,

@@ -3,7 +3,8 @@ namespace ClipsToDiscord;
 internal sealed record RoutingRuntimeCoordinatorOptions(
     bool RequestedEnabled,
     bool AuthorityAlreadyCommitted = false,
-    bool RecoverCommittedMigration = false)
+    bool RecoverCommittedMigration = false,
+    bool LegacyRuntimeAllowed = false)
 {
     /// <summary>
     /// Routing is intentionally inert unless a caller supplies an explicit opt-in. Constructing
@@ -15,6 +16,7 @@ internal sealed record RoutingRuntimeCoordinatorOptions(
 internal enum RoutingRuntimeCoordinatorState
 {
     Disabled,
+    SetupReady,
     LegacyActive,
     StartingRouting,
     RoutingActive,
@@ -36,6 +38,7 @@ internal enum RoutingRuntimeTransitionStatus
     GateRejectedLegacyRestored,
     GateRejectedRecoveryNeeded,
     PreparationFailedLegacyRestored,
+    PreparationFailedSetupReady,
     PreparationFailedRecoveryNeeded,
     AuthorityCommitFailedRecoveryNeeded,
     RoutingStartFailedLegacyRestored,
@@ -186,8 +189,15 @@ internal sealed class RoutingRuntimeCoordinator
                     "Existing Routing ownership requires explicit committed-authority adoption.",
                     nameof(options));
             }
+            if (!_options.LegacyRuntimeAllowed &&
+                ownership.Owner == ClipProcessingRuntimeOwner.Legacy)
+            {
+                throw new ArgumentException(
+                    "A no-Legacy coordinator cannot adopt existing Legacy ownership.",
+                    nameof(options));
+            }
             _state = (int)(_options.RequestedEnabled
-                ? InitialEnabledState(ownership.Owner)
+                ? InitialEnabledState(ownership.Owner, _options.LegacyRuntimeAllowed)
                 : RoutingRuntimeCoordinatorState.Disabled);
         }
     }
@@ -254,6 +264,11 @@ internal sealed class RoutingRuntimeCoordinator
                 {
                     SetState(RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded);
                     return Result(RoutingRuntimeTransitionStatus.OwnershipUnavailable);
+                }
+                if (!_options.LegacyRuntimeAllowed && _ownership.Owner is null)
+                {
+                    return await StartWithoutLegacyAsync(cancellationToken)
+                        .ConfigureAwait(false);
                 }
                 if (_ownership.Owner is null)
                 {
@@ -395,6 +410,10 @@ internal sealed class RoutingRuntimeCoordinator
             {
                 SetState(RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded);
             }
+            else if (!_options.LegacyRuntimeAllowed)
+            {
+                SetState(RoutingRuntimeCoordinatorState.SetupReady);
+            }
             else if (_ownership.Owner != ClipProcessingRuntimeOwner.Legacy)
             {
                 _ = await RestoreLegacyAsync().ConfigureAwait(false);
@@ -405,6 +424,108 @@ internal sealed class RoutingRuntimeCoordinator
         {
             _transition.Release();
         }
+    }
+
+    private async Task<RoutingRuntimeTransitionResult> StartWithoutLegacyAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_options.LegacyRuntimeAllowed)
+            throw new InvalidOperationException("The no-Legacy activation path was not selected.");
+        if (_ownership.Owner is not null ||
+            !_ownership.TryAcquire(
+                ClipProcessingRuntimeOwner.Transition,
+                out var transitionOwnership) ||
+            transitionOwnership is null)
+        {
+            SetState(RoutingRuntimeCoordinatorState.SetupReady);
+            return Result(RoutingRuntimeTransitionStatus.OwnershipUnavailable);
+        }
+
+        SetState(RoutingRuntimeCoordinatorState.StartingRouting);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            transitionOwnership.Dispose();
+            SetState(RoutingRuntimeCoordinatorState.SetupReady);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        try
+        {
+            await _routingRuntime.PrepareActivationAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            if (_routingRuntime.RequiresRoutingFenceAfterPreparation())
+            {
+                FencePreparedActivation(transitionOwnership);
+                return Result(
+                    RoutingRuntimeTransitionStatus.PreparationFailedRecoveryNeeded,
+                    error: exception);
+            }
+
+            transitionOwnership.Dispose();
+            SetState(RoutingRuntimeCoordinatorState.SetupReady);
+            if (exception is OperationCanceledException &&
+                cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            return Result(
+                RoutingRuntimeTransitionStatus.PreparationFailedSetupReady,
+                error: exception);
+        }
+
+        var durablePreparationFence =
+            _routingRuntime.RequiresRoutingFenceAfterPreparation();
+        if (cancellationToken.IsCancellationRequested && !durablePreparationFence)
+        {
+            transitionOwnership.Dispose();
+            SetState(RoutingRuntimeCoordinatorState.SetupReady);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        if (!_ownership.TryTransfer(
+                transitionOwnership,
+                ClipProcessingRuntimeOwner.Routing,
+                out var routingOwnership) ||
+            routingOwnership is null)
+        {
+            transitionOwnership.Dispose();
+            if (durablePreparationFence)
+            {
+                _authorityCommitEntered = true;
+                SetState(RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded);
+            }
+            else
+            {
+                SetState(RoutingRuntimeCoordinatorState.SetupReady);
+            }
+            return Result(RoutingRuntimeTransitionStatus.OwnershipUnavailable);
+        }
+
+        _routingOwnership = routingOwnership;
+        _authorityCommitEntered = true;
+        return await CommitInspectAndStartRoutingAsync(routingOwnership, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private void FencePreparedActivation(
+        ClipProcessingOwnershipLease transitionOwnership)
+    {
+        if (_ownership.TryTransfer(
+                transitionOwnership,
+                ClipProcessingRuntimeOwner.Routing,
+                out var fencedOwnership) && fencedOwnership is not null)
+        {
+            _routingOwnership = fencedOwnership;
+        }
+        else
+        {
+            transitionOwnership.Dispose();
+        }
+        _authorityCommitEntered = true;
+        _recoveryPreparationRequired = true;
+        SetState(RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded);
     }
 
     private async Task<RoutingRuntimeTransitionResult> CommitInspectAndStartRoutingAsync(
@@ -602,6 +723,13 @@ internal sealed class RoutingRuntimeCoordinator
 
     private async Task<bool> RestoreLegacyAsync()
     {
+        if (!_options.LegacyRuntimeAllowed)
+        {
+            SetState(_authorityCommitEntered
+                ? RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded
+                : RoutingRuntimeCoordinatorState.SetupReady);
+            return false;
+        }
         if (_authorityCommitEntered)
         {
             SetState(RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded);
@@ -629,6 +757,8 @@ internal sealed class RoutingRuntimeCoordinator
     private async Task<RoutingRuntimeTransitionResult> StartLegacyFromTransitionAsync(
         ClipProcessingOwnershipLease transitionOwnership)
     {
+        if (!_options.LegacyRuntimeAllowed)
+            throw new InvalidOperationException("Legacy processing is disabled for this profile.");
         if (_authorityCommitEntered)
         {
             throw new InvalidOperationException(
@@ -686,11 +816,14 @@ internal sealed class RoutingRuntimeCoordinator
         Volatile.Write(ref _state, (int)state);
 
     private static RoutingRuntimeCoordinatorState InitialEnabledState(
-        ClipProcessingRuntimeOwner? owner) => owner switch
+        ClipProcessingRuntimeOwner? owner,
+        bool legacyRuntimeAllowed) => owner switch
     {
         ClipProcessingRuntimeOwner.Legacy => RoutingRuntimeCoordinatorState.LegacyActive,
         ClipProcessingRuntimeOwner.Routing =>
             RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded,
-        _ => RoutingRuntimeCoordinatorState.LegacyRecoveryNeeded
+        _ => legacyRuntimeAllowed
+            ? RoutingRuntimeCoordinatorState.LegacyRecoveryNeeded
+            : RoutingRuntimeCoordinatorState.SetupReady
     };
 }

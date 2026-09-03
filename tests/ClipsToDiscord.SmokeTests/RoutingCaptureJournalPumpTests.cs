@@ -366,7 +366,8 @@ internal static class RoutingCaptureJournalPumpTests
                     legacyState,
                     LegacyWorkerQuiesced: true,
                     connectionIds,
-                    captureLibraryBinding),
+                    captureLibraryBinding,
+                    LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
                 Now);
             var migration = readiness.Plan ?? throw new InvalidOperationException(
                 $"The pump fixture migration is unavailable ({readiness.Status}).");
@@ -442,7 +443,8 @@ internal static class RoutingCaptureJournalPumpTests
                 legacyStateStore,
                 () => legacySettings,
                 () => connectionIds,
-                () => captureLibraryBinding);
+                () => captureLibraryBinding,
+                () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
             var ownership = new ClipProcessingOwnershipCoordinator();
             if (!ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var routingLease) ||
                 routingLease is null)

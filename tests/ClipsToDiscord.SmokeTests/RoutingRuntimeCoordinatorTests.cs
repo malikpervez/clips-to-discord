@@ -7,6 +7,7 @@ internal static class RoutingRuntimeCoordinatorTests
     private static async Task RunAsync()
     {
         await AssertDefaultIsInertAsync();
+        AssertLegacyRequiresExplicitPermission();
         await AssertColdStartAdoptsCommittedRoutingAsync();
         AssertInvalidColdStartConstructionFailsClosed();
         await AssertSuccessfulCutoverQuiescesWithoutLegacyAsync();
@@ -21,11 +22,14 @@ internal static class RoutingRuntimeCoordinatorTests
         await AssertRoutingStartFailurePreservesRoutingAndRetriesAsync();
         await AssertCancellationAfterLegacyStopRestoresLegacyAsync();
         await AssertRoutingStopFailureRetriesUnderRoutingAuthorityAsync();
+        await AssertFreshActivationNeverTouchesLegacyAsync();
+        await AssertFreshPreFenceFailuresReturnToSetupAsync();
+        await AssertFreshDurableFailuresRemainRoutingFencedAsync();
     }
 
     private static async Task AssertDefaultIsInertAsync()
     {
-        var fixture = Fixture.Create();
+        var fixture = Fixture.CreateFresh();
         try
         {
             var coordinator = fixture.CreateCoordinator(RoutingRuntimeCoordinatorOptions.Default);
@@ -38,7 +42,7 @@ internal static class RoutingRuntimeCoordinatorTests
                    fixture.Legacy.StopCalls == 0 && fixture.Legacy.StartCalls == 0 &&
                    fixture.Routing.CommitCalls == 0 && fixture.Routing.StartCalls == 0 &&
                    fixture.Routing.StopCalls == 0 &&
-                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy,
+                   fixture.Ownership.Owner is null,
                 "The routing coordinator must be inert unless an explicit opt-in is supplied.");
         }
         finally
@@ -52,7 +56,7 @@ internal static class RoutingRuntimeCoordinatorTests
         var fixture = Fixture.Create();
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             var started = await coordinator.StartAsync();
             var repeatedStart = await coordinator.StartAsync();
 
@@ -102,7 +106,7 @@ internal static class RoutingRuntimeCoordinatorTests
         fixture.Routing.PrepareError = new InvalidOperationException("migration failed");
         try
         {
-            var result = await fixture.CreateCoordinator(new(true)).StartAsync();
+            var result = await fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true)).StartAsync();
             Assert(result.Status ==
                    RoutingRuntimeTransitionStatus.PreparationFailedLegacyRestored &&
                    result.Error == fixture.Routing.PrepareError &&
@@ -126,7 +130,7 @@ internal static class RoutingRuntimeCoordinatorTests
         try
         {
             await AssertThrowsAsync<OperationCanceledException>(() =>
-                fixture.CreateCoordinator(new(true)).StartAsync(cancellation.Token));
+                fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true)).StartAsync(cancellation.Token));
             Assert(fixture.Routing.PrepareCalls == 1 &&
                    fixture.Routing.CommitCalls == 0 && fixture.Routing.StartCalls == 0 &&
                    fixture.Legacy.StartCalls == 1 &&
@@ -139,6 +143,140 @@ internal static class RoutingRuntimeCoordinatorTests
         }
     }
 
+    private static void AssertLegacyRequiresExplicitPermission()
+    {
+        var fixture = Fixture.Create();
+        try
+        {
+            AssertThrows<ArgumentException>(
+                () => fixture.CreateCoordinator(new(RequestedEnabled: true)),
+                "Legacy ownership must be rejected unless the admitted-upgrade path explicitly permits it.");
+            Assert(fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Legacy &&
+                   fixture.Legacy.StopCalls == 0 && fixture.Legacy.StartCalls == 0 &&
+                   fixture.Routing.CommitCalls == 0 && fixture.Routing.StartCalls == 0,
+                "Rejecting implicit Legacy permission must not disturb either runtime.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static async Task AssertFreshActivationNeverTouchesLegacyAsync()
+    {
+        var fixture = Fixture.CreateFresh();
+        try
+        {
+            var coordinator = fixture.CreateCoordinator(new(
+                RequestedEnabled: true,
+                LegacyRuntimeAllowed: false));
+            Assert(coordinator.State == RoutingRuntimeCoordinatorState.SetupReady &&
+                   fixture.Ownership.Owner is null,
+                "A fresh coordinator must begin setup-ready without acquiring an owner.");
+
+            var started = await coordinator.StartAsync();
+            Assert(started.Status == RoutingRuntimeTransitionStatus.Started &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingActive &&
+                   fixture.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   fixture.Legacy.StartCalls == 0 && fixture.Legacy.StopCalls == 0 &&
+                   fixture.Events.SequenceEqual([
+                       "routing-prepare", "routing-commit", "routing-start"
+                   ]),
+                "Fresh activation must move directly through Transition into Routing without touching Legacy.");
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+    }
+
+    private static async Task AssertFreshPreFenceFailuresReturnToSetupAsync()
+    {
+        var failed = Fixture.CreateFresh();
+        try
+        {
+            failed.Routing.PrepareError = new IOException("fresh preparation failed");
+            var coordinator = failed.CreateCoordinator(new(true, LegacyRuntimeAllowed: false));
+            var result = await coordinator.StartAsync();
+            Assert(result.Status == RoutingRuntimeTransitionStatus.PreparationFailedSetupReady &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.SetupReady &&
+                   failed.Ownership.Owner is null &&
+                   failed.Legacy.StartCalls == 0 && failed.Legacy.StopCalls == 0 &&
+                   failed.Routing.CommitCalls == 0 && failed.Routing.StartCalls == 0,
+                "A reversible fresh preparation failure must release Transition and return to setup-ready.");
+        }
+        finally
+        {
+            failed.Dispose();
+        }
+
+        var cancelled = Fixture.CreateFresh();
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            cancelled.Routing.DuringPrepare = cancellation.Cancel;
+            var coordinator = cancelled.CreateCoordinator(new(true, LegacyRuntimeAllowed: false));
+            await AssertThrowsAsync<OperationCanceledException>(() =>
+                coordinator.StartAsync(cancellation.Token));
+            Assert(coordinator.State == RoutingRuntimeCoordinatorState.SetupReady &&
+                   cancelled.Ownership.Owner is null &&
+                   cancelled.Legacy.StartCalls == 0 && cancelled.Legacy.StopCalls == 0 &&
+                   cancelled.Routing.CommitCalls == 0 && cancelled.Routing.StartCalls == 0,
+                "Cancellation before a durable fresh fence must release ownership without starting Legacy.");
+        }
+        finally
+        {
+            cancelled.Dispose();
+        }
+    }
+
+    private static async Task AssertFreshDurableFailuresRemainRoutingFencedAsync()
+    {
+        var prepared = Fixture.CreateFresh();
+        try
+        {
+            prepared.Routing.PreparationFence = true;
+            prepared.Routing.PrepareError = new IOException("durable fresh marker written");
+            var coordinator = prepared.CreateCoordinator(new(true, LegacyRuntimeAllowed: false));
+            var result = await coordinator.StartAsync();
+            Assert(result.Status == RoutingRuntimeTransitionStatus.PreparationFailedRecoveryNeeded &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded &&
+                   prepared.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   prepared.Legacy.StartCalls == 0 && prepared.Legacy.StopCalls == 0,
+                "Once fresh preparation is durable, failure must retain Routing ownership for recovery.");
+
+            prepared.Routing.PrepareError = null;
+            var recovered = await coordinator.StartAsync();
+            Assert(recovered.Status == RoutingRuntimeTransitionStatus.Started &&
+                   prepared.Routing.PrepareCalls == 2 &&
+                   prepared.Routing.CommitCalls == 1 &&
+                   prepared.Routing.StartCalls == 1 &&
+                   prepared.Legacy.StartCalls == 0 && prepared.Legacy.StopCalls == 0,
+                "A same-process retry after a fenced fresh preparation failure must resume preparation before authority commit and never touch Legacy.");
+        }
+        finally
+        {
+            prepared.Dispose();
+        }
+
+        var commit = Fixture.CreateFresh();
+        try
+        {
+            commit.Routing.CommitError = new IOException("authority commit uncertain");
+            var coordinator = commit.CreateCoordinator(new(true, LegacyRuntimeAllowed: false));
+            var result = await coordinator.StartAsync();
+            Assert(result.Status == RoutingRuntimeTransitionStatus.AuthorityCommitFailedRecoveryNeeded &&
+                   coordinator.State == RoutingRuntimeCoordinatorState.RoutingRecoveryNeeded &&
+                   commit.Ownership.Owner == ClipProcessingRuntimeOwner.Routing &&
+                   commit.Legacy.StartCalls == 0 && commit.Legacy.StopCalls == 0,
+                "A fresh failure at the authority boundary must remain fenced under Routing.");
+        }
+        finally
+        {
+            commit.Dispose();
+        }
+    }
+
     private static async Task AssertDurablePreparationFailureFencesLegacyAsync()
     {
         var fixture = Fixture.Create();
@@ -147,7 +285,7 @@ internal static class RoutingRuntimeCoordinatorTests
         fixture.Routing.PrepareError = failure;
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             var result = await coordinator.StartAsync();
             Assert(result.Status ==
                        RoutingRuntimeTransitionStatus.PreparationFailedRecoveryNeeded &&
@@ -181,7 +319,7 @@ internal static class RoutingRuntimeCoordinatorTests
         fixture.Routing.DuringPrepare = cancellation.Cancel;
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             await AssertThrowsAsync<OperationCanceledException>(() =>
                 coordinator.StartAsync(cancellation.Token));
             Assert(fixture.Routing.PrepareCalls == 1 &&
@@ -286,7 +424,7 @@ internal static class RoutingRuntimeCoordinatorTests
         fixture.Routing.CommitError = new IOException("commit outcome ambiguous");
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             var failed = await coordinator.StartAsync();
             Assert(failed.Status ==
                    RoutingRuntimeTransitionStatus.AuthorityCommitFailedRecoveryNeeded &&
@@ -318,7 +456,7 @@ internal static class RoutingRuntimeCoordinatorTests
         fixture.Routing.DuringCommit = cancellation.Cancel;
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             await AssertThrowsAsync<OperationCanceledException>(() =>
                 coordinator.StartAsync(cancellation.Token));
             Assert(fixture.Routing.CommitCalls == 1 && fixture.Routing.StartCalls == 1 &&
@@ -339,7 +477,7 @@ internal static class RoutingRuntimeCoordinatorTests
         fixture.Routing.GateState = RoutingRuntimeGateState.MigrationMarkerMissing;
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             var result = await coordinator.StartAsync();
             Assert(result.Status == RoutingRuntimeTransitionStatus.GateRejectedRecoveryNeeded &&
                    result.GateInspection?.State ==
@@ -370,7 +508,7 @@ internal static class RoutingRuntimeCoordinatorTests
             new HashSet<ClipCaptureSource> { ClipCaptureSource.Nvidia };
         try
         {
-            var result = await fixture.CreateCoordinator(new(true)).StartAsync();
+            var result = await fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true)).StartAsync();
             Assert(result.Status == RoutingRuntimeTransitionStatus.GateRejectedRecoveryNeeded &&
                    result.GateInspection?.State == RoutingRuntimeGateState.Enabled &&
                    result.GateInspection.RequiredLegacySource == ClipCaptureSource.SteelSeriesGg &&
@@ -392,7 +530,7 @@ internal static class RoutingRuntimeCoordinatorTests
         fixture.Routing.StartError = new InvalidOperationException("startup failed");
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             var result = await coordinator.StartAsync();
             Assert(result.Status ==
                    RoutingRuntimeTransitionStatus.RoutingStartFailedRecoveryNeeded &&
@@ -424,7 +562,7 @@ internal static class RoutingRuntimeCoordinatorTests
         try
         {
             await AssertThrowsAsync<OperationCanceledException>(() =>
-                fixture.CreateCoordinator(new(true)).StartAsync(cancellation.Token));
+                fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true)).StartAsync(cancellation.Token));
             Assert(fixture.Routing.StartCalls == 0 &&
                    fixture.Routing.CommitCalls == 0 &&
                    fixture.Legacy.StartCalls == 1 &&
@@ -442,7 +580,7 @@ internal static class RoutingRuntimeCoordinatorTests
         var fixture = Fixture.Create();
         try
         {
-            var coordinator = fixture.CreateCoordinator(new(true));
+            var coordinator = fixture.CreateCoordinator(new(true, LegacyRuntimeAllowed: true));
             _ = await coordinator.StartAsync();
             fixture.Routing.StopError = new InvalidOperationException("stop failed");
 
@@ -554,6 +692,17 @@ internal static class RoutingRuntimeCoordinatorTests
                 new FakeRoutingRuntime(events),
                 events,
                 routingOwnership);
+        }
+
+        internal static Fixture CreateFresh()
+        {
+            var ownership = new ClipProcessingOwnershipCoordinator();
+            var events = new List<string>();
+            return new Fixture(
+                ownership,
+                new FakeLegacyRuntime(ownership, initialOwnership: null, events),
+                new FakeRoutingRuntime(events),
+                events);
         }
 
         internal RoutingRuntimeCoordinator CreateCoordinator(

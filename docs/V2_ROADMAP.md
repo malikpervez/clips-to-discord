@@ -151,14 +151,31 @@ soak tests remain phase gates before release.
 - The Discord-first foundation now includes crash-safe plans, encrypted named Discord connections,
   operator retry/approval controls, the Figma-aligned Routes editor, and an active production
   runtime shared by ClipCord Capture and the exact SteelSeries/NVIDIA watched-folder adapters.
-- The first activation quiesces the 1.x watcher, converts its initial ignored-file baseline to
-  content-hash exclusions, commits the equivalent Discord or File into Library route, and verifies
-  that snapshot before writing durable Routing execution authority. The prepared migration and
-  authority also carry privacy-safe hashes for the exact Capture library path and native Windows
-  directory identity. Cold startup verifies strict Capture settings and both hashes before orphan
-  cleanup, journal recovery, capture-host startup, Gallery access, outbox reconciliation, or active
-  Routing work. The live process retains a no-delete handle for that directory and shares one
-  renewable permit across capture, silhouette, Gallery, planning, delivery, and filing boundaries.
+- A profile is admitted to 1.x migration only when structurally valid settings and a matching,
+  strictly readable watcher state already exist when 2.0 evaluates it. The admission-only probe
+  accepts the released versioned watcher schemas v2, v3, and v4 plus the exact released
+  unversioned v1.0-v1.1 schema. Each is immediately recorded as a valid legacy upgrade; v2, v3,
+  and unversioned state are upgraded safely to v4 by the legacy runtime before Routing activates.
+  The distribution-neutral decision is persisted only when evidence proves a valid legacy upgrade
+  or a clearly fresh profile. Locked, corrupt, unavailable, unsupported, incomplete, or conflicting
+  evidence remains unrecorded, fails closed for that launch, and is reconsidered on a later launch.
+  This prevents a transient first-start condition from permanently forfeiting a genuine migration.
+  A clearly fresh unpackaged or Microsoft Store profile keeps zero
+  automatic routes and remains in setup-required state until the user explicitly creates a first
+  route. Profiles that already ran an earlier 2.0 preview may already contain legacy-shaped state;
+  retained preview migration evidence remains authoritative. For an admitted upgrade, the first
+  activation quiesces the 1.x
+  watcher, converts its initial ignored-file baseline to content-hash exclusions, commits exactly one
+  route labeled **Imported from ClipCord 1.x** with the equivalent Discord or File into Library
+  behavior, and verifies that snapshot before writing durable Routing execution authority. Existing
+  preview migrations retain their older durable route label so their signed payload remains
+  verifiable; the Routes UI displays the current imported label without mutating that payload. The
+  prepared migration and authority also carry privacy-safe hashes for the exact Capture library path
+  and native Windows directory identity. Cold startup verifies strict Capture settings and both
+  hashes before orphan cleanup, journal recovery, capture-host startup, Gallery access, outbox
+  reconciliation, or active Routing work. The live process retains a no-delete handle for that
+  directory and shares one renewable permit across capture, silhouette, Gallery, planning, delivery,
+  and filing boundaries.
   A lifetime monitor rechecks that permit while Capture is available. Losing settings, migration,
   authority, or native-identity evidence revokes the hotkey, aborts the isolated recorder without
   finalizing its active clip, and pauses every downstream path before another file or outbox

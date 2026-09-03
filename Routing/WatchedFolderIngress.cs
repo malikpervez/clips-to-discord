@@ -129,12 +129,22 @@ internal sealed class RoutingWatchedFolderIngress
                 adapter,
                 marker,
                 snapshotLoad.Document,
+                permit,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (!permit.SamePermit(_featureGate.Inspect())) return Disabled();
-
-        var durable = await _journals.PersistExactAsync(prepared, cancellationToken)
-            .ConfigureAwait(false);
+        RoutingWatchedSourceJournalDocument durable;
+        try
+        {
+            durable = await _journals.PersistExactAsync(
+                    prepared,
+                    cancellationToken,
+                    beforeCommit: () => RequireCurrentJournalPermit(permit))
+                .ConfigureAwait(false);
+        }
+        catch (JournalAuthorityRevokedException)
+        {
+            return Disabled();
+        }
         Remember(durable);
         return await ReconcileJournalAsync(durable, permit, cancellationToken)
             .ConfigureAwait(false);
@@ -236,6 +246,14 @@ internal sealed class RoutingWatchedFolderIngress
         }
     }
 
+    private void RequireCurrentJournalPermit(RoutingRuntimeGateInspection expected)
+    {
+        if (!expected.SamePermit(_featureGate.Inspect()))
+        {
+            throw new JournalAuthorityRevokedException();
+        }
+    }
+
     private async Task<RoutingWatchedIngressResult> ReconcileJournalAsync(
         RoutingWatchedSourceJournalDocument journal,
         RoutingRuntimeGateInspection permit,
@@ -244,7 +262,8 @@ internal sealed class RoutingWatchedFolderIngress
         RoutingWatchedJournalModel.Validate(journal);
         if (!journal.MarkerPayloadFingerprint.Equals(
                 permit.MarkerPayloadFingerprint, StringComparison.OrdinalIgnoreCase) ||
-            journal.CaptureSource != permit.RequiredLegacySource)
+            journal.CaptureSource != permit.RequiredLegacySource ||
+            !permit.SamePermit(_featureGate.Inspect()))
         {
             return Disabled();
         }
@@ -364,4 +383,8 @@ internal sealed class RoutingWatchedFolderIngress
         null,
         null,
         null);
+
+    private sealed class JournalAuthorityRevokedException : Exception
+    {
+    }
 }

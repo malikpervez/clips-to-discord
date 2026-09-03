@@ -69,7 +69,8 @@ internal static class RoutingRuntimeBridgeTests
             stateStore,
             () => currentSettings,
             () => connectionIds,
-            () => captureLibraryBinding);
+            () => captureLibraryBinding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
         var migrationPlan = CreateMigrationPlan(
             currentSettings,
             drained,
@@ -337,7 +338,8 @@ internal static class RoutingRuntimeBridgeTests
             stateStore,
             () => settings,
             () => connectionIds,
-            () => captureLibraryBinding);
+            () => captureLibraryBinding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
         var ownership = new ClipProcessingOwnershipCoordinator();
         Assert(ownership.TryAcquire(
                    ClipProcessingRuntimeOwner.Legacy,
@@ -470,7 +472,8 @@ internal static class RoutingRuntimeBridgeTests
             stateStore,
             () => settings,
             () => connectionIds,
-            () => captureLibraryBinding);
+            () => captureLibraryBinding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
         var ownership = new ClipProcessingOwnershipCoordinator();
         Assert(ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var lease) &&
                lease is not null,
@@ -1275,7 +1278,8 @@ internal static class RoutingRuntimeBridgeTests
             legacyStateStore,
             () => legacySettings,
             () => connectionIds,
-            () => captureLibraryBinding);
+            () => captureLibraryBinding,
+            () => LegacyRoutingMigrationAdmission.ValidLegacyUpgrade);
         var ownership = new ClipProcessingOwnershipCoordinator();
         if (!ownership.TryAcquire(ClipProcessingRuntimeOwner.Routing, out var routingLease) ||
             routingLease is null)
@@ -1363,7 +1367,8 @@ internal static class RoutingRuntimeBridgeTests
                 state,
                 LegacyWorkerQuiesced: true,
                 connectionIds,
-                captureLibraryBinding),
+                captureLibraryBinding,
+                LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
             Now);
         return readiness.Plan ?? throw new InvalidOperationException(
             $"The activation fixture migration plan is unavailable ({readiness.Status}).");

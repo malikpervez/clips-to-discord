@@ -179,6 +179,7 @@ internal sealed class RoutingRuntimeFeatureGate
     private readonly LegacyRoutingMigrationMarkerStore? _migrationMarkers;
     private readonly RoutingSnapshotStore? _routingSnapshots;
     private readonly ILegacyRoutingActivationEvidenceSource? _activationEvidence;
+    private readonly IFreshRoutingActivationEvidenceSource? _freshActivationEvidence;
     private readonly ClipProcessingOwnershipLease? _ownership;
     private readonly IReadOnlySet<ClipCaptureSource> _coveredLegacySources;
     private readonly RoutingExecutionAuthorityStore? _executionAuthority;
@@ -188,6 +189,7 @@ internal sealed class RoutingRuntimeFeatureGate
         LegacyRoutingMigrationMarkerStore? migrationMarkers,
         RoutingSnapshotStore? routingSnapshots,
         ILegacyRoutingActivationEvidenceSource? activationEvidence,
+        IFreshRoutingActivationEvidenceSource? freshActivationEvidence,
         ClipProcessingOwnershipLease? ownership,
         IReadOnlySet<ClipCaptureSource> coveredLegacySources,
         RoutingExecutionAuthorityStore? executionAuthority)
@@ -196,6 +198,7 @@ internal sealed class RoutingRuntimeFeatureGate
         _migrationMarkers = migrationMarkers;
         _routingSnapshots = routingSnapshots;
         _activationEvidence = activationEvidence;
+        _freshActivationEvidence = freshActivationEvidence;
         _ownership = ownership;
         foreach (var source in coveredLegacySources)
         {
@@ -212,6 +215,7 @@ internal sealed class RoutingRuntimeFeatureGate
         migrationMarkers: null,
         routingSnapshots: null,
         activationEvidence: null,
+        freshActivationEvidence: null,
         ownership: null,
         coveredLegacySources: FrozenSet<ClipCaptureSource>.Empty,
         executionAuthority: null);
@@ -230,7 +234,8 @@ internal sealed class RoutingRuntimeFeatureGate
         ILegacyRoutingActivationEvidenceSource activationEvidence,
         ClipProcessingOwnershipLease ownership,
         IReadOnlySet<ClipCaptureSource> coveredLegacySources,
-        RoutingExecutionAuthorityStore? executionAuthority = null)
+        RoutingExecutionAuthorityStore? executionAuthority = null,
+        IFreshRoutingActivationEvidenceSource? freshActivationEvidence = null)
     {
         ArgumentNullException.ThrowIfNull(migrationMarkers);
         ArgumentNullException.ThrowIfNull(routingSnapshots);
@@ -242,6 +247,7 @@ internal sealed class RoutingRuntimeFeatureGate
             migrationMarkers,
             routingSnapshots,
             activationEvidence,
+            freshActivationEvidence,
             ownership,
             coveredLegacySources,
             executionAuthority);
@@ -302,6 +308,14 @@ internal sealed class RoutingRuntimeFeatureGate
                 ownership.Epoch,
                 marker.Document.PayloadFingerprint,
                 executionAuthorityActivationId: authorityDocument.ActivationId);
+        }
+
+        if (marker.Document.Origin == RoutingActivationOrigin.FreshSetup)
+        {
+            return InspectFresh(
+                marker.Document,
+                authorityDocument,
+                ownership.Epoch);
         }
 
         var evidence = _activationEvidence?.Inspect();
@@ -416,6 +430,90 @@ internal sealed class RoutingRuntimeFeatureGate
             marker.Document.PayloadFingerprint,
             ownership.Epoch,
             requiredLegacySource,
+            _coveredLegacySources,
+            authorityDocument.ActivationId);
+    }
+
+    private RoutingRuntimeGateInspection InspectFresh(
+        LegacyRoutingMigrationMarker marker,
+        RoutingExecutionAuthorityDocument authorityDocument,
+        long ownershipEpoch)
+    {
+        var evidence = _freshActivationEvidence?.Inspect(marker);
+        if (evidence is null || !evidence.Loaded || evidence.WatchState.State is null ||
+            evidence.Plan is null)
+        {
+            return Inspection(
+                evidence?.Status == FreshRoutingActivationEvidenceStatus.WatchStateUnavailable
+                    ? RoutingRuntimeGateState.LegacyStateUnavailable
+                    : RoutingRuntimeGateState.MigrationEvidenceMismatch,
+                ownershipEpoch,
+                marker.PayloadFingerprint,
+                executionAuthorityActivationId: authorityDocument.ActivationId);
+        }
+
+        var state = evidence.WatchState.State;
+        var requiredSource = AppSettings.NormalizeCaptureSource(state.CaptureSource);
+        if (!Enum.IsDefined(requiredSource) || state.CaptureSource != requiredSource ||
+            requiredSource != authorityDocument.RequiredLegacySource)
+        {
+            return Inspection(
+                RoutingRuntimeGateState.ExecutionAuthorityMismatch,
+                ownershipEpoch,
+                marker.PayloadFingerprint,
+                requiredLegacySource: requiredSource,
+                executionAuthorityActivationId: authorityDocument.ActivationId);
+        }
+
+        var plan = evidence.Plan;
+        if (plan.Origin != RoutingActivationOrigin.FreshSetup ||
+            plan.MigrationId != marker.MigrationId ||
+            plan.Mode != marker.Mode || plan.Scope != marker.Scope ||
+            plan.CaptureLibraryBinding != marker.CaptureLibraryBinding ||
+            !plan.SourceFingerprint.Equals(marker.SourceFingerprint, StringComparison.Ordinal) ||
+            plan.ContentHashExclusions != marker.ContentHashExclusions ||
+            plan.Route != marker.Route)
+        {
+            return Inspection(
+                RoutingRuntimeGateState.MigrationEvidenceMismatch,
+                ownershipEpoch,
+                marker.PayloadFingerprint,
+                requiredLegacySource: requiredSource,
+                executionAuthorityActivationId: authorityDocument.ActivationId);
+        }
+
+        var snapshot = _routingSnapshots?.Load();
+        if (snapshot is null || !snapshot.LoadedFromDisk || snapshot.Document is null)
+        {
+            return Inspection(
+                RoutingRuntimeGateState.RoutingSnapshotUnavailable,
+                ownershipEpoch,
+                marker.PayloadFingerprint,
+                requiredLegacySource: requiredSource,
+                executionAuthorityActivationId: authorityDocument.ActivationId);
+        }
+
+        if (!_coveredLegacySources.Contains(requiredSource))
+        {
+            return Inspection(
+                RoutingRuntimeGateState.SourceCoverageMissing,
+                ownershipEpoch,
+                marker.PayloadFingerprint,
+                snapshot.Document.Generation,
+                requiredSource,
+                authorityDocument.ActivationId);
+        }
+
+        return new RoutingRuntimeGateInspection(
+            RoutingRuntimeGateState.Enabled,
+            0,
+            0,
+            0,
+            0,
+            snapshot.Document.Generation,
+            marker.PayloadFingerprint,
+            ownershipEpoch,
+            requiredSource,
             _coveredLegacySources,
             authorityDocument.ActivationId);
     }

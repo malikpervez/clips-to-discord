@@ -993,7 +993,8 @@ internal static class RoutingCaptureLibraryBindingTests
                 state,
                 LegacyWorkerQuiesced: true,
                 DiscordConnectionIds: [],
-                captureLibraryBinding),
+                captureLibraryBinding,
+                LegacyRoutingMigrationAdmission.ValidLegacyUpgrade),
             Now);
         Assert(readiness.CanCommit && readiness.Plan is not null,
             "The Capture library cold-start fixture must produce a valid migration plan.");

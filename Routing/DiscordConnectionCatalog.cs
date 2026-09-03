@@ -269,17 +269,67 @@ internal sealed class DiscordConnectionCatalogStore
     internal RoutingDocumentLoadResult<DiscordConnectionCatalogDocument> Load(
         CancellationToken cancellationToken = default) => _store.Load(cancellationToken);
 
-    internal Task<DiscordConnectionCatalogDocument> SaveAsync(
+    internal async Task<DiscordConnectionCatalogDocument> SaveAsync(
         DiscordConnectionCatalogDocument document,
         long expectedGeneration,
-        CancellationToken cancellationToken = default) =>
-        _store.SaveAsync(document, expectedGeneration, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        using var gate = await RoutingConnectionExecutionGate.EnterAsync(
+                Path, cancellationToken)
+            .ConfigureAwait(false);
+        return await _store.SaveAsync(document, expectedGeneration, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal Task<DiscordConnectionCatalogDocument> SaveWithinExecutionGateAsync(
+        DiscordConnectionCatalogDocument document,
+        long expectedGeneration,
+        CancellationToken cancellationToken = default,
+        Action? beforeCommit = null) =>
+        _store.SaveAsync(document, expectedGeneration, cancellationToken, beforeCommit);
 
     internal Task<DiscordConnectionCatalogDocument> LoadOrCreateAsync(
         DateTimeOffset? now = null,
         CancellationToken cancellationToken = default) =>
         _store.LoadOrCreateAsync(
             () => DiscordConnectionCatalogModel.CreateEmpty(now), cancellationToken);
+}
+
+/// <summary>
+/// Process-wide linearization boundary between Discord connection mutations and a fresh route's
+/// first execution-authority commit. The desktop application mutex excludes a second ClipCord
+/// process; the canonical catalog path joins independent UI/runtime catalog objects here.
+/// </summary>
+internal static class RoutingConnectionExecutionGate
+{
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+        string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
+    internal static IDisposable NoopLease { get; } = new Noop();
+
+    internal static async ValueTask<IDisposable> EnterAsync(
+        string catalogPath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(catalogPath);
+        var key = System.IO.Path.GetFullPath(catalogPath);
+        var gate = Gates.GetOrAdd(key, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new Lease(gate);
+    }
+
+    private sealed class Lease(SemaphoreSlim gate) : IDisposable
+    {
+        private SemaphoreSlim? _gate = gate;
+
+        public void Dispose() => Interlocked.Exchange(ref _gate, null)?.Release();
+    }
+
+    private sealed class Noop : IDisposable
+    {
+        public void Dispose()
+        {
+        }
+    }
 }
 
 internal interface IDiscordWebhookProtector
@@ -455,6 +505,12 @@ internal sealed class DiscordConnectionCatalog : IRoutingConnectionMembership
             loaded.Document.Connections.Select(ToSummary).ToArray());
     }
 
+    internal string StorePath => _store.Path;
+
+    internal ValueTask<IDisposable> EnterExecutionGateAsync(
+        CancellationToken cancellationToken = default) =>
+        RoutingConnectionExecutionGate.EnterAsync(StorePath, cancellationToken);
+
     bool IRoutingConnectionMembership.IsReady(
         RoutingDestinationKind destination,
         string connectionId,
@@ -470,6 +526,10 @@ internal sealed class DiscordConnectionCatalog : IRoutingConnectionMembership
             connection.ConnectionId.Equals(connectionId, StringComparison.Ordinal) &&
             connection.Health == DiscordConnectionHealth.Ready);
     }
+
+    ValueTask<IDisposable> IRoutingConnectionMembership.EnterExecutionGateAsync(
+        CancellationToken cancellationToken) =>
+        RoutingConnectionExecutionGate.EnterAsync(StorePath, cancellationToken);
 
     internal async Task<DiscordConnectionMutationResult> AddAsync(
         string displayName,
@@ -587,6 +647,9 @@ internal sealed class DiscordConnectionCatalog : IRoutingConnectionMembership
         CancellationToken cancellationToken = default)
     {
         if (!TryValidateConnectionId(connectionId)) return InvalidInput();
+        using var connectionGate = await RoutingConnectionExecutionGate.EnterAsync(
+                StorePath, cancellationToken)
+            .ConfigureAwait(false);
         for (var attempt = 0; attempt < 6; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -624,7 +687,8 @@ internal sealed class DiscordConnectionCatalog : IRoutingConnectionMembership
                 timestamp);
             try
             {
-                await _store.SaveAsync(next, current.Generation, cancellationToken)
+                await _store.SaveWithinExecutionGateAsync(
+                        next, current.Generation, cancellationToken)
                     .ConfigureAwait(false);
                 return Result(DiscordConnectionMutationStatus.Removed,
                     "The Discord connection was removed.", ToSummary(existing));
@@ -989,6 +1053,8 @@ internal sealed class DiscordConnectionCatalog : IRoutingConnectionMembership
 internal enum LegacyDiscordConnectionCutoverStatus
 {
     Completed,
+    MigrationIncomplete,
+    NotAdmitted,
     ConnectionUnavailable
 }
 
@@ -1030,12 +1096,36 @@ internal sealed class LegacyDiscordConnectionCutoverAdapter
         WatchState watchState,
         bool legacyWorkerQuiesced,
         RoutingCaptureLibraryBinding captureLibraryBinding,
+        LegacyRoutingMigrationAdmission admission,
         DateTimeOffset? now = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int importedRouteLabelVersion =
+            LegacyRoutingMigrationPlanner.CurrentImportedRouteLabelVersion)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(watchState);
         RoutingCaptureLibraryBindingModel.Validate(captureLibraryBinding);
+        if (admission != LegacyRoutingMigrationAdmission.ValidLegacyUpgrade)
+        {
+            var denied = await _migration.ExecuteAsync(
+                    new LegacyRoutingMigrationInput(
+                        settings,
+                        watchState,
+                        legacyWorkerQuiesced,
+                        [],
+                        captureLibraryBinding,
+                        admission,
+                        importedRouteLabelVersion),
+                    now,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return new LegacyDiscordConnectionCutoverResult(
+                LegacyDiscordConnectionCutoverStatus.NotAdmitted,
+                denied.Reason,
+                Connection: null,
+                denied);
+        }
+
         DiscordConnectionSummary? connection = null;
         IReadOnlyList<string> connectionIds = [];
         if (settings.UploadToDiscord)
@@ -1062,12 +1152,16 @@ internal sealed class LegacyDiscordConnectionCutoverAdapter
                     watchState,
                     legacyWorkerQuiesced,
                     connectionIds,
-                    captureLibraryBinding),
+                    captureLibraryBinding,
+                    admission,
+                    importedRouteLabelVersion),
                 now,
                 cancellationToken)
             .ConfigureAwait(false);
         return new LegacyDiscordConnectionCutoverResult(
-            LegacyDiscordConnectionCutoverStatus.Completed,
+            cutover.IsCommitted
+                ? LegacyDiscordConnectionCutoverStatus.Completed
+                : LegacyDiscordConnectionCutoverStatus.MigrationIncomplete,
             cutover.Reason,
             connection,
             cutover);

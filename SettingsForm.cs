@@ -247,6 +247,8 @@ internal sealed class SettingsForm : Form
     private readonly Func<Task<bool>>? _retryRoutesRuntimeAsync;
     private readonly IRoutingLocalOnlyModeViewSource? _routingLocalOnlyMode;
     private readonly Func<RoutingUiPresentationSnapshot?>? _routingPresentationProvider;
+    private readonly Func<bool> _showMigratedInputSourceProvider;
+    private readonly Func<RoutingRouteDraft, Task<bool>>? _setupFirstRouteAsync;
     private RoundedPanel? _settingsNavigationItem;
     private RoundedPanel? _homeNavigationItem;
     private RoundedPanel? _activityNavigationItem;
@@ -316,7 +318,10 @@ internal sealed class SettingsForm : Form
         Func<RoutesRuntimeViewState>? routesRuntimeStateProvider = null,
         Func<Task<bool>>? retryRoutesRuntimeAsync = null,
         IRoutingLocalOnlyModeViewSource? localOnlyMode = null,
-        Func<RoutingUiPresentationSnapshot?>? routingPresentationProvider = null)
+        Func<RoutingUiPresentationSnapshot?>? routingPresentationProvider = null,
+        bool showMigratedInputSource = false,
+        Func<RoutingRouteDraft, Task<bool>>? setupFirstRouteAsync = null,
+        Func<bool>? showMigratedInputSourceProvider = null)
     {
         Text = "ClipCord — Settings";
         _ownedApplicationIcon = applicationIcon;
@@ -341,6 +346,9 @@ internal sealed class SettingsForm : Form
         _retryRoutesRuntimeAsync = retryRoutesRuntimeAsync;
         _routingLocalOnlyMode = localOnlyMode;
         _routingPresentationProvider = routingPresentationProvider;
+        _showMigratedInputSourceProvider = showMigratedInputSourceProvider ??
+                                           (() => showMigratedInputSource);
+        _setupFirstRouteAsync = setupFirstRouteAsync;
         _silhouetteSettingsDirectory = Path.GetFullPath(
             silhouetteSettingsDirectory ?? SettingsStore.DataDirectory);
         _ownsActivityHistory = activityHistory is null;
@@ -609,11 +617,9 @@ internal sealed class SettingsForm : Form
                 libraryRoot: _initialCaptureSettings.LibraryRoot,
                 legacyWatchedRoot: _appliedSettings.ClipsFolder),
             localOnlyMode: _routingLocalOnlyMode,
-            migratedInputSource: new RoutingMigratedInputSourceDisplay(
-                $"{AppSettings.DescribeCaptureSource(_appliedSettings.CaptureSource)} · migrated source",
-                $"Existing 1.x folder · {Path.GetFileName(Path.TrimEndingDirectorySeparator(_appliedSettings.ClipsFolder))} · locked to the committed Routing migration",
-                AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource)));
-        _routesPage.OpenSettingsRequested += (_, _) => ShowPage(SettingsPage.Settings);
+            migratedInputSource: null,
+            setupFirstRouteAsync: _setupFirstRouteAsync,
+            migratedInputSourceProvider: GetMigratedInputSourceDisplay);
         _routesPage.DeliveryHistoryRequested += (_, _) => ShowRoutingDeliveryHistory();
         _routesPage.LocalOnlyModeChanged += (_, _) => RefreshRoutingPresentation();
         _silhouetteLayoutsPage = new SilhouetteLayoutEditorView(
@@ -674,6 +680,19 @@ internal sealed class SettingsForm : Form
         pageHost.Controls.Add(_galleryPage);
         pageHost.Controls.Add(_aboutPage);
         return pageHost;
+    }
+
+    private RoutingMigratedInputSourceDisplay? GetMigratedInputSourceDisplay()
+    {
+        if (!_showMigratedInputSourceProvider() ||
+            string.IsNullOrWhiteSpace(_appliedSettings.ClipsFolder))
+        {
+            return null;
+        }
+        return new RoutingMigratedInputSourceDisplay(
+            $"{AppSettings.DescribeCaptureSource(_appliedSettings.CaptureSource)} · migrated source",
+            $"Existing 1.x folder · {Path.GetFileName(Path.TrimEndingDirectorySeparator(_appliedSettings.ClipsFolder))} · locked to the committed Routing migration",
+            AppSettings.NormalizeCaptureSource(_appliedSettings.CaptureSource));
     }
 
     private void OpenHomeFolder(string? path)
