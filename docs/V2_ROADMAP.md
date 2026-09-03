@@ -229,10 +229,13 @@ soak tests remain phase gates before release.
   Shadow mode cannot create production outbox work, call a provider, move or claim a file, alter the
   legacy decision, or advertise routing source coverage. It remains a separate developer comparison
   aid and is not part of the active runtime.
-- Active authority deliberately freezes the legacy watched root, capture-source kind, Capture
-  library path/native directory identity, upload-mode switch, and legacy webhook identity. Those
-  fields require a future explicit source/destination switch transaction; unrelated preferences
-  remain editable while Routing continues processing.
+- Active authority deliberately freezes the legacy watched root, capture-source kind, upload-mode
+  switch, and legacy webhook identity. A user-requested Capture-library change now uses its own
+  crash-safe, path-free two-phase successor transaction: Routes pause, the selected root is pinned
+  and recovered, Capture settings and binding authority advance together, and Routes resume against
+  the replacement. Existing captures remain in the previous library. Other protected fields still
+  require explicit source/destination switch transactions; unrelated preferences remain editable
+  while Routing continues processing.
 
 ## Invariants
 

@@ -20,6 +20,8 @@ internal static class RoutingCaptureLibraryBindingTests
         AssertCaptureSettingsInspectionIsStrict(testRoot);
         AssertTrayUsesStrictCaptureSettingsEvidence();
         AssertTrayContinuouslyMonitorsCaptureLibraryAuthority();
+        await AssertRoutedCaptureLibrarySwitchIsCrashSafeAsync(
+            Path.Combine(testRoot, "routed-library-switch"));
         await CaptureLibraryShutdownCoordinationTests.RunAsync(
             Path.Combine(testRoot, "capture-library-shutdown-coordination"));
         await CaptureRecoveryAuthorityTests.RunAsync(
@@ -103,6 +105,64 @@ internal static class RoutingCaptureLibraryBindingTests
                         original.CanonicalPathFingerprint.ToLowerInvariant()
                 }),
             "Lowercase SHA-256 text must not be accepted as a canonical Capture library binding.");
+    }
+
+    private static async Task AssertRoutedCaptureLibrarySwitchIsCrashSafeAsync(string root)
+    {
+        var oldRoot = Directory.CreateDirectory(Path.Combine(root, "old-library")).FullName;
+        var newRoot = Directory.CreateDirectory(Path.Combine(root, "new-library")).FullName;
+        var thirdRoot = Directory.CreateDirectory(Path.Combine(root, "third-library")).FullName;
+        var oldBinding = RoutingCaptureLibraryBindingModel.Create(oldRoot);
+        var newBinding = RoutingCaptureLibraryBindingModel.Create(newRoot);
+        var thirdBinding = RoutingCaptureLibraryBindingModel.Create(thirdRoot);
+        var evidence = await CreateCommittedEvidenceAsync(
+            Path.Combine(root, "authority"),
+            oldBinding,
+            withExecutionAuthority: true);
+        var authority = evidence.Authority.Load().Document ??
+            throw new InvalidOperationException(
+                "The routed Capture-library switch fixture is missing authority.");
+        var switchPath = Path.Combine(
+            root,
+            "switch-state",
+            RoutingCaptureLibrarySwitchStore.FileName);
+        var store = new RoutingCaptureLibrarySwitchStore(switchPath, () => Now.AddMinutes(1));
+
+        Assert(store.Resolve(authority, oldBinding) == oldBinding,
+            "Missing switch state must retain the Capture library from original Routing authority.");
+        var abandonedBeforeSettings = store.Prepare(authority, oldBinding, newBinding);
+        Assert(store.Resolve(authority, oldBinding) == oldBinding &&
+               store.Load().Document is
+               {
+                   Phase: RoutingCaptureLibrarySwitchPhase.Stable,
+                   PendingBinding: null
+               } aborted &&
+               aborted.EffectiveBinding == oldBinding,
+            "A crash before Capture settings change must durably abort the prepared switch.");
+
+        var abandonedAfterSettings = store.Prepare(authority, oldBinding, newBinding);
+        Assert(store.Resolve(authority, newBinding) == newBinding &&
+               store.Load().Document is
+               {
+                   Phase: RoutingCaptureLibrarySwitchPhase.Stable,
+                   PendingBinding: null
+               } recovered &&
+               recovered.EffectiveBinding == newBinding,
+            "A crash after Capture settings change must durably finish the prepared switch.");
+
+        var committedThenFailed = store.Prepare(authority, newBinding, thirdBinding);
+        Assert(store.Commit(committedThenFailed) == thirdBinding &&
+               store.RollBack(authority, committedThenFailed) == newBinding &&
+               store.Resolve(authority, newBinding) == newBinding,
+            "A post-commit failure must be reversible through a new durable switch generation.");
+        AssertThrows<InvalidDataException>(() => store.Resolve(authority, thirdBinding),
+            "A settings root outside the stable switch lineage must fail closed.");
+
+        var serialized = File.ReadAllText(switchPath);
+        Assert(!serialized.Contains(oldRoot, StringComparison.OrdinalIgnoreCase) &&
+               !serialized.Contains(newRoot, StringComparison.OrdinalIgnoreCase) &&
+               !serialized.Contains(thirdRoot, StringComparison.OrdinalIgnoreCase),
+            "Capture-library switch authority must persist opaque bindings, never local paths.");
     }
 
     private static void AssertCaptureSettingsInspectionIsStrict(string testRoot)

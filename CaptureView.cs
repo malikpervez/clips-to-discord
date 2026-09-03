@@ -1377,7 +1377,22 @@ internal sealed class CaptureView : UserControl
             ShowNewFolderButton = true
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        var candidate = Path.GetFullPath(dialog.SelectedPath);
+        string candidate;
+        try
+        {
+            candidate = Path.GetFullPath(dialog.SelectedPath);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            MessageBox.Show(
+                this,
+                "Choose a valid local folder for ClipCord Capture.",
+                "Folder not supported",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
         if (CapturePathPolicy.PathsOverlap(candidate, _externalSettings.ClipsFolder))
         {
             MessageBox.Show(
@@ -1423,7 +1438,15 @@ internal sealed class CaptureView : UserControl
                 MessageBoxIcon.Information);
             return;
         }
-        UpdateConfiguration(_settings with { LibraryRoot = candidate });
+        if (UpdateConfiguration(_settings with { LibraryRoot = candidate }))
+        {
+            MessageBox.Show(
+                this,
+                "New ClipCord captures will use this folder. Existing captures remain in the previous library and were not moved.",
+                "Capture folder changed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
     }
 
     private void OpenLibraryRoot(object? sender, EventArgs eventArgs)
@@ -1448,18 +1471,38 @@ internal sealed class CaptureView : UserControl
         }
     }
 
-    private void UpdateConfiguration(CaptureSettings settings)
+    private bool UpdateConfiguration(CaptureSettings settings)
     {
         if (_updating || !HasCaptureLibraryAccess())
         {
             if (!_updating) ApplySettingsToControls();
-            return;
+            return false;
         }
         var normalized = CaptureSettings.Normalize(settings);
-        _saveSettings?.Invoke(normalized);
+        try
+        {
+            _saveSettings?.Invoke(normalized);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException or InvalidOperationException or IOException or
+                UnauthorizedAccessException or ArgumentException or NotSupportedException or
+                PathTooLongException or System.ComponentModel.Win32Exception or
+                System.Security.SecurityException)
+        {
+            Log.Error("ClipCord could not save Capture settings.", exception);
+            MessageBox.Show(
+                this,
+                "ClipCord could not apply that Capture setting. Nothing was changed. Confirm the selected folder is available and try again.",
+                "Capture setting not changed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            ApplySettingsToControls();
+            return false;
+        }
         _settings = normalized;
         SettingsChanged?.Invoke(_settings);
         ApplySettingsToControls();
+        return true;
     }
 
     private void ApplySettingsToControls()

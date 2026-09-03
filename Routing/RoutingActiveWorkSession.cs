@@ -514,7 +514,8 @@ internal sealed class RoutingActiveWorkSession : IAsyncDisposable, IDisposable
         RoutingActiveWorkSessionOptions? options = null,
         RoutingCaptureLibraryPermit? captureLibraryPermit = null,
         Func<DiscordWebhookClient>? discordClientFactory = null,
-        ActivityHistoryStore? activityHistory = null)
+        ActivityHistoryStore? activityHistory = null,
+        RoutingCaptureLibraryBinding? activationCaptureLibraryBinding = null)
     {
         ArgumentNullException.ThrowIfNull(watchedSettings);
         ArgumentNullException.ThrowIfNull(currentWatchedSettings);
@@ -542,6 +543,9 @@ internal sealed class RoutingActiveWorkSession : IAsyncDisposable, IDisposable
             featureGate,
             normalizedWatchedSettings.CaptureSource);
         var captureLibraryBinding = RoutingCaptureLibraryBindingModel.Create(captureRoot);
+        var evidenceCaptureLibraryBinding =
+            activationCaptureLibraryBinding ?? captureLibraryBinding;
+        RoutingCaptureLibraryBindingModel.Validate(evidenceCaptureLibraryBinding);
         var effectiveCaptureLibraryPermit = captureLibraryPermit ??
             new RoutingCaptureLibraryPermit(
                 captureLibraryBinding,
@@ -570,7 +574,7 @@ internal sealed class RoutingActiveWorkSession : IAsyncDisposable, IDisposable
             snapshots,
             markers,
             permit,
-            captureLibraryBinding);
+            evidenceCaptureLibraryBinding);
         var journals = new RoutingWatchedSourceJournalStore(
             normalizedStorage.WatchedJournalRoot);
         var receipts = new RoutingDeliveryReceiptStore(
@@ -1216,7 +1220,7 @@ internal sealed class RoutingActiveWorkSession : IAsyncDisposable, IDisposable
         RoutingSnapshotStore snapshots,
         LegacyRoutingMigrationMarkerStore markers,
         RoutingRuntimeGateInspection permit,
-        RoutingCaptureLibraryBinding captureLibraryBinding)
+        RoutingCaptureLibraryBinding activationCaptureLibraryBinding)
     {
         var snapshot = snapshots.Load();
         var marker = markers.Load();
@@ -1224,7 +1228,7 @@ internal sealed class RoutingActiveWorkSession : IAsyncDisposable, IDisposable
             snapshot.Document.Generation != permit.RoutingGeneration ||
             !marker.LoadedFromDisk || marker.Document is null ||
             marker.Document.Phase != LegacyRoutingMigrationMarkerPhase.Committed ||
-            marker.Document.CaptureLibraryBinding != captureLibraryBinding ||
+            marker.Document.CaptureLibraryBinding != activationCaptureLibraryBinding ||
             !marker.Document.PayloadFingerprint.Equals(
                 permit.MarkerPayloadFingerprint, StringComparison.OrdinalIgnoreCase))
         {

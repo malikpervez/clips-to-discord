@@ -4,6 +4,14 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 2.0.1 — 2026-09-03
+
+- Let users change the ClipCord Capture folder while Routes are active. The handoff pauses Routes,
+  recovers and pins the selected folder, commits a crash-safe local authority update, and then
+  resumes processing without moving existing captures.
+- Keep a rejected Capture setting inside the app with a clear message instead of allowing the
+  underlying exception to escape into a Windows just-in-time debugging dialog.
+
 ## 2.0.0 — 2026-09-02
 
 - Record gameplay directly with ClipCord Capture through Instant Replay or manual game-window

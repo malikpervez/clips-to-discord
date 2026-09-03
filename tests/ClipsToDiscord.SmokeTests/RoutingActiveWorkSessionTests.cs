@@ -25,12 +25,77 @@ internal static class RoutingActiveWorkSessionTests
         await AssertOptionalXboxDisposeFailureDoesNotShortCircuitOwnedCleanupAsync();
         await AssertProductionFactoryRejectsReplacedCaptureLibraryAsync(
             Path.Combine(testRoot, "capture-library-replaced-before-create"));
+        await AssertProductionFactoryAcceptsAuthorizedCaptureLibrarySwitchAsync(
+            Path.Combine(testRoot, "capture-library-authorized-switch"));
         await AssertRunningSessionWithRetainedPinBlocksReplacementAsync(
             Path.Combine(testRoot, "capture-library-pinned-while-running"));
         await AssertProductionFactorySurvivesRouteEditAndExecutesAsync(
             Path.Combine(testRoot, "production-route-edit"));
         await AssertProductionWatchedDiscordDeliveryIsRestartSafeAsync(
             Path.Combine(testRoot, "d"));
+    }
+
+    private static async Task AssertProductionFactoryAcceptsAuthorizedCaptureLibrarySwitchAsync(
+        string root)
+    {
+        using var authority = await AuthorityFixture.CreateAsync(root);
+        var activationBinding = RoutingCaptureLibraryBindingModel.Create(
+            authority.CaptureSettings.LibraryRoot);
+        var replacementRoot = Directory.CreateDirectory(
+            Path.Combine(root, "replacement-capture-library")).FullName;
+        var replacementSettings = CaptureSettings.Normalize(
+            authority.CaptureSettings with { LibraryRoot = replacementRoot });
+        var replacementBinding = RoutingCaptureLibraryBindingModel.Create(replacementRoot);
+        var replacementPermit = new RoutingCaptureLibraryPermit(
+            replacementBinding,
+            () => replacementBinding);
+
+        RoutingActiveWorkSession? rejectedSession = null;
+        var rejected = false;
+        try
+        {
+            try
+            {
+                rejectedSession = RoutingActiveWorkSession.CreateProduction(
+                    authority.Settings,
+                    () => authority.Settings,
+                    replacementSettings,
+                    () => replacementSettings,
+                    authority.Lease,
+                    authority.Gate,
+                    authority.Storage,
+                    captureLibraryPermit: replacementPermit);
+            }
+            catch (InvalidOperationException)
+            {
+                rejected = true;
+            }
+            Assert(rejected,
+                "A replacement Capture library must not bypass immutable activation evidence without an authorized successor binding.");
+        }
+        finally
+        {
+            if (rejectedSession is not null)
+            {
+                await rejectedSession.DisposeAsync();
+            }
+        }
+
+        await using var switched = RoutingActiveWorkSession.CreateProduction(
+            authority.Settings,
+            () => authority.Settings,
+            replacementSettings,
+            () => replacementSettings,
+            authority.Lease,
+            authority.Gate,
+            authority.Storage,
+            captureLibraryPermit: replacementPermit,
+            activationCaptureLibraryBinding: activationBinding);
+        await switched.StartAsync();
+        Assert(switched.State == RoutingActiveWorkSessionState.Running &&
+               switched.Failure is null,
+            "A routed work session must restart against the authorized replacement Capture library while retaining its original activation evidence.");
+        await switched.StopAsync();
     }
 
     internal static Task RunProductionWatchedDiscordE2EAsync(string testRoot) =>

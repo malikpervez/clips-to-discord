@@ -684,9 +684,9 @@ internal static class TrayShutdownFallbacks
 }
 
 /// <summary>
-/// Capture LibraryRoot is part of Routing's durable source contract. Until a durable switch
-/// transaction exists, only Legacy authority may change it. This guard is deliberately pure and
-/// must run before hotkeys, settings, runtime state, or files are changed.
+/// Capture LibraryRoot is part of Routing's durable source contract. A trusted Legacy profile can
+/// change it directly; a committed Routing profile must use the separate crash-safe library-switch
+/// transaction. Blocked or unreadable authority never permits a change.
 /// </summary>
 internal static class TrayCaptureLibraryRootAuthorityGuard
 {
@@ -700,18 +700,12 @@ internal static class TrayCaptureLibraryRootAuthorityGuard
         ArgumentNullException.ThrowIfNull(authority);
 
         var changed = !SameCanonicalPath(currentLibraryRoot, requestedLibraryRoot);
-        if (!changed || authority.LegacyPermitted) return changed;
+        if (!changed || authority.LegacyPermitted || authority.RoutingRequired) return changed;
         if (authority.Blocked)
         {
             throw new InvalidDataException(
                 $"Routing execution authority cannot be trusted ({authority.LoadStatus}). " +
                 "The Capture library was not changed.");
-        }
-        if (authority.RoutingRequired)
-        {
-            throw new InvalidOperationException(
-                "Active Routes own the Capture library. Change it through a future durable " +
-                "Routing source switch; the Capture library was not changed.");
         }
         throw new InvalidDataException(
             "Routing execution authority has an unsupported state. The Capture library was not changed.");
@@ -1330,6 +1324,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ClipProcessingOwnershipCoordinator _processingOwnership = new();
     private readonly DiscordConnectionCatalog _discordConnectionCatalog = new();
     private readonly RoutingExecutionAuthorityStore _routingAuthorityStore;
+    private readonly RoutingCaptureLibrarySwitchStore _captureLibrarySwitchStore;
     private readonly LegacyRoutingMigrationMarkerStore _routingMigrationMarkers;
     private readonly LegacyRoutingMigrationAdmissionInspection _routingMigrationAdmission;
     private readonly RoutingApplicationLifecycle _routingLifecycle;
@@ -1415,6 +1410,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 captureSettingsInspection.Error);
         }
         _routingAuthorityStore = new RoutingExecutionAuthorityStore();
+        _captureLibrarySwitchStore = new RoutingCaptureLibrarySwitchStore();
         _activityHistory = new ActivityHistoryStore();
         _favorites = new FavoritesService();
         _pendingEditedRecovery = new TrayPendingEditedDispositionRecovery(
@@ -1657,7 +1653,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             CurrentAppSettings,
             () => _discordConnectionCatalog.GetLegacyConnectionIds(
                 CurrentAppSettings()),
-            RequireCurrentCaptureLibraryBinding,
+            RequireRoutingEvidenceCaptureLibraryBinding,
             () => _routingMigrationAdmission.EffectiveAdmission,
             () => _routingMigrationAdmission.ImportedRouteLabelVersion);
         var migration = new LegacyRoutingMigrationCoordinator(snapshots, markers);
@@ -1668,7 +1664,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             CurrentAppSettings,
             watchState,
             cutover,
-            RequireCurrentCaptureLibraryBinding,
+            RequireRoutingEvidenceCaptureLibraryBinding,
             admissionProvider: () => _routingMigrationAdmission.EffectiveAdmission,
             importedRouteLabelVersionProvider: () =>
                 _routingMigrationAdmission.ImportedRouteLabelVersion);
@@ -1680,13 +1676,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _routingAuthorityStore,
             watchState,
             CurrentAppSettings,
-            RequireCurrentCaptureLibraryBinding,
+            RequireRoutingEvidenceCaptureLibraryBinding,
             () => _routingMigrationAdmission.EffectiveAdmission,
             () => Volatile.Read(ref _pendingFreshRouteDraft));
         var freshEvidence = new FreshRoutingActivationEvidenceSource(
             watchState,
             CurrentAppSettings,
-            RequireCurrentCaptureLibraryBinding);
+            RequireRoutingEvidenceCaptureLibraryBinding);
         var productionRuntime = new RoutingProductionRuntime(
             preparer,
             markers,
@@ -1706,7 +1702,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             new TrayLegacyClipProcessingRuntime(this),
             productionRuntime,
             migrationMarkers: markers,
-            currentCaptureLibraryBinding: RequireCurrentCaptureLibraryBinding,
+            currentCaptureLibraryBinding: RequireRoutingEvidenceCaptureLibraryBinding,
             legacyRuntimeAllowed: TrayRoutingAdmissionPolicy.AllowsLegacyRuntime(
                 _routingMigrationAdmission));
     }
@@ -1832,7 +1828,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             featureGate,
             captureLibraryPermit: RequireCaptureLibraryPermit(
                 "starting the Routing work session"),
-            activityHistory: _activityHistory);
+            activityHistory: _activityHistory,
+            activationCaptureLibraryBinding:
+                RequireRoutingEvidenceCaptureLibraryBinding());
         if (Interlocked.CompareExchange(ref _routingSession, session, null) is not null)
         {
             await session.DisposeAsync().ConfigureAwait(false);
@@ -2384,6 +2382,30 @@ internal sealed class TrayApplicationContext : ApplicationContext
             inspection.Settings!.LibraryRoot);
     }
 
+    // Migration and fresh-setup evidence remains permanently bound to the library that existed
+    // when Routing first acquired ownership. A later user-approved switch is validated through
+    // the successor store, then the original binding is returned so the immutable activation
+    // fingerprint continues to validate exactly.
+    private RoutingCaptureLibraryBinding RequireRoutingEvidenceCaptureLibraryBinding()
+    {
+        var current = RequireCurrentCaptureLibraryBinding();
+        var authority = _routingAuthorityStore.Inspect();
+        if (authority.RoutingRequired)
+        {
+            var document = authority.Document ?? throw new InvalidDataException(
+                "Routing authority is missing its Capture-library binding.");
+            var effective = _captureLibrarySwitchStore.Resolve(document, current);
+            RoutingCaptureLibraryBindingModel.RequireExact(effective, current);
+            return document.CaptureLibraryBinding;
+        }
+        if (authority.Blocked)
+        {
+            throw new InvalidDataException(
+                $"Routing authority cannot validate Capture evidence ({authority.LoadStatus}).");
+        }
+        return current;
+    }
+
     private bool TryInitializeCaptureLibraryPermit(
         CaptureSettingsDocumentInspection inspection)
     {
@@ -2544,7 +2566,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 throw new InvalidDataException(
                     "Routing authority does not match its Capture-library migration evidence.");
             }
-            return document.CaptureLibraryBinding;
+            var current = RequireCurrentCaptureLibraryBinding();
+            return _captureLibrarySwitchStore.Resolve(document, current);
         }
         if (authority.Blocked)
         {
@@ -4023,9 +4046,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
         CaptureSettingsDocumentBackup? settingsBackup = null;
         CaptureSettings? failClosedCameraSettings = null;
         var settingsPersisted = false;
+        var settingsWriteAttempted = false;
+        var routingQuiesced = false;
+        var restartRouting = false;
+        RoutingExecutionAuthorityDocument? routingAuthority = null;
+        RoutingCaptureLibrarySwitchDocument? preparedRoutingSwitch = null;
+        RoutingCaptureLibraryPermit? currentPermit = null;
         try
         {
-            RoutingCaptureLibraryPermit currentPermit;
             if (libraryRootChanged)
             {
                 if (Volatile.Read(ref _captureLibraryRevocationScheduled) != 0)
@@ -4059,19 +4087,48 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     "changing Capture settings");
             }
 
+            var operationalAuthority = InspectOperationalRoutingAuthority();
             var authorityApprovedChange = TrayCaptureLibraryRootAuthorityGuard.RequireAllowed(
                 previous.LibraryRoot,
                 settings.LibraryRoot,
-                InspectOperationalRoutingAuthority());
+                operationalAuthority);
             if (authorityApprovedChange != libraryRootChanged)
             {
                 throw new InvalidDataException(
                     "The Capture-library switch decision changed while settings were being validated.");
             }
-            if (libraryRootChanged && ResolveDurableCaptureLibraryBinding() is not null)
+            if (libraryRootChanged && operationalAuthority.RoutingRequired)
+            {
+                routingAuthority = operationalAuthority.Document ??
+                    throw new InvalidDataException(
+                        "Routing authority is missing its Capture-library binding.");
+                var initialRoutingState = _routingLifecycle.State;
+                if (initialRoutingState != RoutingApplicationLifecycleState.RoutingQuiesced)
+                {
+                    SetStatus("Changing Capture folder — pausing Routes");
+                    var stopped = _routingLifecycle.StopAsync(CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    if (stopped.State != RoutingApplicationLifecycleState.RoutingQuiesced ||
+                        stopped.Status is not (RoutingApplicationLifecycleStatus.Stopped or
+                            RoutingApplicationLifecycleStatus.AlreadyStopped))
+                    {
+                        throw new InvalidOperationException(
+                            "Routes could not be paused before changing the Capture library.",
+                            stopped.Error ?? stopped.RoutingTransition?.Error);
+                    }
+                    routingQuiesced = true;
+                    restartRouting = initialRoutingState ==
+                                     RoutingApplicationLifecycleState.RoutingRunning;
+                }
+                _ = currentPermit.RequireCurrent(
+                    "pausing Routes for a Capture-library switch");
+            }
+            else if (libraryRootChanged &&
+                     ResolveDurableCaptureLibraryBinding() is not null)
             {
                 throw new InvalidOperationException(
-                    "The Capture library is already bound to an in-progress Routing migration and cannot be changed.");
+                    "Routes are still finishing their first activation. Try changing the Capture folder again after Routes are active.");
             }
 
             failClosedCameraSettings = previous.IncludeReactionCamera &&
@@ -4147,21 +4204,44 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     throw new InvalidOperationException(
                         "The new Capture library could not be recovered safely, so it was not activated.");
                 }
-            }
-            CaptureSettingsStore.Save(settings);
-            settingsPersisted = true;
-            if (libraryRootChanged)
-            {
-                replacementPermit = CreateCaptureLibraryPermit(
-                    settings.LibraryRoot,
-                    replacementBinding ?? throw new InvalidOperationException(
-                        "The candidate Capture library was not pinned before recovery."));
+                replacementPermit = new RoutingCaptureLibraryPermit(
+                    replacementBinding,
+                    () => RequireAuthorizedCaptureLibraryBinding(
+                        candidateRoot,
+                        replacementBinding));
                 replacementAuthorityCancellation = new CancellationTokenSource();
                 replacementCoordinator = new SilhouetteProcessingCoordinator(
                     settings.LibraryRoot);
                 replacementCoordinator.ProjectSettled += SilhouetteProjectSettled;
+                if (routingAuthority is not null)
+                {
+                    preparedRoutingSwitch = _captureLibrarySwitchStore.Prepare(
+                        routingAuthority,
+                        currentPermit.ExpectedBinding,
+                        replacementBinding,
+                        CancellationToken.None);
+                }
+            }
+            settingsWriteAttempted = true;
+            CaptureSettingsStore.Save(settings);
+            settingsPersisted = true;
+            if (preparedRoutingSwitch is not null)
+            {
+                var committedBinding = _captureLibrarySwitchStore.Commit(
+                    preparedRoutingSwitch,
+                    CancellationToken.None);
+                RoutingCaptureLibraryBindingModel.RequireExact(
+                    replacementBinding ?? throw new InvalidOperationException(
+                        "The replacement Capture-library binding is unavailable."),
+                    committedBinding);
             }
             _captureSettings = settings;
+            if (libraryRootChanged)
+            {
+                _ = (replacementPermit ?? throw new InvalidOperationException(
+                        "The replacement Capture library permit was not established."))
+                    .RequireCurrent("committing the Capture-library switch");
+            }
             if (libraryRootChanged)
             {
                 Volatile.Write(
@@ -4180,9 +4260,22 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 try
                 {
                     oldAuthorityCancellation.Cancel();
-                    oldAuthorityCancellation.Dispose();
                 }
                 catch (ObjectDisposedException) { }
+                catch (Exception exception)
+                {
+                    // The durable and live Capture-library handoff is already complete. A
+                    // misbehaving cancellation callback must not roll it back underneath the
+                    // replacement permit and root pin.
+                    Log.Error(
+                        "ClipCord could not notify every previous Capture-library operation that the folder changed.",
+                        exception);
+                }
+                finally
+                {
+                    try { oldAuthorityCancellation.Dispose(); }
+                    catch (ObjectDisposedException) { }
+                }
                 if (replacementCoordinator is not null)
                 {
                     Volatile.Write(
@@ -4196,6 +4289,36 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     Log.Error(
                         "ClipCord could not release its previous Capture-library pin.",
                         exception);
+                }
+                if (routingQuiesced && restartRouting &&
+                    !_shutdownScheduled && !_exitRequestedAfterReconfiguration)
+                {
+                    try
+                    {
+                        var started = _routingLifecycle.StartAsync(CancellationToken.None)
+                            .GetAwaiter()
+                            .GetResult();
+                        routingQuiesced = false;
+                        HandleProcessingLifecycleResult(started);
+                        if (started.State != RoutingApplicationLifecycleState.RoutingRunning)
+                        {
+                            SetRoutingNeedsAttention(
+                                "Capture folder changed — Routes need attention",
+                                started.Error ?? started.RoutingTransition?.Error);
+                        }
+                    }
+                    catch (Exception restartException)
+                    {
+                        // The new Capture folder and its durable authority are already committed.
+                        // Keep them together and leave Routes paused for an explicit retry.
+                        routingQuiesced = false;
+                        Log.Error(
+                            "ClipCord changed the Capture folder, but could not restart Routes.",
+                            restartException);
+                        SetRoutingNeedsAttention(
+                            "Capture folder changed — Routes need attention",
+                            restartException);
+                    }
                 }
             }
             else
@@ -4233,7 +4356,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             {
                 lock (_captureRecoverySync) _captureRecoveryTask = previousRecovery;
                 replacementPin?.Handle.Dispose();
-                if (settingsPersisted)
+                var settingsRestored = true;
+                if (settingsWriteAttempted || settingsPersisted)
                 {
                     try
                     {
@@ -4246,8 +4370,32 @@ internal sealed class TrayApplicationContext : ApplicationContext
                     }
                     catch (Exception rollbackException)
                     {
+                        settingsRestored = false;
                         Log.Error(
                             "ClipCord could not restore Capture settings after a failed library switch.",
+                            rollbackException);
+                        ScheduleCaptureLibraryRevocation();
+                    }
+                }
+                if (preparedRoutingSwitch is not null && routingAuthority is not null &&
+                    settingsRestored)
+                {
+                    try
+                    {
+                        var restoredBinding = _captureLibrarySwitchStore.RollBack(
+                            routingAuthority,
+                            preparedRoutingSwitch,
+                            CancellationToken.None);
+                        RoutingCaptureLibraryBindingModel.RequireExact(
+                            (currentPermit ?? throw new InvalidOperationException(
+                                "The previous Capture-library permit is unavailable."))
+                            .ExpectedBinding,
+                            restoredBinding);
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        Log.Error(
+                            "ClipCord could not restore Routing Capture-library authority after a failed switch.",
                             rollbackException);
                         ScheduleCaptureLibraryRevocation();
                     }
@@ -4281,6 +4429,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
             {
                 _silhouetteProcessingCoordinator?.UpdateLibraryRoot(
                     _captureSettings.LibraryRoot);
+            }
+            if (routingQuiesced && restartRouting &&
+                !_shutdownScheduled && !_exitRequestedAfterReconfiguration)
+            {
+                try
+                {
+                    var restarted = _routingLifecycle.StartAsync(CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                    routingQuiesced = false;
+                    HandleProcessingLifecycleResult(restarted);
+                }
+                catch (Exception restartException)
+                {
+                    Log.Error(
+                        "ClipCord could not restart Routes after restoring the previous Capture library.",
+                        restartException);
+                    SetRoutingNeedsAttention(
+                        "Routes need attention — Capture folder change was cancelled",
+                        restartException);
+                }
             }
             throw;
         }

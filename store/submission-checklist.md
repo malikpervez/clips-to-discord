@@ -43,6 +43,12 @@ and silhouette layouts, and a crash-safe Routes engine for ClipCord Capture, Ste
 NVIDIA, named watched folders, and Xbox Game DVR sources. Existing ClipCord 1.x profiles migrate
 only from verified local evidence; new profiles start with no automatic route and use guided setup.
 
+### What's new in 2.0.1
+
+ClipCord Capture folders can now be changed while Routes are active. ClipCord safely pauses and
+resumes Routes during the change, keeps existing captures in the previous folder, and shows a clear
+in-app message if a selected folder cannot be used.
+
 ### Suggested feature entries
 
 - Instant Replay and manual game-window recording
