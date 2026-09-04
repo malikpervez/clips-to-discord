@@ -116,6 +116,12 @@ internal static class FigmaIconRenderer
         if (bounds.Width <= 0 || bounds.Height <= 0 || opacity <= 0f) return;
 
         var image = GetImage(asset);
+        var iconSize = Math.Min(bounds.Width, bounds.Height);
+        var destination = new Rectangle(
+            bounds.X + ((bounds.Width - iconSize) / 2),
+            bounds.Y + ((bounds.Height - iconSize) / 2),
+            iconSize,
+            iconSize);
         var state = graphics.Save();
         try
         {
@@ -131,9 +137,10 @@ internal static class FigmaIconRenderer
                 [color.R / 255f, color.G / 255f, color.B / 255f, 0f, 1f]
             ]);
             attributes.SetColorMatrix(matrix, ColorMatrixFlag.Default, ColorAdjustType.Bitmap);
+            attributes.SetWrapMode(WrapMode.TileFlipXY);
             graphics.DrawImage(
                 image,
-                bounds,
+                destination,
                 0,
                 0,
                 image.Width,
