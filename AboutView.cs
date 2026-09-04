@@ -491,7 +491,7 @@ internal sealed class AboutView : UserControl
         body.ColumnCount = 1;
         body.RowCount = 5;
         body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        var creditRows = new[] { 54f, 54f, 54f, 34f, 33f };
+        var creditRows = new[] { 49f, 49f, 49f, 49f, 33f };
         for (var index = 0; index < creditRows.Length; index++)
         {
             body.RowStyles.Add(new RowStyle(SizeType.Absolute, creditRows[index]));
@@ -512,7 +512,14 @@ internal sealed class AboutView : UserControl
             "twspeakman",
             "The Bald Headed Demon",
             Color.FromArgb(245, 166, 35),
-            drawDivider: false), 0, 2);
+            drawDivider: true), 0, 2);
+        body.Controls.Add(CreateCredit(
+            "AboutNap3sCredit",
+            "N3",
+            "nap3s",
+            "Hash Slinging Slasher",
+            ClipCordTheme.SuccessBorder,
+            drawDivider: false), 0, 3);
         var links = new AboutMetricTableLayoutPanel
         {
             Dock = DockStyle.Fill,

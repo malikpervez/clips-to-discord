@@ -1563,7 +1563,9 @@ internal sealed class RoutesView : UserControl
         {
             Asset = FigmaIconAsset.Folder,
             IconColor = Color.FromArgb(176, 128, 255),
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            Size = new Size(ScaleLogical(26), ScaleLogical(26)),
             Margin = new Padding(6, 7, 10, 7)
         };
         layout.Controls.Add(icon, 0, 0);
@@ -1679,7 +1681,9 @@ internal sealed class RoutesView : UserControl
             IconColor = needsAttention || retired
                 ? Color.FromArgb(224, 151, 54)
                 : Color.FromArgb(176, 128, 255),
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            Size = new Size(ScaleLogical(26), ScaleLogical(26)),
             Margin = new Padding(6, 7, 10, 7)
         };
         layout.Controls.Add(icon, 0, 0);
@@ -1986,7 +1990,9 @@ internal sealed class RoutesView : UserControl
             IconColor = localOnlyModeEnabled
                 ? Color.FromArgb(235, 172, 67)
                 : Color.FromArgb(49, 177, 113),
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            Size = new Size(ScaleLogical(17), ScaleLogical(17)),
             Margin = new Padding(4, 14, 8, 14)
         }, 0, 0);
         layout.Controls.Add(new Label
@@ -2821,7 +2827,9 @@ internal sealed class RoutesView : UserControl
         {
             Asset = FigmaIconAsset.Discord,
             IconColor = Color.FromArgb(176, 128, 255),
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            Size = new Size(ScaleLogical(26), ScaleLogical(26)),
             Margin = new Padding(6, 6, 10, 6)
         }, 0, 0);
         layout.SetRowSpan(layout.GetControlFromPosition(0, 0)!, 2);
@@ -4173,7 +4181,9 @@ internal sealed class InputSourceConnectionDialog : Form
             Name = "InputSourceStructureIcon",
             Asset = FigmaIconAsset.Folder,
             IconColor = Color.FromArgb(176, 128, 255),
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.None,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            Size = new Size(ScaleLogical(21), ScaleLogical(21)),
             Margin = new Padding(2, 3, 8, 3)
         };
         copy.Controls.Add(icon, 0, 0);

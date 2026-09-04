@@ -2390,48 +2390,48 @@ static void AssertFigmaIconAssets()
     const string resourcePrefix = "ClipsToDiscord.Assets.FigmaIcons.";
     var expected = new Dictionary<FigmaIconAsset, (string FileName, string Sha256)>
     {
-        [FigmaIconAsset.About] = ("about.png", "75ccb0fff9cf1b20dddfe69e52ab1454c3ab780e9e57fc551ad03cbb84611f63"),
-        [FigmaIconAsset.Activity] = ("activity.png", "e554febc29160a06cf3fa0d4f2c96a588e715ff0ee21f13729ce6d1460beabd7"),
-        [FigmaIconAsset.Alert] = ("alert.png", "3931a2661fcaacba7b5021f340ff1efa7f1a6786ed6f755b9560c2a3f7b3d4e8"),
-        [FigmaIconAsset.ArrowRight] = ("arrow-right.png", "a58377d09ce909c12cc81bdf164a24b1d49a565228886adc1cdf55d9caa1bbed"),
-        [FigmaIconAsset.Bolt] = ("bolt.png", "838518842a4e6007969c4885476706410db290c81da0bd04907ceb8d5b0452ae"),
-        [FigmaIconAsset.Check] = ("check.png", "8c84455f48add96786b59c2f1d71ec07f4663e0d937b14a4d6e2ebcf9c964a2c"),
-        [FigmaIconAsset.ChevronLeft] = ("chevron-left.png", "411fdc5c1d78aabe9a657f2dbd790349f8d70d0b47289d5e275cef1e1fb59bb9"),
-        [FigmaIconAsset.ChevronRight] = ("chevron-right.png", "3a46b243c84b607d12f2e22c7c1bcb6b615a583288e492e4cff9df9e92766e15"),
-        [FigmaIconAsset.Clock] = ("clock.png", "da18e4f5e86c4cf840f12d0b94175988b5a19d41263251e64d2b3ea40d02e8a6"),
-        [FigmaIconAsset.Crop] = ("crop.png", "7ad1f98ebb747a33efa74c0253215457d09569a9e66e57f4889bc5d8e19dee4c"),
-        [FigmaIconAsset.Capture] = ("capture.png", "912e1d9bf4283f2efcb93fa5ecfc22d6ecad05bac1a814acdf978278a00208d0"),
-        [FigmaIconAsset.Camera] = ("camera.png", "83ecc66bb79810e011393706955c9150f605e232e779df4cf771e397258bd4c8"),
-        [FigmaIconAsset.Connection] = ("connection.png", "f74eea938d2a877499d19877cad55f9990fb984ab22fdb640964705b8e975615"),
-        [FigmaIconAsset.Disk] = ("disk.png", "0f3e02645b64cf7d500096d2366fa5fefbce876a116bf157b019526cacfda0b0"),
-        [FigmaIconAsset.Discord] = ("discord.png", "f6f4c1a7709c4921c9667e13255d7fbcdb080150194754788670aed8c882e549"),
-        [FigmaIconAsset.External] = ("external.png", "48d0435ca376de91be57f9d57fd6918a532b0689b96a187b93acda3de48ec696"),
-        [FigmaIconAsset.Film] = ("film.png", "5cdab9d22795aa1818a30095713e3a8b0c7b6d1c17fd4cb64dc7d72c3e348ddb"),
-        [FigmaIconAsset.Folder] = ("folder.png", "fc9aa588cfadbdc8cc5531292a4a4facd930376941d32e6b9907a4fb2d7bde80"),
-        [FigmaIconAsset.Gallery] = ("gallery.png", "ed6a0a7bc4a7a337178fb1415fe92039294e62b4c24d5021b9357a42927f1f42"),
-        [FigmaIconAsset.Heart] = ("heart.png", "2f76ae84b631bf9bab09283046c84f0b19e0f62ba8774bb3aba10eedf677dcd2"),
-        [FigmaIconAsset.HeartFill] = ("heartfill.png", "a7e0cbfb59afb577abbfb406d46ea3468dfe637602485795c2d3cd3e2ce1f19c"),
-        [FigmaIconAsset.Headset] = ("headset.png", "7c61f5a6d7d4bc288573306335d7060c7adc3dd8a7c881bea96cb3dc19abec58"),
-        [FigmaIconAsset.Home] = ("home.png", "6557993d604a612d4ae2c06a5d2b2de5454089bcaa3aa7fe97ca1356ae3d5c0f"),
-        [FigmaIconAsset.Landscape] = ("landscape.png", "ea278ca9b8aa52c0874692aaf8dff6e2cd7d5b4669665b303d2e1c921f813518"),
-        [FigmaIconAsset.Layers] = ("layers.png", "6fc3a89ddee32cf19aa9e340aafdaa0ced55d41e83fd2dbe94e0ef83be9e0f29"),
-        [FigmaIconAsset.More] = ("more.png", "7825ca39fd29e36d4884d7ca4924e0a27f4e82e473e6e650a5ae8813aa9f343c"),
-        [FigmaIconAsset.Mic] = ("mic.png", "ee66476e921d9795bf35140f98076aac80db17313142c4d3ec3fba36a61bf1c0"),
-        [FigmaIconAsset.Mirror] = ("mirror.png", "fd9cd2792b14a28db1ae1b4ed188d59519daefc48b76abaaa3f36efa9736301e"),
-        [FigmaIconAsset.Move] = ("move.png", "e6314bc5b2a8234d0e9d35f14f71e1970382ed891a54c0685499e98e654b4827"),
-        [FigmaIconAsset.Mute] = ("mute.png", "d9219bcac6bb0936250f1a7aac680e4226191dd57712a16b0b88b2ffdf1c3943"),
-        [FigmaIconAsset.Play] = ("play.png", "37709608177cda025a60f73093ca50dc2f1cd6a21a6c7227300a1c1d235e3227"),
-        [FigmaIconAsset.Portrait] = ("portrait.png", "dd657e58343807a30f574dbb261d2a11dd55f16e8147150b32fdcc4368e6ddd3"),
-        [FigmaIconAsset.Refresh] = ("refresh.png", "76de4b8515f3a30b10a22aef9aea7bedcefebea1ddd3ea7d6526fe2cab537ff8"),
-        [FigmaIconAsset.Routes] = ("routes.png", "05881983627be5308fe0c3e0884b2a78500526db70c8fc4408e1b35c796c920f"),
-        [FigmaIconAsset.SafeZone] = ("safezone.png", "4b5f3881558252b9380a66ab3ea412ca90255bba22571232beb83f1eeeaacaa5"),
-        [FigmaIconAsset.Search] = ("search.png", "5864d203d75f638db750af490cc957f15d16e08e65c2a7c0c03c6705a3779fd1"),
-        [FigmaIconAsset.Settings] = ("settings.png", "c66fbb264e0b2493606b50618665b035c6551a3d9b4fce8e44462b58212d9e65"),
-        [FigmaIconAsset.Shield] = ("shield.png", "9e561e36d9db63c365d754c5cc0c587cdc6ed890a72b26259b6b26ab9b01b8bd"),
-        [FigmaIconAsset.Silhouette] = ("silhouette.png", "a8f918e0f4c504784fdb677d906ac8cb2c6ee8897ea04b60b00ab7fa69022440"),
-        [FigmaIconAsset.Speaker] = ("speaker.png", "81bf0beced762c85dc15b8b0b00b1aa62ad8b0641b65cceab98be6122d26da96"),
-        [FigmaIconAsset.Trim] = ("trim.png", "e231336c071756e0bb62f946bdece590f614f8aa0334665d75a244a1e01d967d"),
-        [FigmaIconAsset.Upload] = ("upload.png", "3165bf8292118ee82aef5a913c9bb6dc71cbba3ccf0615f8703384f28da65dde"),
+        [FigmaIconAsset.About] = ("about.png", "a5d04344328179742b02c39e05367eaf0643efe701fb5a7c55d03c400a076848"),
+        [FigmaIconAsset.Activity] = ("activity.png", "057f3be66fcadff88766e375638764ea919dc61bfab6bb7c3d2e8544dc04b5d3"),
+        [FigmaIconAsset.Alert] = ("alert.png", "76583287a868f5fb9c7174f967b958d99377e6438d55daf4126879f557a26800"),
+        [FigmaIconAsset.ArrowRight] = ("arrow-right.png", "b2cfb9887e7304403ae819dd9a197af9e9766eb8d89e0be4707425659ee4016c"),
+        [FigmaIconAsset.Bolt] = ("bolt.png", "be4789c58a38b3658e1cfbe5eac058c1c6e193a905602b59efafb2dd01c8faf1"),
+        [FigmaIconAsset.Check] = ("check.png", "1ba35b975dc8f6bf284f4480e61f3dcf40ecf90a5cb72172a22d00559bf9c142"),
+        [FigmaIconAsset.ChevronLeft] = ("chevron-left.png", "582ec717a37336ac6f6bd812f1a3c0e8a0fea41045000404981ac19e33832b92"),
+        [FigmaIconAsset.ChevronRight] = ("chevron-right.png", "c1bccef033ab5e86342b25a9d7260f576043815b97a70a4513509cd4ca81793b"),
+        [FigmaIconAsset.Clock] = ("clock.png", "19d7c098238c0b8148c54939182f545c8ac55ac9148939ab85ab4b703167dffa"),
+        [FigmaIconAsset.Crop] = ("crop.png", "5bc4a78c15102acb6512425578cd183a20d5e8bc42ca989c9fb6065a1f7229b1"),
+        [FigmaIconAsset.Capture] = ("capture.png", "25d7cdcd7ecd14ccc2e59c7ff8ccf0e5f9895e86396d17f26f1e4946df3e10e3"),
+        [FigmaIconAsset.Camera] = ("camera.png", "dcbb12fbcb011957469b04373382e19c0f7733f56e09d7c76a2c23c3d8981cad"),
+        [FigmaIconAsset.Connection] = ("connection.png", "76921645dce8147d885a3e8d5189c75914c4d69ec709126918c51918e227ec8b"),
+        [FigmaIconAsset.Disk] = ("disk.png", "6158da2953a44c7297cf7488d323236e72844659ab6ddb2d31bb5d20dfcc7282"),
+        [FigmaIconAsset.Discord] = ("discord.png", "31e4c9ae2d3144e147f1869b1f7d5e1feb2fe76671fd615bd9e24010388bc9b1"),
+        [FigmaIconAsset.External] = ("external.png", "d8612a5782d11c5c04ba32d9617846625d78cc9bc672b4a904b4d1afddf92f21"),
+        [FigmaIconAsset.Film] = ("film.png", "84b6b6b02d8efd9576214d1c5f8a88bbf534997fdaa16085af109007b88e5ae2"),
+        [FigmaIconAsset.Folder] = ("folder.png", "0d170155f715364a5e3765d95ac71d46a7a7b07b959a2751b2f40265ba07fb8d"),
+        [FigmaIconAsset.Gallery] = ("gallery.png", "c63eaf83c0842bfb5f1fcfea1331057d134cfb1b298c9662704c014b6af303d4"),
+        [FigmaIconAsset.Heart] = ("heart.png", "e7db06c53f1f5dc961701ce4a5251bb02d123b6a0987017e14c12f3831847f28"),
+        [FigmaIconAsset.HeartFill] = ("heartfill.png", "fc6574748ae894ea020f6c5da3bb7fde120221adeae3c0bfce601aae9960159b"),
+        [FigmaIconAsset.Headset] = ("headset.png", "920402f7f4419e6a16c4ebcc5d64402eb1ef56f024c794fffef65696d01b8d30"),
+        [FigmaIconAsset.Home] = ("home.png", "5a4e87763dd90ba1fcb0eefa043a2abebfcc471bb299887eacc25d2568514f14"),
+        [FigmaIconAsset.Landscape] = ("landscape.png", "3cd38e55e5f96a2e53c1b4ff67e094de7350e4249d7f4aeaddfe1c848a860fe9"),
+        [FigmaIconAsset.Layers] = ("layers.png", "f583f39b0fad520b11643fbe764ee447a837ea5004b8d7bbb06a7abb8f18fb20"),
+        [FigmaIconAsset.More] = ("more.png", "840905a43a25c649e05dde87045046d7e90e9c42fdf3f66846ff257865f0f46e"),
+        [FigmaIconAsset.Mic] = ("mic.png", "135c32570614aa2b5f53c9add1a8090c71032de0c48d32cac383115b2fd863b2"),
+        [FigmaIconAsset.Mirror] = ("mirror.png", "ebc9a280362f30ca3cde424b11bb6cddbe02ad9de7ae65cf868a71e8b5e346c6"),
+        [FigmaIconAsset.Move] = ("move.png", "4642f663170fc824e0189215591a04ce1eb9a095a88eb9bd33b87d023527880e"),
+        [FigmaIconAsset.Mute] = ("mute.png", "0ac29233d6348bb61ef3fc6ee3d41c2d65783b367aa7ce8826dfecf26deebc0e"),
+        [FigmaIconAsset.Play] = ("play.png", "52ee40b352c2f9525e01a2a2fc47e0a93993af6ec375419f3defe2e17e25e015"),
+        [FigmaIconAsset.Portrait] = ("portrait.png", "fb43c1167c05db0bc22f4c08acd32c74998a7f2e776c768b62c5867e86f794f7"),
+        [FigmaIconAsset.Refresh] = ("refresh.png", "49269c09687b59fbd961c5541b4f9060dd1a02034210096c3562a96b2ecf47d4"),
+        [FigmaIconAsset.Routes] = ("routes.png", "29c27d4d37f08a20a148dca94f09f50f928aaea83703deb7610b7df909e41a17"),
+        [FigmaIconAsset.SafeZone] = ("safezone.png", "d5c488fa6406931f1ed8faeed406ce80d93f90a08d466c05c988747568ddb757"),
+        [FigmaIconAsset.Search] = ("search.png", "ea873208e9f29ad06b3725949d57bc72572b718a7d7f37b8f361375fe2f60510"),
+        [FigmaIconAsset.Settings] = ("settings.png", "22b9c111d9d7f2536fadabd166ea8fb7a68e5742f88ae721585c2b2530029264"),
+        [FigmaIconAsset.Shield] = ("shield.png", "b4081a0f11997e2fb0ecc75a6e053cc2500915073f71d711f039f049886029ab"),
+        [FigmaIconAsset.Silhouette] = ("silhouette.png", "85610f833d00d49e8354892885eaaea1c536c810a041a267edc1d7227ab255a5"),
+        [FigmaIconAsset.Speaker] = ("speaker.png", "e36602d1f0f9f99a41f80ee899e61130e7b6ffa58ae204edf41802865f841a97"),
+        [FigmaIconAsset.Trim] = ("trim.png", "e5e62f1ded2b56477bacdb7111ff0dae7c85990898fe4511d3f24da284fd67c1"),
+        [FigmaIconAsset.Upload] = ("upload.png", "040c05a6a349ad299aa34c2d600b083a005ecfd52fcd5d26a64b5c26f4d1aca7"),
         [FigmaIconAsset.YouTube] = ("youtube.png", "fe7a74a3903b3c76eda578649d20050cf411c26a49919777204170cfe7289956"),
         [FigmaIconAsset.TikTok] = ("tiktok.png", "82fe1388eda1ff725d7b5331f6d0ce8cb0ef75907f8d77cf85d57cdb95bbdb03")
     };
@@ -6735,7 +6735,7 @@ static void AssertAboutLayout(SettingsForm form, float expectedScale)
     AssertAboutSectionMetrics(view, "AboutStatusCard", [26, 26, 26, 26, 28], expectedScale);
     AssertAboutSectionMetrics(view, "AboutDiagnosticsCard", [33, 8, 33, 14, 13], expectedScale);
     AssertAboutSectionMetrics(view, "AboutPrivacyCard", [26, 26, 26, 34, 53, 33], expectedScale);
-    AssertAboutSectionMetrics(view, "AboutCreditsCard", [54, 54, 54, 34, 33], expectedScale);
+    AssertAboutSectionMetrics(view, "AboutCreditsCard", [49, 49, 49, 49, 33], expectedScale);
 
     var labels = EnumerateControls(view).OfType<Label>().ToArray();
     var version = typeof(AboutView).Assembly.GetName().Version ?? new Version(0, 0, 0);
@@ -6754,17 +6754,21 @@ static void AssertAboutLayout(SettingsForm form, float expectedScale)
            labels.Count(label => label.Text == "Certified Shooter · LeBron’s Legacy") == 1 &&
            labels.Count(label => label.Text == "twspeakman") == 1 &&
            labels.Count(label => label.Text == "The Bald Headed Demon") == 1 &&
+           labels.Count(label => label.Text == "nap3s") == 1 &&
+           labels.Count(label => label.Text == "Hash Slinging Slasher") == 1 &&
            !labels.Any(label => label.Text.Contains("Local-First Companion", StringComparison.OrdinalIgnoreCase)),
-        "About must preserve all three approved Figma credits and remove Local-First Companion.");
+        "About must preserve all four approved credits and remove Local-First Companion.");
     Assert(EnumerateControls(view).Count(control => control.Name is
-               "AboutDixonCredit" or "AboutPapiCredit" or "AboutTwspeakmanCredit") == 3 &&
+               "AboutDixonCredit" or "AboutPapiCredit" or "AboutTwspeakmanCredit" or "AboutNap3sCredit") == 4 &&
            EnumerateControls(view).Single(control => control.Name == "AboutDixonCredit").AccessibleName ==
            "Dixon Yamada, Certified Looter" &&
            EnumerateControls(view).Single(control => control.Name == "AboutPapiCredit").AccessibleName ==
            "Papi Jawn, Certified Shooter · LeBron’s Legacy" &&
            EnumerateControls(view).Single(control => control.Name == "AboutTwspeakmanCredit").AccessibleName ==
-           "twspeakman, The Bald Headed Demon",
-        "All three credit cards must expose the exact approved Figma names and titles to assistive technology.");
+           "twspeakman, The Bald Headed Demon" &&
+           EnumerateControls(view).Single(control => control.Name == "AboutNap3sCredit").AccessibleName ==
+           "nap3s, Hash Slinging Slasher",
+        "All four credit cards must expose the exact approved names and titles to assistive technology.");
     Assert(!EnumerateControls(view).OfType<ScrollableControl>().Any(control => control.AutoScroll),
         "About must use ClipCord's branded viewport instead of a native Windows scrollbar.");
 }
@@ -6860,6 +6864,8 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
         "Certified Shooter · LeBron’s Legacy",
         "twspeakman",
         "The Bald Headed Demon",
+        "nap3s",
+        "Hash Slinging Slasher",
         "Check for updates",
         "Open logs",
         "Copy diagnostics",
@@ -7001,7 +7007,8 @@ static void AssertAboutCopyAndAccessibility(SettingsForm form, bool requireVisib
     var expectedAvatarSide = (int)Math.Round(34 * effectiveScale);
     foreach (var avatarName in new[]
              {
-                 "AboutDixonCreditAvatar", "AboutPapiCreditAvatar", "AboutTwspeakmanCreditAvatar"
+                 "AboutDixonCreditAvatar", "AboutPapiCreditAvatar", "AboutTwspeakmanCreditAvatar",
+                 "AboutNap3sCreditAvatar"
              })
     {
         var avatar = EnumerateControls(view).OfType<AboutAvatarControl>().Single(control => control.Name == avatarName);

@@ -4,6 +4,12 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 2.0.2 — 2026-09-04
+
+- Restore approved 24×24 optical framing for ClipCord's icon set and keep icons square in
+  stretched layouts.
+- Add nap3s to Credits & project as the Hash Slinging Slasher.
+
 ## 2.0.1 — 2026-09-03
 
 - Let users change the ClipCord Capture folder while Routes are active. The handoff pauses Routes,
