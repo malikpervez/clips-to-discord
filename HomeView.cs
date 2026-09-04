@@ -1,5 +1,18 @@
 namespace ClipsToDiscord;
 
+internal enum HomeRoutingAction
+{
+    OpenRoutes,
+    CreateRoute,
+    EnableLocalOnlyMode,
+    DisableLocalOnlyMode
+}
+
+internal sealed class HomeRoutingActionRequestedEventArgs(HomeRoutingAction action) : EventArgs
+{
+    internal HomeRoutingAction Action { get; } = action;
+}
+
 /// <summary>
 /// Read-only dashboard for the current ClipCord configuration and recent local history.
 /// Expensive archive discovery is deliberately activated and cancelled by the owning shell.
@@ -12,6 +25,7 @@ internal sealed class HomeView : UserControl
     private readonly Func<bool> _discordRunningProvider;
     private readonly Func<string, CancellationToken, GallerySnapshot> _galleryScanner;
     private readonly Func<DateTime> _utcNowProvider;
+    private readonly Func<RoutingUiPresentationSnapshot?>? _routingPresentationProvider;
     private readonly BrandedScrollHost _scrollHost;
     private readonly HomeContentLayout _content;
     private readonly HomeStatusPill _watcherPill;
@@ -22,6 +36,19 @@ internal sealed class HomeView : UserControl
     private readonly Label _destinationNameLabel;
     private readonly Label _destinationDetailLabel;
     private readonly Label _routeLabel;
+    private readonly OutlineButton _routingActionButton;
+    private HomeRouteArrow _routeArrow = null!;
+    private BufferedTableLayoutPanel _routePipeline = null!;
+    private BufferedTableLayoutPanel _sourceEndpoint = null!;
+    private BufferedTableLayoutPanel _destinationEndpoint = null!;
+    private BrandGlyphControl _sourceEndpointIcon = null!;
+    private BrandGlyphControl _destinationEndpointIcon = null!;
+    private FigmaIconControl _sourceRoutingIcon = null!;
+    private FigmaIconControl _destinationDiskIcon = null!;
+    private Control _sourceRouteChip = null!;
+    private Control _destinationRouteChip = null!;
+    private Label _sourceEndpointCaption = null!;
+    private Label _destinationEndpointCaption = null!;
     private readonly Label _recentCountLabel;
     private readonly Label _recentCountDetailLabel;
     private readonly Label _recentUploadsLabel;
@@ -38,6 +65,7 @@ internal sealed class HomeView : UserControl
     private CancellationTokenSource? _archiveCancellation;
     private bool _active;
     private bool _updateBusy;
+    private RoutingUiPresentationSnapshot? _routingPresentation;
     private int _archiveGeneration;
 
     internal event EventHandler? NavigateToActivityRequested;
@@ -46,6 +74,7 @@ internal sealed class HomeView : UserControl
     internal event EventHandler? OpenLocalOnlyFolderRequested;
     internal event EventHandler? OpenLogsRequested;
     internal event EventHandler? CheckUpdatesRequested;
+    internal event EventHandler<HomeRoutingActionRequestedEventArgs>? RoutingActionRequested;
 
     internal HomeView(
         AppSettings settings,
@@ -54,7 +83,8 @@ internal sealed class HomeView : UserControl
         Func<bool>? discordRunningProvider = null,
         Func<string, CancellationToken, GallerySnapshot>? galleryScanner = null,
         Func<DateTime>? utcNowProvider = null,
-        bool showPageHeader = true)
+        bool showPageHeader = true,
+        Func<RoutingUiPresentationSnapshot?>? routingPresentationProvider = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(history);
@@ -66,6 +96,7 @@ internal sealed class HomeView : UserControl
         _galleryScanner = galleryScanner ?? ((folder, cancellationToken) =>
             GalleryCatalog.Scan(folder, cancellationToken));
         _utcNowProvider = utcNowProvider ?? (() => DateTime.UtcNow);
+        _routingPresentationProvider = routingPresentationProvider;
 
         Name = "HomeView";
         AccessibleName = "ClipCord Home";
@@ -89,6 +120,35 @@ internal sealed class HomeView : UserControl
         _destinationNameLabel = CreateValueLabel("HomeDestinationNameLabel", 13f);
         _destinationDetailLabel = CreateMetadataLabel("HomeDestinationDetailLabel");
         _routeLabel = CreateMetadataLabel("HomeRouteLabel", ContentAlignment.MiddleCenter);
+        _routingActionButton = new OutlineButton
+        {
+            Name = "HomeRoutingActionButton",
+            AccessibleName = "Open Routes",
+            AccessibleRole = AccessibleRole.PushButton,
+            Text = "Open Routes",
+            AutoSize = false,
+            Size = new Size(ScaleUi(174), ScaleUi(30)),
+            MinimumSize = new Size(ScaleUi(96), ScaleUi(30)),
+            SurfaceColor = ClipCordTheme.SurfaceControl,
+            HoverColor = ClipCordTheme.SurfaceControlHover,
+            DisabledSurfaceColor = ClipCordTheme.SurfaceSunken,
+            DisabledTextColor = ClipCordTheme.TextTertiary,
+            OutlineColor = ClipCordTheme.BorderStrong,
+            ForeColor = ClipCordTheme.TextPrimary,
+            Font = ClipCordTheme.InterfaceFont(8.2f, FontStyle.Bold),
+            Margin = Padding.Empty,
+            TabStop = true,
+            Visible = false
+        };
+        _routingActionButton.Click += (_, _) =>
+        {
+            if (_routingActionButton.Tag is HomeRoutingAction action)
+            {
+                RoutingActionRequested?.Invoke(
+                    this,
+                    new HomeRoutingActionRequestedEventArgs(action));
+            }
+        };
         _recentCountLabel = CreateMetricValueLabel("HomeRecentActivityCountLabel");
         _recentCountDetailLabel = CreateMetadataLabel("HomeRecentActivityDetailLabel");
         _recentUploadsLabel = CreateMetricValueLabel("HomeRecentUploadsCountLabel");
@@ -224,10 +284,27 @@ internal sealed class HomeView : UserControl
         var folderChanged = !_settings.ClipsFolder.Equals(settings.ClipsFolder, StringComparison.OrdinalIgnoreCase);
         _settings = settings;
 
+        if (_routingPresentation is null)
+        {
+            ApplyRoutingHeroStructure(routingOwned: false);
+        }
+
         var trimmedFolder = settings.ClipsFolder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var sourceName = string.IsNullOrWhiteSpace(trimmedFolder)
             ? "Clips folder not configured"
             : Path.GetFileName(trimmedFolder);
+        _sourceEndpointCaption.Text = "WATCHED FOLDER";
+        _sourceEndpointIcon.Glyph = BrandGlyph.Folder;
+        _sourceEndpointIcon.GlyphColor = ClipCordTheme.TextTertiary;
+        _sourceEndpointIcon.Invalidate();
+        _sourceEndpointIcon.Visible = true;
+        _sourceRoutingIcon.Visible = false;
+        _sourceRouteChip.Visible = true;
+        _destinationEndpointCaption.Text = "DESTINATION";
+        _destinationEndpointIcon.Visible = true;
+        _destinationEndpointIcon.BringToFront();
+        _destinationDiskIcon.Visible = false;
+        _destinationRouteChip.Visible = true;
         _sourceNameLabel.Text = string.IsNullOrWhiteSpace(sourceName) ? "Clips folder" : sourceName;
         _sourcePathLabel.Text = string.IsNullOrWhiteSpace(settings.ClipsFolder)
             ? "Choose a recording folder in Settings."
@@ -249,6 +326,11 @@ internal sealed class HomeView : UserControl
             _routeLabel.Text = "Local-only route";
         }
 
+        if (_routingPresentation is { } routing)
+        {
+            ApplyRoutingOwnedPresentation(routing);
+        }
+
         var canOpenClips = Directory.Exists(settings.ClipsFolder);
         _openClipsFolderButton.Enabled = canOpenClips;
         _openUploadedFolderButton.Enabled = canOpenClips;
@@ -262,12 +344,29 @@ internal sealed class HomeView : UserControl
         if (IsDisposed || Disposing) return;
         try
         {
+            var wasLocalOnly = _routingPresentation is { LocalOnlyModeEnabled: true };
+            _routingPresentation = CaptureRoutingPresentation();
+            ApplySettings(_settings);
             var presentation = AboutPageSupport.NormalizeWatcherStatus(
                 _watcherStatusProvider?.Invoke(),
                 _discordRunningProvider());
-            _watcherPill.Apply(presentation);
-            _watcherDetailLabel.Text = presentation.Detail;
-            _watcherDetailLabel.AccessibleDescription = presentation.Detail;
+            if (_routingPresentation is { } routing)
+            {
+                ApplyRoutingOwnedPresentation(routing);
+            }
+            else
+            {
+                _routingActionButton.Visible = false;
+                _routingActionButton.TabStop = false;
+                _watcherPill.Apply(presentation);
+                _watcherDetailLabel.Text = presentation.Detail;
+                _watcherDetailLabel.AccessibleDescription = presentation.Detail;
+            }
+
+            if (wasLocalOnly != (_routingPresentation is { LocalOnlyModeEnabled: true }))
+            {
+                RenderActivitySnapshot(GetHistorySnapshot());
+            }
         }
         catch (Exception exception)
         {
@@ -278,6 +377,247 @@ internal sealed class HomeView : UserControl
                 "Live watcher status is temporarily unavailable"));
             _watcherDetailLabel.Text = "Live watcher status is temporarily unavailable";
         }
+    }
+
+    private RoutingUiPresentationSnapshot? CaptureRoutingPresentation()
+    {
+        if (_routingPresentationProvider is null) return null;
+        try
+        {
+            return _routingPresentationProvider()?.Normalize();
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Could not inspect the privacy-safe Home routing presentation state.", exception);
+            return new RoutingUiPresentationSnapshot(
+                RoutingUiState.Unavailable,
+                ActiveRouteCount: 0,
+                WatchingSourceCount: 0,
+                LocalOnlyModeEnabled: false);
+        }
+    }
+
+    private void ApplyRoutingOwnedPresentation(RoutingUiPresentationSnapshot presentation)
+    {
+        presentation = presentation.Normalize();
+        ApplyRoutingHeroStructure(routingOwned: true);
+        _sourceEndpointCaption.Text = "ROUTES";
+        _sourceEndpointIcon.Visible = false;
+        _sourceRoutingIcon.IconColor = presentation.State is
+            RoutingUiState.NeedsAttention or RoutingUiState.Unavailable
+            ? ClipCordTheme.Coral
+            : presentation.LocalOnlyModeEnabled
+                ? Color.FromArgb(224, 151, 54)
+                : Color.FromArgb(49, 177, 113);
+        _sourceRoutingIcon.Visible = true;
+        _sourceRoutingIcon.BringToFront();
+        _sourceRouteChip.Visible = false;
+        _destinationRouteChip.Visible = false;
+        _destinationEndpointCaption.Text = "NEW CLIPS GO TO";
+        _destinationEndpointIcon.Visible = false;
+        _destinationDiskIcon.Visible = true;
+        _destinationDiskIcon.BringToFront();
+
+        if (presentation.LocalOnlyModeEnabled &&
+            presentation.State is not (RoutingUiState.NeedsAttention or RoutingUiState.Unavailable))
+        {
+            _watcherPill.ApplyLocalOnlyMode("Future clips stay on this PC");
+            _watcherDetailLabel.Text = presentation.WatchingSourceCount > 0
+                ? $"{AboutPageSupport.FormatCount(presentation.WatchingSourceCount, "source")} watching · Library always on"
+                : "Library always on";
+            _sourceNameLabel.Text = AboutPageSupport.FormatCount(
+                presentation.ActiveRouteCount,
+                "active route");
+            _sourcePathLabel.Text = FormatRouteComposition(presentation);
+            _captureSourceLabel.Text = presentation.WatchingSourceCount > 0
+                ? AboutPageSupport.FormatCount(presentation.WatchingSourceCount, "source")
+                : "Routes armed";
+            _destinationEndpointCaption.Text = "NEW CLIPS GO TO";
+            _destinationNameLabel.Text = "Library → Local only";
+            _destinationDetailLabel.Text = "Local-only mode on · future clips stay on this PC";
+            _destinationDetailLabel.ForeColor = Color.FromArgb(244, 166, 53);
+            _routeLabel.Text = "Local only";
+            ConfigureRoutingAction("Turn off Local-only mode", HomeRoutingAction.DisableLocalOnlyMode);
+            SetRouteArrowAccent(Color.FromArgb(224, 151, 54));
+            _watcherDetailLabel.AccessibleDescription = _watcherDetailLabel.Text;
+            return;
+        }
+
+        switch (presentation.State)
+        {
+            case RoutingUiState.Active when presentation.ActiveRouteCount > 0:
+                _watcherPill.ApplyRoutingStatus(
+                    $"{presentation.ActiveRouteCount} ACTIVE",
+                    Color.FromArgb(49, 177, 113),
+                    "Routes armed");
+                _watcherDetailLabel.Text = presentation.WatchingSourceCount > 0
+                    ? $"{AboutPageSupport.FormatCount(presentation.WatchingSourceCount, "source")} watching · Library always on"
+                    : "Routes armed · Library always on";
+                _sourceNameLabel.Text = AboutPageSupport.FormatCount(
+                    presentation.ActiveRouteCount,
+                    "active route");
+                _sourcePathLabel.Text = FormatRouteComposition(presentation);
+                _captureSourceLabel.Text = "Routes armed";
+                _destinationNameLabel.Text = AboutPageSupport.FormatCount(
+                    presentation.DestinationCount,
+                    "destination");
+                _destinationDetailLabel.Text = FormatDestinations(presentation.Destinations);
+                _destinationDetailLabel.ForeColor = ClipCordTheme.TextSecondary;
+                _routeLabel.Text = "Library always on";
+                ConfigureRoutingAction("Pause routing", HomeRoutingAction.EnableLocalOnlyMode);
+                SetRouteArrowAccent(ClipCordTheme.Violet);
+                break;
+
+            case RoutingUiState.Active when presentation.PausedRouteCount == 0:
+                _watcherPill.ApplyRoutingStatus(
+                    "NO ROUTES",
+                    ClipCordTheme.TextTertiary,
+                    "Create your first route");
+                _watcherDetailLabel.Text = "Library always on";
+                _sourceNameLabel.Text = "No routes yet";
+                _sourcePathLabel.Text = "Nothing is sent anywhere until you add one.";
+                _captureSourceLabel.Text = "Routing ready";
+                _destinationNameLabel.Text = "Library only";
+                _destinationDetailLabel.Text = "Every capture is still saved on this PC.";
+                _destinationDetailLabel.ForeColor = ClipCordTheme.TextSecondary;
+                _routeLabel.Text = "Always available";
+                ConfigureRoutingAction("Create your first route", HomeRoutingAction.CreateRoute);
+                SetRouteArrowAccent(ClipCordTheme.TextTertiary);
+                break;
+
+            case RoutingUiState.Active:
+            case RoutingUiState.NeedsAttention:
+            case RoutingUiState.Unavailable:
+            case RoutingUiState.Inactive:
+                _watcherPill.ApplyRoutingStatus(
+                    presentation.PausedRouteCount > 0
+                        ? $"{presentation.PausedRouteCount} NEEDS YOU"
+                        : "NEEDS ATTENTION",
+                    ClipCordTheme.Coral,
+                    "Open Routes to review Routing");
+                _watcherDetailLabel.Text = "External delivery paused safely · Library always on";
+                _sourceNameLabel.Text = presentation.ActiveRouteCount > 0
+                    ? AboutPageSupport.FormatCount(presentation.ActiveRouteCount, "active route")
+                    : "Routing needs attention";
+                _sourcePathLabel.Text = presentation.PausedRouteCount > 0
+                    ? $"{presentation.PausedRouteCount:N0} paused — reconnect a destination in Routes"
+                    : "Open Routes for recovery details.";
+                _sourcePathLabel.ForeColor = ClipCordTheme.Coral;
+                _captureSourceLabel.Text = "Delivery paused safely";
+                _destinationNameLabel.Text = presentation.DestinationCount > 0
+                    ? AboutPageSupport.FormatCount(presentation.DestinationCount, "destination")
+                    : "Library protected";
+                _destinationDetailLabel.Text = presentation.DestinationCount > 0
+                    ? "One or more destinations need attention before delivery resumes."
+                    : "No external delivery starts while Routing is unavailable.";
+                _destinationDetailLabel.ForeColor = ClipCordTheme.Coral;
+                _routeLabel.Text = "Open Routes";
+                ConfigureRoutingAction("Open Routes", HomeRoutingAction.OpenRoutes);
+                SetRouteArrowAccent(ClipCordTheme.Coral);
+                break;
+
+        }
+
+        _watcherDetailLabel.AccessibleDescription = _watcherDetailLabel.Text;
+    }
+
+    private void ConfigureRoutingAction(string text, HomeRoutingAction action)
+    {
+        _routingActionButton.Text = text;
+        _routingActionButton.AccessibleName = text;
+        _routingActionButton.Tag = action;
+        var measured = TextRenderer.MeasureText(
+            text,
+            _routingActionButton.Font,
+            Size.Empty,
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+        _routingActionButton.Size = new Size(
+            Math.Clamp(measured.Width + ScaleUi(28), ScaleUi(96), ScaleUi(196)),
+            ScaleUi(30));
+        _routingActionButton.Visible = true;
+        _routingActionButton.TabStop = true;
+    }
+
+    private void ApplyRoutingHeroStructure(bool routingOwned)
+    {
+        if (_routePipeline is null || _sourceEndpoint is null || _destinationEndpoint is null)
+        {
+            return;
+        }
+
+        _content.SetCompactRoutingHero(routingOwned);
+        _routePipeline.AccessibleName = routingOwned
+            ? "Routes deliver new clips to configured destinations"
+            : "Watched folder routes to destination";
+        _routePipeline.Padding = routingOwned
+            ? new Padding(0, ScaleUi(10), 0, 0)
+            : new Padding(0, ScaleUi(18), 0, 0);
+        _sourceEndpoint.AccessibleName = routingOwned ? "Routes" : "Watched folder";
+        _destinationEndpoint.AccessibleName = routingOwned ? "New clips go to" : "Destination";
+
+        ApplyEndpointRows(_sourceEndpoint, routingOwned);
+        ApplyEndpointRows(_destinationEndpoint, routingOwned);
+        _sourceEndpointCaption.ForeColor = routingOwned
+            ? ClipCordTheme.TextSecondary
+            : ClipCordTheme.TextTertiary;
+        _destinationEndpointCaption.ForeColor = routingOwned
+            ? ClipCordTheme.TextSecondary
+            : ClipCordTheme.TextTertiary;
+        _sourcePathLabel.ForeColor = routingOwned
+            ? ClipCordTheme.TextSecondary
+            : ClipCordTheme.TextTertiary;
+        _destinationDetailLabel.ForeColor = routingOwned
+            ? ClipCordTheme.TextSecondary
+            : ClipCordTheme.TextTertiary;
+        _watcherDetailLabel.ForeColor = routingOwned
+            ? ClipCordTheme.TextSecondary
+            : ClipCordTheme.TextTertiary;
+    }
+
+    private void ApplyEndpointRows(BufferedTableLayoutPanel endpoint, bool routingOwned)
+    {
+        endpoint.RowStyles[0].SizeType = SizeType.Absolute;
+        endpoint.RowStyles[0].Height = ScaleUi(routingOwned ? 18 : 20);
+        endpoint.RowStyles[1].SizeType = SizeType.Absolute;
+        endpoint.RowStyles[1].Height = ScaleUi(routingOwned ? 25 : 26);
+        endpoint.RowStyles[2].SizeType = SizeType.Absolute;
+        endpoint.RowStyles[2].Height = ScaleUi(routingOwned ? 20 : 22);
+        endpoint.RowStyles[3].SizeType = routingOwned ? SizeType.Absolute : SizeType.Percent;
+        endpoint.RowStyles[3].Height = routingOwned ? 0 : 100;
+    }
+
+    private void SetRouteArrowAccent(Color accent)
+    {
+        _routeArrow.Accent = accent;
+        _routeArrow.Invalidate();
+    }
+
+    private static string FormatRouteComposition(RoutingUiPresentationSnapshot presentation)
+    {
+        var parts = new List<string>(2);
+        if (presentation.SpecificRouteCount > 0)
+        {
+            parts.Add($"{presentation.SpecificRouteCount:N0} specific");
+        }
+        if (presentation.FallbackRouteCount > 0)
+        {
+            parts.Add($"{presentation.FallbackRouteCount:N0} fallback");
+        }
+        if (presentation.PausedRouteCount > 0)
+        {
+            parts.Add($"{presentation.PausedRouteCount:N0} paused");
+        }
+        return parts.Count > 0 ? string.Join(" · ", parts) : "Library always on";
+    }
+
+    private static string FormatDestinations(RoutingUiDestinations destinations)
+    {
+        var parts = new List<string>(4);
+        if (destinations.HasFlag(RoutingUiDestinations.Discord)) parts.Add("Discord");
+        if (destinations.HasFlag(RoutingUiDestinations.YouTube)) parts.Add("YouTube");
+        if (destinations.HasFlag(RoutingUiDestinations.TikTok)) parts.Add("TikTok");
+        if (destinations.HasFlag(RoutingUiDestinations.Library)) parts.Add("Library");
+        return parts.Count > 0 ? string.Join(" · ", parts) : "Library always on";
     }
 
     internal void SetUpdateBusy(bool busy, bool updateChecksAvailable)
@@ -374,7 +714,7 @@ internal sealed class HomeView : UserControl
         var status = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             BackColor = Color.Transparent,
             Margin = Padding.Empty,
@@ -382,13 +722,16 @@ internal sealed class HomeView : UserControl
         };
         status.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         status.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        status.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         status.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         _watcherPill.Anchor = AnchorStyles.Left;
         _watcherDetailLabel.Dock = DockStyle.Fill;
         status.Controls.Add(_watcherPill, 0, 0);
         status.Controls.Add(_watcherDetailLabel, 1, 0);
+        _routingActionButton.Anchor = AnchorStyles.Right;
+        status.Controls.Add(_routingActionButton, 2, 0);
 
-        var pipeline = new BufferedTableLayoutPanel
+        _routePipeline = new BufferedTableLayoutPanel
         {
             Name = "HomeRoutePipeline",
             AccessibleName = "Watched folder routes to destination",
@@ -400,11 +743,11 @@ internal sealed class HomeView : UserControl
             Margin = Padding.Empty,
             Padding = new Padding(0, ScaleUi(18), 0, 0)
         };
-        pipeline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        pipeline.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleUi(120)));
-        pipeline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        pipeline.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        pipeline.Controls.Add(BuildEndpoint(
+        _routePipeline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _routePipeline.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleUi(120)));
+        _routePipeline.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _routePipeline.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _routePipeline.Controls.Add(BuildEndpoint(
             "HomeSourceEndpoint",
             "WATCHED FOLDER",
             _sourceNameLabel,
@@ -412,15 +755,16 @@ internal sealed class HomeView : UserControl
             _captureSourceLabel,
             BrandGlyph.Folder,
             ClipCordTheme.TextTertiary), 0, 0);
-        pipeline.Controls.Add(new HomeRouteArrow
+        _routeArrow = new HomeRouteArrow
         {
             Name = "HomeRouteArrow",
             AccessibleName = "Routes to",
             Dock = DockStyle.Fill,
             BackColor = Color.Transparent,
             Margin = new Padding(ScaleUi(8), 0, ScaleUi(8), 0)
-        }, 1, 0);
-        pipeline.Controls.Add(BuildEndpoint(
+        };
+        _routePipeline.Controls.Add(_routeArrow, 1, 0);
+        _routePipeline.Controls.Add(BuildEndpoint(
             "HomeDestinationEndpoint",
             "DESTINATION",
             _destinationNameLabel,
@@ -430,7 +774,7 @@ internal sealed class HomeView : UserControl
             ClipCordTheme.Violet), 2, 0);
 
         layout.Controls.Add(status, 0, 0);
-        layout.Controls.Add(pipeline, 0, 1);
+        layout.Controls.Add(_routePipeline, 0, 1);
         hero.Controls.Add(layout);
         return hero;
     }
@@ -597,7 +941,7 @@ internal sealed class HomeView : UserControl
         privacy.Controls.Add(new Label
         {
             Name = "HomePrivacyNote",
-            Text = "History and Gallery stay on this PC. Your webhook is encrypted locally and used only for configured Discord uploads.",
+            Text = "History and Gallery stay on this PC. ClipCord uses only the destinations you configure.",
             Dock = DockStyle.Fill,
             AutoEllipsis = false,
             ForeColor = ClipCordTheme.TextTertiary,
@@ -638,16 +982,19 @@ internal sealed class HomeView : UserControl
         endpoint.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(26)));
         endpoint.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleUi(22)));
         endpoint.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        endpoint.Controls.Add(new BrandGlyphControl
+        var endpointIcon = new BrandGlyphControl
         {
+            Name = name == "HomeSourceEndpoint" ? "HomeSourceEndpointIcon" : "HomeDestinationEndpointIcon",
             Glyph = glyph,
             GlyphColor = accent,
             StrokeWidth = 1.6f,
             Dock = DockStyle.Fill,
             Margin = new Padding(0, 2, 7, 2)
-        }, 0, 0);
-        endpoint.Controls.Add(new Label
+        };
+        endpoint.Controls.Add(endpointIcon, 0, 0);
+        var captionLabel = new Label
         {
+            Name = name == "HomeSourceEndpoint" ? "HomeSourceEndpointCaption" : "HomeDestinationEndpointCaption",
             Text = caption,
             Dock = DockStyle.Fill,
             ForeColor = ClipCordTheme.TextTertiary,
@@ -655,7 +1002,40 @@ internal sealed class HomeView : UserControl
             TextAlign = ContentAlignment.MiddleLeft,
             Margin = Padding.Empty,
             AccessibleRole = AccessibleRole.StaticText
-        }, 1, 0);
+        };
+        endpoint.Controls.Add(captionLabel, 1, 0);
+        if (name == "HomeSourceEndpoint")
+        {
+            _sourceEndpointIcon = endpointIcon;
+            _sourceEndpointCaption = captionLabel;
+            _sourceRoutingIcon = new FigmaIconControl
+            {
+                Name = "HomeSourceRoutingIcon",
+                Asset = FigmaIconAsset.Bolt,
+                IconColor = Color.FromArgb(49, 177, 113),
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 2, 7, 2),
+                Visible = false,
+                AccessibleRole = AccessibleRole.None
+            };
+            endpoint.Controls.Add(_sourceRoutingIcon, 0, 0);
+        }
+        else
+        {
+            _destinationEndpointIcon = endpointIcon;
+            _destinationEndpointCaption = captionLabel;
+            _destinationDiskIcon = new FigmaIconControl
+            {
+                Name = "HomeDestinationDiskIcon",
+                Asset = FigmaIconAsset.Disk,
+                IconColor = Color.FromArgb(224, 151, 54),
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 2, 7, 2),
+                Visible = false,
+                AccessibleRole = AccessibleRole.None
+            };
+            endpoint.Controls.Add(_destinationDiskIcon, 0, 0);
+        }
         value.Dock = DockStyle.Fill;
         detail.Dock = DockStyle.Fill;
         route.Dock = DockStyle.Fill;
@@ -702,6 +1082,10 @@ internal sealed class HomeView : UserControl
         routeChip.Controls.Add(routeChipLayout);
         endpoint.Controls.Add(routeChip, 0, 3);
         endpoint.SetColumnSpan(routeChip, 2);
+        if (name == "HomeSourceEndpoint") _sourceRouteChip = routeChip;
+        else _destinationRouteChip = routeChip;
+        if (name == "HomeSourceEndpoint") _sourceEndpoint = endpoint;
+        else _destinationEndpoint = endpoint;
         return endpoint;
     }
 
@@ -909,10 +1293,14 @@ internal sealed class HomeView : UserControl
         return row;
     }
 
-    private static string BuildActivityDetail(ClipActivityEntry entry)
+    private string BuildActivityDetail(ClipActivityEntry entry)
     {
         if (entry.Route == ClipActivityRoute.LocalOnly && entry.State == ClipActivityState.Archived)
         {
+            if (_routingPresentation is { LocalOnlyModeEnabled: true })
+            {
+                return $"{FormatBytes(entry.OriginalBytes)} · Local-only mode · external delivery paused";
+            }
             return $"{FormatBytes(entry.OriginalBytes)} · kept on this PC; no Discord request was made";
         }
 
@@ -1197,13 +1585,15 @@ internal sealed class HomeContentLayout : Panel
     private const int LogicalTopPadding = 0;
     private const int LogicalBottomPadding = 8;
     private const int LogicalGap = 14;
-    private const int LogicalHeroHeight = 196;
+    private const int LogicalLegacyHeroHeight = 196;
+    private const int LogicalRoutingHeroHeight = 154;
     private const int LogicalMetricsHeight = 104;
     private const int LogicalBottomHeight = 323;
     private const int LogicalStackThreshold = 760;
     private readonly Control _hero;
     private readonly Control _metrics;
     private readonly Control _bottom;
+    private int _logicalHeroHeight = LogicalLegacyHeroHeight;
 
     internal HomeContentLayout(Control hero, Control metrics, Control bottom)
     {
@@ -1217,6 +1607,15 @@ internal sealed class HomeContentLayout : Panel
         Controls.Add(bottom);
     }
 
+    internal void SetCompactRoutingHero(bool compact)
+    {
+        var next = compact ? LogicalRoutingHeroHeight : LogicalLegacyHeroHeight;
+        if (_logicalHeroHeight == next) return;
+        _logicalHeroHeight = next;
+        PerformLayout();
+        Parent?.PerformLayout();
+    }
+
     public override Size GetPreferredSize(Size proposedSize)
     {
         var width = Math.Max(1, proposedSize.Width);
@@ -1225,7 +1624,7 @@ internal sealed class HomeContentLayout : Panel
         var bottomHeight = logicalWidth < LogicalStackThreshold
             ? LogicalBottomHeight * 2 + LogicalGap
             : LogicalBottomHeight;
-        var logicalHeight = LogicalTopPadding + LogicalHeroHeight + LogicalGap +
+        var logicalHeight = LogicalTopPadding + _logicalHeroHeight + LogicalGap +
                             LogicalMetricsHeight + LogicalGap + bottomHeight + LogicalBottomPadding;
         return new Size(width, Math.Max(1, (int)Math.Round(logicalHeight * scale)));
     }
@@ -1237,7 +1636,7 @@ internal sealed class HomeContentLayout : Panel
         var top = ScaleLogical(LogicalTopPadding);
         var width = Math.Max(1, ClientSize.Width - left * 2);
         var gap = ScaleLogical(LogicalGap);
-        var heroHeight = ScaleLogical(LogicalHeroHeight);
+        var heroHeight = ScaleLogical(_logicalHeroHeight);
         var metricsHeight = ScaleLogical(LogicalMetricsHeight);
         var bottomHeight = ScaleLogical(LogicalBottomHeight);
 
@@ -1296,6 +1695,8 @@ internal sealed class HomeStatusPill : Control
 {
     private string _label = "STARTING";
     private Color _accent = ClipCordTheme.TextTertiary;
+    private Color _fill = ClipCordTheme.SurfaceSunken;
+    private Color _border = ClipCordTheme.BorderDefault;
 
     internal HomeStatusPill()
     {
@@ -1320,8 +1721,71 @@ internal sealed class HomeStatusPill : Control
             AboutWatcherState.Preparing or AboutWatcherState.Uploading or AboutWatcherState.Compressing or AboutWatcherState.Archiving => ClipCordTheme.Violet,
             _ => ClipCordTheme.TextTertiary
         };
+        Text = _label;
+        AccessibleName = "Watcher status";
         AccessibleDescription = presentation.Detail;
+        _fill = ClipCordTheme.SurfaceSunken;
+        _border = ClipCordTheme.BorderDefault;
+        SetLogicalSize(116, 28);
         Invalidate();
+    }
+
+    internal void ApplyLocalOnlyMode(string detail)
+    {
+        ApplyRoutingStatus(
+            "LOCAL-ONLY MODE",
+            Color.FromArgb(224, 151, 54),
+            detail,
+            logicalWidth: 161);
+    }
+
+    internal void ApplyRoutingStatus(
+        string label,
+        Color accent,
+        string detail,
+        int? logicalWidth = null)
+    {
+        _label = label.ToUpperInvariant();
+        _accent = accent;
+        Text = _label;
+        AccessibleName = string.Equals(label, "LOCAL-ONLY MODE", StringComparison.OrdinalIgnoreCase)
+            ? "Local-only mode"
+            : label;
+        AccessibleDescription = detail;
+        _fill = Color.FromArgb(24, accent);
+        _border = Color.FromArgb(190, accent);
+        SetRoutingSize(logicalWidth);
+        Invalidate();
+    }
+
+    private void SetRoutingSize(int? logicalWidth)
+    {
+        var scale = Math.Max(1, DeviceDpi) / 96d;
+        var font = ClipCordTheme.InterfaceFont(7.2f, FontStyle.Bold);
+        var measured = TextRenderer.MeasureText(
+            _label,
+            font,
+            Size.Empty,
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+        var width = logicalWidth is { } fixedWidth
+            ? Math.Max(1, (int)Math.Round(fixedWidth * scale))
+            : Math.Clamp(
+                measured.Width + (int)Math.Round(36 * scale),
+                (int)Math.Round(98 * scale),
+                (int)Math.Round(180 * scale));
+        var height = Math.Max(1, (int)Math.Round(25 * scale));
+        Size = new Size(width, height);
+        MinimumSize = new Size(width, height);
+    }
+
+    private void SetLogicalSize(int logicalWidth, int logicalHeight)
+    {
+        var scale = Math.Max(1, DeviceDpi) / 96d;
+        var size = new Size(
+            Math.Max(1, (int)Math.Round(logicalWidth * scale)),
+            Math.Max(1, (int)Math.Round(logicalHeight * scale)));
+        Size = size;
+        MinimumSize = size;
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)
@@ -1331,8 +1795,8 @@ internal sealed class HomeStatusPill : Control
         eventArgs.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
         using var path = RoundedPanel.CreateRoundedPath(bounds, Height / 2);
-        using var fill = new SolidBrush(ClipCordTheme.SurfaceSunken);
-        using var border = new Pen(ClipCordTheme.BorderDefault);
+        using var fill = new SolidBrush(_fill);
+        using var border = new Pen(_border);
         eventArgs.Graphics.FillPath(fill, path);
         eventArgs.Graphics.DrawPath(border, path);
         var dotSize = Math.Max(6, (int)Math.Round(7 * DeviceDpi / 96d));
@@ -1344,10 +1808,11 @@ internal sealed class HomeStatusPill : Control
         using var dotBrush = new SolidBrush(_accent);
         eventArgs.Graphics.FillEllipse(dotBrush, dot);
         var textBounds = new Rectangle(dot.Right + 7, 0, Math.Max(1, Width - dot.Right - 11), Height);
+        var labelFont = ClipCordTheme.InterfaceFont(7.2f, FontStyle.Bold);
         TextRenderer.DrawText(
             eventArgs.Graphics,
             _label,
-            ClipCordTheme.InterfaceFont(7.2f, FontStyle.Bold),
+            labelFont,
             textBounds,
             _accent,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
@@ -1357,6 +1822,14 @@ internal sealed class HomeStatusPill : Control
 
 internal sealed class HomeRouteArrow : Control
 {
+    private Color _accent = ClipCordTheme.Violet;
+
+    internal Color Accent
+    {
+        get => _accent;
+        set => _accent = value;
+    }
+
     internal HomeRouteArrow()
     {
         SetStyle(ControlStyles.SupportsTransparentBackColor, true);
@@ -1372,8 +1845,18 @@ internal sealed class HomeRouteArrow : Control
         var scale = Math.Max(1d, DeviceDpi / 96d);
         var diameter = Math.Min((int)Math.Round(38 * scale), Math.Min(Width, Height - (int)Math.Round(20 * scale)));
         var circle = new Rectangle((Width - diameter) / 2, Math.Max(0, (Height - diameter - 14) / 2), diameter, diameter);
-        using var fill = new SolidBrush(ClipCordTheme.VioletMuted);
-        using var outline = new Pen(ClipCordTheme.Violet, 1.2f);
+        using var fill = new SolidBrush(Color.FromArgb(36, _accent));
+        using var outline = new Pen(_accent, 1.2f);
+        using var connector = new Pen(Color.FromArgb(120, ClipCordTheme.BorderStrong), 1f);
+        var connectorY = circle.Top + circle.Height / 2;
+        if (circle.Left > 8)
+        {
+            eventArgs.Graphics.DrawLine(connector, 0, connectorY, circle.Left - 7, connectorY);
+        }
+        if (circle.Right + 7 < Width)
+        {
+            eventArgs.Graphics.DrawLine(connector, circle.Right + 7, connectorY, Width, connectorY);
+        }
         eventArgs.Graphics.FillEllipse(fill, circle);
         eventArgs.Graphics.DrawEllipse(outline, circle);
         var iconSide = Math.Max(1, (int)Math.Round(18 * scale));
@@ -1385,7 +1868,7 @@ internal sealed class HomeRouteArrow : Control
                 iconSide,
                 iconSide),
             FigmaIconAsset.ArrowRight,
-            Color.FromArgb(176, 128, 255));
+            _accent);
         var labelBounds = new Rectangle(0, circle.Bottom + 3, Width, Math.Max(1, Height - circle.Bottom - 3));
         TextRenderer.DrawText(
             eventArgs.Graphics,
@@ -1399,7 +1882,18 @@ internal sealed class HomeRouteArrow : Control
 
 internal sealed class HomeRouteDot : Control
 {
-    internal Color Accent { get; init; } = ClipCordTheme.Violet;
+    private Color _accent = ClipCordTheme.Violet;
+
+    internal Color Accent
+    {
+        get => _accent;
+        set
+        {
+            if (_accent == value) return;
+            _accent = value;
+            Invalidate();
+        }
+    }
 
     internal HomeRouteDot()
     {
@@ -1415,7 +1909,7 @@ internal sealed class HomeRouteDot : Control
     {
         base.OnPaint(eventArgs);
         var size = Math.Max(4, (int)Math.Round(6 * Math.Max(96, DeviceDpi) / 96d));
-        using var brush = new SolidBrush(Accent);
+        using var brush = new SolidBrush(_accent);
         eventArgs.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         eventArgs.Graphics.FillEllipse(brush, 0, Math.Max(0, (Height - size) / 2), size, size);
     }

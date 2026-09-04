@@ -4,6 +4,34 @@ All notable user-facing changes are documented here.
 
 ## Unreleased
 
+## 2.0.2 — 2026-09-04
+
+- Restore approved 24×24 optical framing for ClipCord's icon set and keep icons square in
+  stretched layouts.
+- Add nap3s to Credits & project as the Hash Slinging Slasher.
+
+## 2.0.1 — 2026-09-03
+
+- Let users change the ClipCord Capture folder while Routes are active. The handoff pauses Routes,
+  recovers and pins the selected folder, commits a crash-safe local authority update, and then
+  resumes processing without moving existing captures.
+- Keep a rejected Capture setting inside the app with a clear message instead of allowing the
+  underlying exception to escape into a Windows just-in-time debugging dialog.
+
+## 2.0.0 — 2026-09-02
+
+- Record gameplay directly with ClipCord Capture through Instant Replay or manual game-window
+  recording, with configurable quality, audio, optional Reaction Camera, and local silhouette
+  layouts.
+- Build durable Routes for ClipCord Capture, SteelSeries GG, NVIDIA, named watched folders, and
+  Xbox Game DVR sources, with local-library and named Discord destinations.
+- Migrate genuine ClipCord 1.x profiles into Routing without replaying old clips, while new
+  profiles begin with no automatic route and a guided first-route setup.
+- Keep capture, migration, route changes, watched-folder ingress, delivery, recovery, and local
+  filing behind crash-safe durable authority and fail-closed dependency checks.
+- Add accessible Capture and Routes experiences that remain usable at 100%, 150%, and 200%
+  Windows display scaling.
+
 ## 1.15.0 — 2026-08-21
 
 - Mark any archived clip as a Favorite from its Gallery thumbnail or player, then browse a pinned Favorites collection without moving, copying, or removing the clip from its game.

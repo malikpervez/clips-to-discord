@@ -1,11 +1,19 @@
 param(
     [Parameter(Mandatory = $true)][string]$InstallerPath,
     [Parameter(Mandatory = $true)][string]$PreviousInstallerPath,
-    [string]$ExpectedVersion = '1.15.0',
+    [string]$ExpectedVersion,
     [string]$PreviousVersion = '1.3.5'
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $ExpectedVersion) {
+    $ExpectedVersion = & (Join-Path $PSScriptRoot 'resolve-package-version.ps1') -Format Core
+}
+foreach ($version in @($ExpectedVersion, $PreviousVersion)) {
+    if ($version -notmatch '^\d+\.\d+\.\d+$') {
+        throw "Installer test versions must use major.minor.patch format: $version"
+    }
+}
 $installer = [IO.Path]::GetFullPath($InstallerPath)
 $previousInstaller = [IO.Path]::GetFullPath($PreviousInstallerPath)
 foreach ($path in @($installer, $previousInstaller)) {

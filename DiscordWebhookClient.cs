@@ -84,6 +84,31 @@ internal sealed class DiscordWebhookClient : IDisposable
         CancellationToken cancellationToken,
         Action<CompressionProgress>? reportCompression = null,
         bool completeStartedPosts = false)
+        => _ = await UploadWithCompressionForReceiptAsync(
+            webhookUrl,
+            filePath,
+            presentation,
+            compressionTargetMb,
+            uploaderName,
+            cancellationToken,
+            reportCompression,
+            completeStartedPosts);
+
+    /// <summary>
+    /// Performs the same upload as the legacy API and returns Discord's message id when the
+    /// wait=true response contains one. A successful response without a usable receipt remains a
+    /// successful legacy upload; routing is responsible for treating the null receipt as an
+    /// ambiguous started side effect rather than retrying it.
+    /// </summary>
+    internal async Task<DiscordUploadReceipt?> UploadWithCompressionForReceiptAsync(
+        string webhookUrl,
+        string filePath,
+        DiscordUploadPresentation presentation,
+        int compressionTargetMb,
+        string uploaderName,
+        CancellationToken cancellationToken,
+        Action<CompressionProgress>? reportCompression = null,
+        bool completeStartedPosts = false)
     {
         ArgumentNullException.ThrowIfNull(presentation);
         var displayFileName = Path.GetFileName(presentation.DisplayFileName);
@@ -103,7 +128,7 @@ internal sealed class DiscordWebhookClient : IDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await UploadOnceAsync(
+            return await UploadOnceAsync(
                 webhookUrl,
                 filePath,
                 displayFileName,
@@ -168,14 +193,13 @@ internal sealed class DiscordWebhookClient : IDisposable
                         compressedBytes));
 
                     cancellationToken.ThrowIfCancellationRequested();
-                    await UploadOnceAsync(
+                    return await UploadOnceAsync(
                         webhookUrl,
                         compressedPath,
                         displayFileName,
                         message,
                         description,
                         completeStartedPosts ? CancellationToken.None : cancellationToken);
-                    return;
                 }
                 catch (DiscordUploadException compressedException) when (compressedException.IsTooLarge)
                 {
@@ -219,7 +243,7 @@ internal sealed class DiscordWebhookClient : IDisposable
         return FormattableString.Invariant(message);
     }
 
-    private async Task UploadOnceAsync(
+    private async Task<DiscordUploadReceipt?> UploadOnceAsync(
         string webhookUrl,
         string filePath,
         string originalName,
@@ -258,6 +282,32 @@ internal sealed class DiscordWebhookClient : IDisposable
             throw new DiscordUploadException(
                 $"Discord returned HTTP {(int)response.StatusCode}: {response.ResponseText}",
                 tooLarge);
+        }
+
+        return TryParseUploadReceipt(response.ResponseText);
+    }
+
+    internal static DiscordUploadReceipt? TryParseUploadReceipt(string responseText)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("id", out var idElement) ||
+                idElement.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            var messageId = idElement.GetString();
+            return messageId is { Length: > 0 and <= 32 } &&
+                   messageId.All(char.IsAsciiDigit)
+                ? new DiscordUploadReceipt(messageId)
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
@@ -378,6 +428,11 @@ internal sealed record DiscordUploadPresentation(
     string DisplayFileName,
     string GameName,
     string? Note);
+
+internal sealed record DiscordUploadReceipt(string MessageId)
+{
+    internal string Reference => $"discord:{MessageId}";
+}
 
 internal sealed class DiscordUploadException(string message, bool isTooLarge) : Exception(message)
 {

@@ -6,6 +6,7 @@ internal sealed class DiscordAwareController : IDisposable
     private readonly Func<bool> _isDiscordRunning;
     private readonly Func<AppSettings, Action<string>, CancellationToken, Task> _runWatcher;
     private readonly DiscordControllerOptions _options;
+    private readonly ClipProcessingOwnershipLease _processingOwnership;
     private readonly Task _loop;
     private int _disposeStarted;
     private int _cleanupStarted;
@@ -13,6 +14,7 @@ internal sealed class DiscordAwareController : IDisposable
     public DiscordAwareController(
         AppSettings settings,
         Action<string> reportStatus,
+        ClipProcessingOwnershipLease processingOwnership,
         ActivityHistoryStore? activityHistory = null,
         IFavoritesService? favorites = null)
         : this(
@@ -25,7 +27,8 @@ internal sealed class DiscordAwareController : IDisposable
                     status,
                     activityHistory: activityHistory,
                     favorites: favorites).RunAsync(cancellationToken),
-            DiscordControllerOptions.Default)
+            DiscordControllerOptions.Default,
+            processingOwnership)
     {
     }
 
@@ -34,7 +37,8 @@ internal sealed class DiscordAwareController : IDisposable
         Action<string> reportStatus,
         Func<bool> isDiscordRunning,
         Func<AppSettings, Action<string>, CancellationToken, Task> runWatcher,
-        DiscordControllerOptions options)
+        DiscordControllerOptions options,
+        ClipProcessingOwnershipLease processingOwnership)
     {
         if (options.AbsentPollThreshold < 1)
         {
@@ -44,7 +48,25 @@ internal sealed class DiscordAwareController : IDisposable
         _isDiscordRunning = isDiscordRunning;
         _runWatcher = runWatcher;
         _options = options;
-        _loop = Task.Run(() => RunAsync(settings, reportStatus));
+        ArgumentNullException.ThrowIfNull(processingOwnership);
+        if (processingOwnership.Owner != ClipProcessingRuntimeOwner.Legacy ||
+            !processingOwnership.IsCurrent ||
+            !processingOwnership.TryReissue(out var controllerOwnership) ||
+            controllerOwnership is null)
+        {
+            throw new InvalidOperationException(
+                "The legacy watcher does not own the clip-processing pipeline.");
+        }
+        _processingOwnership = controllerOwnership;
+        try
+        {
+            _loop = Task.Run(() => RunAsync(settings, reportStatus));
+        }
+        catch
+        {
+            _processingOwnership.Dispose();
+            throw;
+        }
     }
 
     private async Task RunAsync(AppSettings currentSettings, Action<string> status)
@@ -220,6 +242,7 @@ internal sealed class DiscordAwareController : IDisposable
         if (Interlocked.Exchange(ref _cleanupStarted, 1) == 0)
         {
             _shutdown.Dispose();
+            _processingOwnership?.Dispose();
         }
     }
 }

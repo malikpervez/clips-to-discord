@@ -7,6 +7,8 @@ internal enum ModeFeedbackTone
 {
     UploadsEnabled,
     LocalOnlyEnabled,
+    CaptureRecording,
+    CaptureSaved,
     Info,
     Warning,
     Error
@@ -20,13 +22,24 @@ internal readonly record struct ModeFeedbackPresentation(
     internal static ModeFeedbackPresentation ForUploadMode(bool uploadToDiscord) =>
         uploadToDiscord
             ? new(
-                "DISCORD UPLOADS ON",
-                "New clips will be sent automatically.",
+                "Discord uploads on",
+                "New clips upload automatically.",
                 ModeFeedbackTone.UploadsEnabled)
             : new(
-                "LOCAL ONLY ON",
-                "New clips will stay on this PC.",
+                "Local only on",
+                "New clips stay on this PC.",
                 ModeFeedbackTone.LocalOnlyEnabled);
+
+    internal static ModeFeedbackPresentation ForRoutingLocalOnlyMode(bool enabled) =>
+        enabled
+            ? new(
+                "Local-only mode on",
+                "Future clips will stay on this PC. Existing deliveries are unchanged.",
+                ModeFeedbackTone.LocalOnlyEnabled)
+            : new(
+                "Normal routing restored",
+                "Future clips will follow your active Routes.",
+                ModeFeedbackTone.UploadsEnabled);
 
     internal static ModeFeedbackPresentation DialogOpen => new(
         "Mode unchanged",
@@ -40,12 +53,37 @@ internal readonly record struct ModeFeedbackPresentation(
 
     internal static ModeFeedbackPresentation DiscordSetupRequired => new(
         "Discord setup required",
-        "Add a valid Discord webhook in Settings before enabling uploads.",
+        "Add a webhook in Settings first.",
         ModeFeedbackTone.Warning);
 
     internal static ModeFeedbackPresentation SaveFailed => new(
         "Could not change upload mode",
         "ClipCord could not save the upload-mode setting.",
+        ModeFeedbackTone.Error);
+
+    internal static ModeFeedbackPresentation CaptureStarted => new(
+        "Recording",
+        "Capturing your game window.",
+        ModeFeedbackTone.CaptureRecording);
+
+    internal static ModeFeedbackPresentation ForCapturedClip(
+        string? gameName,
+        TimeSpan duration)
+    {
+        var safeGameName = string.IsNullOrWhiteSpace(gameName)
+            ? "ClipCord"
+            : gameName.Trim();
+        var totalSeconds = Math.Max(0, (int)Math.Round(duration.TotalSeconds));
+        var formattedDuration = $"{totalSeconds / 60}:{totalSeconds % 60:00}";
+        return new(
+            "Clip captured",
+            $"{safeGameName} · {formattedDuration}",
+            ModeFeedbackTone.CaptureSaved);
+    }
+
+    internal static ModeFeedbackPresentation CaptureFailed => new(
+        "Recording stopped",
+        "That recording could not be finished.",
         ModeFeedbackTone.Error);
 }
 
@@ -66,14 +104,17 @@ internal sealed class ModeFeedbackOverlay : Form
     private static readonly IntPtr HwndTopmost = new(-1);
 
     private readonly System.Windows.Forms.Timer _dismissTimer;
+    private readonly System.Windows.Forms.Timer _progressTimer;
     private ModeFeedbackPresentation _presentation;
     private int _presentationDpi = 96;
+    private long _shownAtTimestamp;
+    private float _remainingFraction = 1f;
     private bool _disposed;
 
     internal ModeFeedbackOverlay()
     {
         AutoScaleMode = AutoScaleMode.None;
-        BackColor = ClipCordTheme.Header;
+        BackColor = ClipCordTheme.SurfaceRaised;
         DoubleBuffered = true;
         FormBorderStyle = FormBorderStyle.None;
         MaximizeBox = false;
@@ -82,9 +123,9 @@ internal sealed class ModeFeedbackOverlay : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
-        Opacity = 0.97d;
-        Text = "ClipCord mode changed";
-        AccessibleName = "ClipCord upload mode changed";
+        Opacity = 1d;
+        Text = "ClipCord notification";
+        AccessibleName = "ClipCord notification";
         SetStyle(ControlStyles.Selectable, false);
 
         _dismissTimer = new System.Windows.Forms.Timer
@@ -92,6 +133,8 @@ internal sealed class ModeFeedbackOverlay : Form
             Interval = DisplayDurationMilliseconds
         };
         _dismissTimer.Tick += DismissTimerTick;
+        _progressTimer = new System.Windows.Forms.Timer { Interval = 16 };
+        _progressTimer.Tick += ProgressTimerTick;
 
         // Establish thread ownership before any background caller can reach
         // ShowFeedback. InvokeRequired is unreliable while a control has no handle.
@@ -127,6 +170,9 @@ internal sealed class ModeFeedbackOverlay : Form
         }
 
         _presentation = presentation;
+        AccessibleName = $"{presentation.Title}. {presentation.Detail}";
+        _shownAtTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        _remainingFraction = 1f;
         var foreground = GetForegroundWindow();
         var screen = foreground != IntPtr.Zero
             ? Screen.FromHandle(foreground)
@@ -145,6 +191,8 @@ internal sealed class ModeFeedbackOverlay : Form
 
         _dismissTimer.Stop();
         _dismissTimer.Start();
+        _progressTimer.Stop();
+        _progressTimer.Start();
     }
 
     internal void ApplyPresentation(
@@ -163,8 +211,8 @@ internal sealed class ModeFeedbackOverlay : Form
     {
         var scale = Math.Clamp(dpi, 96, 384) / 96d;
         var edge = Math.Max(8, (int)Math.Round(18 * scale));
-        var desiredWidth = (int)Math.Round(430 * scale);
-        var desiredHeight = (int)Math.Round(104 * scale);
+        var desiredWidth = (int)Math.Round(384 * scale);
+        var desiredHeight = (int)Math.Round(74 * scale);
         var width = Math.Max(1, Math.Min(desiredWidth, workingArea.Width - edge * 2));
         var height = Math.Max(1, Math.Min(desiredHeight, workingArea.Height - edge * 2));
         var left = workingArea.Left + Math.Max(0, (workingArea.Width - width) / 2);
@@ -188,93 +236,127 @@ internal sealed class ModeFeedbackOverlay : Form
             ? SystemColors.Highlight
             : GetAccentColor(_presentation.Tone);
 
-        using (var surfacePath = RoundedPanel.CreateRoundedPath(bounds, Math.Max(12, (int)Math.Round(18 * scale))))
-        using (var surface = new LinearGradientBrush(
-                   bounds,
-                   ClipCordTheme.Header,
-                   Color.FromArgb(23, 31, 49),
-                   LinearGradientMode.Horizontal))
-        using (var border = new Pen(Color.FromArgb(84, accent), Math.Max(1f, scale)))
+        using (var surfacePath = RoundedPanel.CreateRoundedPath(bounds, ScalePixels(14)))
+        using (var surface = new SolidBrush(highContrast
+                   ? SystemColors.Window
+                   : ClipCordTheme.SurfaceRaised))
+        using (var border = new Pen(highContrast
+                   ? SystemColors.WindowText
+                   : ClipCordTheme.BorderDefault, Math.Max(1f, scale)))
         {
             graphics.FillPath(surface, surfacePath);
             graphics.DrawPath(border, surfacePath);
         }
 
-        var accentWidth = Math.Max(4, (int)Math.Round(5 * scale));
-        using (var accentBrush = new SolidBrush(accent))
+        int textLeft;
+        if (_presentation.Tone == ModeFeedbackTone.CaptureSaved)
         {
-            graphics.FillRectangle(accentBrush, 0, 0, accentWidth, Height);
-        }
-
-        var tileSize = Math.Max(44, (int)Math.Round(62 * scale));
-        var tile = new Rectangle(
-            Math.Max(14, (int)Math.Round(18 * scale)),
-            Math.Max(10, (Height - tileSize) / 2),
-            tileSize,
-            tileSize);
-        using (var tilePath = RoundedPanel.CreateRoundedPath(tile, Math.Max(10, (int)Math.Round(14 * scale))))
-        using (var tileBrush = new LinearGradientBrush(
-                   tile,
-                   accent,
-                   highContrast
-                       ? accent
-                       : Color.FromArgb(
-                           Math.Min(255, accent.R + 22),
-                           Math.Min(255, accent.G + 18),
-                           Math.Min(255, accent.B + 22)),
-                   45f))
-        {
-            graphics.FillPath(tileBrush, tilePath);
-        }
-        var glyph = GetGlyph(_presentation.Tone);
-        var glyphColor = highContrast ? SystemColors.HighlightText : Color.White;
-        if (glyph == BrandGlyph.DiscordDestination)
-        {
-            // Feature artwork already carries its own normalized inset. Give the
-            // detailed Discord mark more of the notification tile so its eyes,
-            // smile, and silhouette remain legible at 100% display scaling.
-            BrandGlyphControl.DrawFeatureGlyph(
+            var frameGrab = new Rectangle(
+                ScalePixels(14),
+                ScalePixels(15),
+                ScalePixels(80),
+                ScalePixels(45));
+            using (var framePath = RoundedPanel.CreateRoundedPath(frameGrab, ScalePixels(8)))
+            using (var frameBrush = new LinearGradientBrush(
+                       frameGrab,
+                       Color.FromArgb(36, 52, 83),
+                       Color.FromArgb(17, 28, 46),
+                       LinearGradientMode.Vertical))
+            using (var frameBorder = new Pen(ClipCordTheme.BorderDefault, Math.Max(1f, scale)))
+            {
+                graphics.FillPath(frameBrush, framePath);
+                graphics.DrawPath(frameBorder, framePath);
+            }
+            var filmSize = ScalePixels(18);
+            FigmaIconRenderer.Draw(
                 graphics,
-                Rectangle.Inflate(tile, -(int)Math.Round(8 * scale), -(int)Math.Round(8 * scale)),
-                glyph,
-                glyphColor);
+                new Rectangle(
+                    frameGrab.Left + (frameGrab.Width - filmSize) / 2,
+                    frameGrab.Top + (frameGrab.Height - filmSize) / 2,
+                    filmSize,
+                    filmSize),
+                FigmaIconAsset.Film,
+                ClipCordTheme.TextTertiary,
+                opacity: .75f);
+
+            var badgeSize = ScalePixels(18);
+            var badge = new Rectangle(
+                frameGrab.Left + ScalePixels(65),
+                frameGrab.Top + ScalePixels(30),
+                badgeSize,
+                badgeSize);
+            using (var badgeBrush = new SolidBrush(accent))
+            using (var badgeBorder = new Pen(ClipCordTheme.SurfaceRaised, Math.Max(2f, 2f * scale)))
+            {
+                graphics.FillEllipse(badgeBrush, badge);
+                graphics.DrawEllipse(badgeBorder, badge);
+            }
+            FigmaIconRenderer.Draw(
+                graphics,
+                Rectangle.Inflate(badge, -ScalePixels(3), -ScalePixels(3)),
+                FigmaIconAsset.Check,
+                Color.FromArgb(10, 18, 32));
+            textLeft = frameGrab.Right + ScalePixels(14);
         }
         else
         {
-            BrandGlyphControl.DrawGlyph(
+            var tile = new Rectangle(
+                ScalePixels(14),
+                ScalePixels(15),
+                ScalePixels(44),
+                ScalePixels(44));
+            var (tileSurface, tileBorder) = GetTileColors(_presentation.Tone, highContrast);
+            using (var tilePath = RoundedPanel.CreateRoundedPath(tile, ScalePixels(12)))
+            using (var tileBrush = new SolidBrush(tileSurface))
+            using (var tilePen = new Pen(tileBorder, Math.Max(1f, scale)))
+            {
+                graphics.FillPath(tileBrush, tilePath);
+                graphics.DrawPath(tilePen, tilePath);
+            }
+
+            var iconBounds = Rectangle.Inflate(tile, -ScalePixels(10), -ScalePixels(10));
+            var glyphColor = highContrast ? SystemColors.HighlightText : accent;
+            FigmaIconRenderer.Draw(
                 graphics,
-                Rectangle.Inflate(tile, -(int)Math.Round(14 * scale), -(int)Math.Round(14 * scale)),
-                glyph,
-                glyphColor,
-                Math.Max(1.8f, 2.1f * scale));
+                iconBounds,
+                GetIconAsset(_presentation.Tone),
+                glyphColor);
+            textLeft = tile.Right + ScalePixels(14);
         }
 
-        var textLeft = tile.Right + Math.Max(14, (int)Math.Round(18 * scale));
-        var textRight = Width - Math.Max(16, (int)Math.Round(20 * scale));
-        var titleTop = Math.Max(10, (int)Math.Round(23 * scale));
-        var titleHeight = Math.Max(24, (int)Math.Round(28 * scale));
-        using var titleFont = CreatePixelFont(Math.Max(16, 18 * scale), FontStyle.Bold);
-        using var detailFont = CreatePixelFont(Math.Max(12, 13 * scale), FontStyle.Regular);
+        var textRight = Width - ScalePixels(16);
+        using var titleFont = CreatePixelFont(16 * scale, FontStyle.Bold);
+        using var detailFont = CreatePixelFont(13 * scale, FontStyle.Regular);
         TextRenderer.DrawText(
             graphics,
             _presentation.Title,
             titleFont,
-            new Rectangle(textLeft, titleTop, Math.Max(1, textRight - textLeft), titleHeight),
+            new Rectangle(textLeft, ScalePixels(15), Math.Max(1, textRight - textLeft), ScalePixels(21)),
             ClipCordTheme.ShellText,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
+            TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis |
             TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
         TextRenderer.DrawText(
             graphics,
             _presentation.Detail,
             detailFont,
-            new Rectangle(
-                textLeft,
-                titleTop + titleHeight,
-                Math.Max(1, textRight - textLeft),
-                Math.Max(20, Height - titleTop - titleHeight - (int)Math.Round(13 * scale))),
+            new Rectangle(textLeft, ScalePixels(39), Math.Max(1, textRight - textLeft), ScalePixels(18)),
             ClipCordTheme.ShellMutedText,
             TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis |
-            TextFormatFlags.NoPadding | TextFormatFlags.WordBreak);
+            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+
+        var timerHeight = ScalePixels(3);
+        var timerTop = Height - timerHeight;
+        using (var trackBrush = new SolidBrush(Color.FromArgb(140, ClipCordTheme.BorderDefault)))
+        using (var remainingBrush = new SolidBrush(accent))
+        {
+            graphics.FillRectangle(trackBrush, 0, timerTop, Width, timerHeight);
+            graphics.FillRectangle(
+                remainingBrush,
+                0,
+                timerTop,
+                Math.Clamp((int)Math.Round(Width * _remainingFraction), 0, Width),
+                timerHeight);
+        }
     }
 
     protected override void OnResize(EventArgs eventArgs)
@@ -301,7 +383,20 @@ internal sealed class ModeFeedbackOverlay : Form
     private void DismissTimerTick(object? sender, EventArgs eventArgs)
     {
         _dismissTimer.Stop();
+        _progressTimer.Stop();
+        _remainingFraction = 0f;
         Hide();
+    }
+
+    private void ProgressTimerTick(object? sender, EventArgs eventArgs)
+    {
+        var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(_shownAtTimestamp);
+        _remainingFraction = Math.Clamp(
+            1f - (float)(elapsed.TotalMilliseconds / DisplayDurationMilliseconds),
+            0f,
+            1f);
+        Invalidate(new Rectangle(0, Math.Max(0, Height - ScalePixels(4)), Width, ScalePixels(4)));
+        if (_remainingFraction <= 0f) _progressTimer.Stop();
     }
 
     private void UpdateWindowRegion()
@@ -309,7 +404,7 @@ internal sealed class ModeFeedbackOverlay : Form
         if (Width <= 1 || Height <= 1) return;
         using var path = RoundedPanel.CreateRoundedPath(
             new Rectangle(0, 0, Width - 1, Height - 1),
-            Math.Max(12, (int)Math.Round(18 * Math.Clamp(_presentationDpi, 96, 384) / 96d)));
+            ScalePixels(14));
         var replacement = new Region(path);
         var previous = Region;
         Region = replacement;
@@ -320,19 +415,41 @@ internal sealed class ModeFeedbackOverlay : Form
     {
         ModeFeedbackTone.UploadsEnabled => ClipCordTheme.Violet,
         ModeFeedbackTone.LocalOnlyEnabled => ClipCordTheme.Coral,
-        ModeFeedbackTone.Warning => Color.FromArgb(245, 174, 66),
+        ModeFeedbackTone.CaptureRecording => ClipCordTheme.Coral,
+        ModeFeedbackTone.CaptureSaved => Color.FromArgb(49, 177, 113),
+        ModeFeedbackTone.Warning => Color.FromArgb(224, 151, 54),
         ModeFeedbackTone.Error => ClipCordTheme.Coral,
         _ => ClipCordTheme.Violet
     };
 
-    internal static BrandGlyph GetGlyph(ModeFeedbackTone tone) => tone switch
+    internal static FigmaIconAsset GetIconAsset(ModeFeedbackTone tone) => tone switch
     {
-        ModeFeedbackTone.UploadsEnabled => BrandGlyph.DiscordDestination,
-        ModeFeedbackTone.LocalOnlyEnabled => BrandGlyph.Shield,
-        ModeFeedbackTone.Error => BrandGlyph.Close,
-        ModeFeedbackTone.Warning => BrandGlyph.About,
-        _ => BrandGlyph.Activity
+        ModeFeedbackTone.UploadsEnabled => FigmaIconAsset.Discord,
+        ModeFeedbackTone.LocalOnlyEnabled => FigmaIconAsset.Shield,
+        ModeFeedbackTone.CaptureRecording => FigmaIconAsset.Capture,
+        ModeFeedbackTone.CaptureSaved => FigmaIconAsset.Film,
+        ModeFeedbackTone.Error or ModeFeedbackTone.Warning => FigmaIconAsset.Alert,
+        _ => FigmaIconAsset.Activity
     };
+
+    private static (Color Surface, Color Border) GetTileColors(
+        ModeFeedbackTone tone,
+        bool highContrast)
+    {
+        if (highContrast) return (SystemColors.Highlight, SystemColors.HighlightText);
+        return tone switch
+        {
+            ModeFeedbackTone.UploadsEnabled or ModeFeedbackTone.Info =>
+                (Color.FromArgb(48, 42, 74), Color.FromArgb(62, 42, 121)),
+            ModeFeedbackTone.Warning =>
+                (Color.FromArgb(58, 53, 50), Color.FromArgb(92, 73, 51)),
+            _ => (Color.FromArgb(57, 37, 53), Color.FromArgb(92, 44, 56))
+        };
+    }
+
+    private int ScalePixels(int logicalPixels) => Math.Max(
+        1,
+        (int)Math.Round(logicalPixels * Math.Clamp(_presentationDpi, 96, 384) / 96d));
 
     private static Font CreatePixelFont(float pixels, FontStyle style)
     {
@@ -365,6 +482,9 @@ internal sealed class ModeFeedbackOverlay : Form
             _dismissTimer.Stop();
             _dismissTimer.Tick -= DismissTimerTick;
             _dismissTimer.Dispose();
+            _progressTimer.Stop();
+            _progressTimer.Tick -= ProgressTimerTick;
+            _progressTimer.Dispose();
         }
         base.Dispose(disposing);
     }

@@ -59,6 +59,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Files]
 Source: "{#PackageDir}\ClipsToDiscord.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\models\modnet-photographic.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
+Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#PackageDir}\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#PackageDir}\FFMPEG-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 

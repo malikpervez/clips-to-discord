@@ -14,9 +14,12 @@ internal enum FigmaIconAsset
     Home,
     Settings,
     Activity,
+    Capture,
+    Routes,
     Gallery,
     About,
     Folder,
+    Connection,
     ArrowRight,
     Upload,
     Clock,
@@ -32,7 +35,26 @@ internal enum FigmaIconAsset
     Bolt,
     Check,
     Heart,
-    HeartFill
+    HeartFill,
+    Speaker,
+    Mic,
+    Headset,
+    Camera,
+    Disk,
+    Landscape,
+    Portrait,
+    Silhouette,
+    Mirror,
+    Move,
+    Crop,
+    Layers,
+    Mute,
+    SafeZone,
+    ChevronLeft,
+    Alert,
+    Discord,
+    YouTube,
+    TikTok
 }
 
 internal static class FigmaIconRenderer
@@ -48,6 +70,8 @@ internal static class FigmaIconRenderer
             BrandGlyph.Home => FigmaIconAsset.Home,
             BrandGlyph.Settings => FigmaIconAsset.Settings,
             BrandGlyph.Activity => FigmaIconAsset.Activity,
+            BrandGlyph.Capture => FigmaIconAsset.Capture,
+            BrandGlyph.Routes => FigmaIconAsset.Routes,
             BrandGlyph.Gallery => FigmaIconAsset.Gallery,
             BrandGlyph.About => FigmaIconAsset.About,
             BrandGlyph.Folder or BrandGlyph.FolderOpen => FigmaIconAsset.Folder,
@@ -70,7 +94,8 @@ internal static class FigmaIconRenderer
             BrandGlyph.Check => FigmaIconAsset.Check,
             _ => default
         };
-        return glyph is BrandGlyph.Home or BrandGlyph.Settings or BrandGlyph.Activity or
+        return glyph is BrandGlyph.Home or BrandGlyph.Settings or BrandGlyph.Activity or BrandGlyph.Capture or
+            BrandGlyph.Routes or
             BrandGlyph.Gallery or BrandGlyph.About or BrandGlyph.Folder or BrandGlyph.FolderOpen or
             BrandGlyph.Shield or BrandGlyph.AppStatus or
             BrandGlyph.Diagnostics or BrandGlyph.Credits or BrandGlyph.FileText or
@@ -91,6 +116,12 @@ internal static class FigmaIconRenderer
         if (bounds.Width <= 0 || bounds.Height <= 0 || opacity <= 0f) return;
 
         var image = GetImage(asset);
+        var iconSize = Math.Min(bounds.Width, bounds.Height);
+        var destination = new Rectangle(
+            bounds.X + ((bounds.Width - iconSize) / 2),
+            bounds.Y + ((bounds.Height - iconSize) / 2),
+            iconSize,
+            iconSize);
         var state = graphics.Save();
         try
         {
@@ -106,9 +137,10 @@ internal static class FigmaIconRenderer
                 [color.R / 255f, color.G / 255f, color.B / 255f, 0f, 1f]
             ]);
             attributes.SetColorMatrix(matrix, ColorMatrixFlag.Default, ColorAdjustType.Bitmap);
+            attributes.SetWrapMode(WrapMode.TileFlipXY);
             graphics.DrawImage(
                 image,
-                bounds,
+                destination,
                 0,
                 0,
                 image.Width,
@@ -141,6 +173,7 @@ internal static class FigmaIconRenderer
         var fileName = asset switch
         {
             FigmaIconAsset.ArrowRight => "arrow-right",
+            FigmaIconAsset.ChevronLeft => "chevron-left",
             FigmaIconAsset.ChevronRight => "chevron-right",
             _ => asset.ToString().ToLowerInvariant()
         };
@@ -194,7 +227,12 @@ internal sealed class FigmaIconControl : Control
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         base.OnPaint(eventArgs);
-        if (Width <= 0 || Height <= 0) return;
-        FigmaIconRenderer.Draw(eventArgs.Graphics, ClientRectangle, Asset, IconColor);
+        var bounds = new Rectangle(
+            Padding.Left,
+            Padding.Top,
+            Math.Max(0, ClientSize.Width - Padding.Horizontal),
+            Math.Max(0, ClientSize.Height - Padding.Vertical));
+        if (bounds.Width <= 0 || bounds.Height <= 0) return;
+        FigmaIconRenderer.Draw(eventArgs.Graphics, bounds, Asset, IconColor);
     }
 }
